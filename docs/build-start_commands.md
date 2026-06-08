@@ -228,6 +228,19 @@ chmod +x start.sh stop.sh
 ./start.sh
 ```
 
+daemon 以 WS 启动 Host：
+
+```bash
+./start.sh --mode ws
+```
+
+等价写法：
+
+```bash
+./start.sh --mode insecure
+./start.sh --mode 0
+```
+
 停止 daemon Host：
 
 ```bash
@@ -237,10 +250,29 @@ chmod +x start.sh stop.sh
 启用 WSS Host：
 
 ```bash
-export SECURECHAT_SIGNALING_TLS=1
+./start.sh --mode wss
+```
+
+等价写法：
+
+```bash
+./start.sh --mode secure
+./start.sh --mode 1
+```
+
+`--mode wss` 默认使用项目内证书：
+
+```text
+certs/fullchain.pem
+certs/privkey.pem
+```
+
+如需使用其他证书路径，可以在启动前覆盖：
+
+```bash
 export SECURECHAT_TLS_CERT_FILE=certs/fullchain.pem
 export SECURECHAT_TLS_KEY_FILE=certs/privkey.pem
-./start.sh
+./start.sh --mode wss
 ```
 
 WSS Client：
@@ -322,3 +354,4 @@ dotnet app/web/bin/Release/net10.0/linux-x64/SecureChat.Web.dll --urls http://12
 - Linux 没有 WinUI Chat 构建路径；`app/chat` 是 Windows WinUI。
 - Windows Web 和 Linux Web 都依赖 C++ native 输出，所以 Web 构建前必须先完成对应平台的 C++ 构建。
 - `ws://` 是 insecure mode，配置简单但信令明文；公网安全连接应使用 `wss://` secure mode。
+- `./stop.sh` 会清理脚本进程内的 SecureChat 运行时环境变量，包括 room、port、log、ICE、密码和 TLS 相关变量。普通 `./stop.sh` 不能修改父 shell 中已经 `export` 的变量；如果确实要清理当前 SSH 窗口，可执行 `source ./stop.sh` 或手动 `unset`。

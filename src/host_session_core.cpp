@@ -114,6 +114,10 @@ bool HostSessionCore::shouldStop() const {
 // Parses one host input line and sends chat, commands, or attachments.
 void HostSessionCore::sendLine(const std::string& line) {
     if (line.empty()) return;
+    if (line.rfind("/image ", 0) == 0 || line.rfind("/img ", 0) == 0) {
+        sendImage(trimCopy(line.substr(line.find(' ') + 1)));
+        return;
+    }
     if (line.rfind("/file ", 0) == 0) {
         sendTextFile(trimCopy(line.substr(line.find(' ') + 1)));
         return;

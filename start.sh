@@ -13,6 +13,15 @@ LOG_FILE="${SECURECHAT_LOG_FILE:-}"
 # Do not persist it unless diagnostics are explicitly requested.
 LOG_TARGET="${LOG_FILE:-/dev/null}"
 PASSWORD_SOURCE="prompt"
+MODE_OVERRIDE=""
+
+usage() {
+  echo "Usage: ./start.sh [--mode ws|wss|insecure|secure|0|1]"
+  echo
+  echo "Modes:"
+  echo "  ws, insecure, 0   Start signaling without TLS."
+  echo "  wss, secure, 1    Start signaling with TLS, defaulting to certs/fullchain.pem and certs/privkey.pem."
+}
 
 show_log_hint() {
   if [[ -n "${LOG_FILE}" ]]; then
@@ -22,6 +31,58 @@ show_log_hint() {
     echo "Log: disabled by default; set SECURECHAT_LOG_FILE=host.log to save diagnostics."
   fi
 }
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --mode)
+      if [[ $# -lt 2 ]]; then
+        echo "ERROR: --mode requires ws, wss, insecure, secure, 0, or 1."
+        usage
+        exit 1
+      fi
+      MODE_OVERRIDE="$2"
+      shift 2
+      ;;
+    --mode=*)
+      MODE_OVERRIDE="${1#--mode=}"
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "ERROR: unknown argument: $1"
+      usage
+      exit 1
+      ;;
+  esac
+done
+
+if [[ -n "${MODE_OVERRIDE}" ]]; then
+  case "${MODE_OVERRIDE,,}" in
+    0|ws|insecure)
+      # In insecure mode, remove every TLS-related value so a previous shell
+      # export cannot accidentally make this Host start as WSS.
+      unset SECURECHAT_SIGNALING_TLS
+      unset SECURECHAT_TLS_CERT_FILE
+      unset SECURECHAT_TLS_KEY_FILE
+      unset SECURECHAT_TLS_KEY_PASS
+      ;;
+    1|wss|secure)
+      # WSS is the public deployment default. The project certs/ paths match
+      # docs/certificate_methods.md and can still be overridden by environment.
+      export SECURECHAT_SIGNALING_TLS=1
+      export SECURECHAT_TLS_CERT_FILE="${SECURECHAT_TLS_CERT_FILE:-certs/fullchain.pem}"
+      export SECURECHAT_TLS_KEY_FILE="${SECURECHAT_TLS_KEY_FILE:-certs/privkey.pem}"
+      ;;
+    *)
+      echo "ERROR: unsupported --mode value: ${MODE_OVERRIDE}"
+      usage
+      exit 1
+      ;;
+  esac
+fi
 
 if [[ -n "${SECURECHAT_ROOM_PASSWORD:-}" ]]; then
   PASSWORD_SOURCE="environment"

@@ -19,8 +19,9 @@ app/**/obj/
 app/**/uploads/
 *.log
 
-# Local plans
+# Local Files
 todolist.md
+artifacts/
 
 # Secret Certs
 certs/
