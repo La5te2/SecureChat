@@ -65,15 +65,15 @@ WS mode 是默认值，便于保留本地和无证书环境的简单用法，但
 
 ```bash
 export SECURECHAT_SIGNALING_TLS=1
-export SECURECHAT_TLS_CERT_FILE=/path/fullchain.pem
-export SECURECHAT_TLS_KEY_FILE=/path/privkey.pem
+export SECURECHAT_TLS_CERT_FILE=certs/fullchain.pem
+export SECURECHAT_TLS_KEY_FILE=certs/privkey.pem
 ./start.sh
 ```
 
 客户端随后使用：
 
 ```text
-wss://your-domain.example:25566
+wss://chat.la5te2.online:25566
 ```
 
 应使用与证书匹配的域名。像 `124.70.71.65` 这样的公网 IP 通常无法通过正常证书校验，除非证书明确覆盖该 IP。

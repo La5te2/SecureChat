@@ -43,8 +43,8 @@ out\build\x64-release\host.exe secure-room 25566 host
 
 ```bat
 set SECURECHAT_SIGNALING_TLS=1
-set SECURECHAT_TLS_CERT_FILE=C:\path\fullchain.pem
-set SECURECHAT_TLS_KEY_FILE=C:\path\privkey.pem
+set SECURECHAT_TLS_CERT_FILE=certs\fullchain.pem
+set SECURECHAT_TLS_KEY_FILE=certs\privkey.pem
 out\build\x64-release\host.exe secure-room 25566 host
 ```
 
@@ -99,13 +99,19 @@ WinUI Host 使用 WSS：
 
 1. 打开右侧设置面板。
 2. 打开 `WSS` 开关。
-3. 填写证书 PEM、私钥 PEM 和可选私钥密码。
+3. 填写证书 PEM、私钥 PEM 和可选私钥密码：
+
+```text
+Certificate PEM: D:\Programming\CyberSecurity\Lessons\Experiment\SecureChat\certs\fullchain.pem
+Private key PEM: D:\Programming\CyberSecurity\Lessons\Experiment\SecureChat\certs\privkey.pem
+```
+
 4. 回到 Host 页启动房间。
 
 Join 页连接 WSS 房间时，在 URL 中填写：
 
 ```text
-wss://your-domain.example:25566
+wss://chat.la5te2.online:25566
 ```
 
 ## Windows Web
@@ -143,13 +149,19 @@ Windows Web Host 使用 WSS：
 
 1. 打开浏览器中的 Host 面板。
 2. 打开 `WSS` 开关。
-3. 填写证书 PEM、私钥 PEM 和可选私钥密码。
+3. 填写证书 PEM、私钥 PEM 和可选私钥密码：
+
+```text
+Certificate PEM: D:\Programming\CyberSecurity\Lessons\Experiment\SecureChat\certs\fullchain.pem
+Private key PEM: D:\Programming\CyberSecurity\Lessons\Experiment\SecureChat\certs\privkey.pem
+```
+
 4. 点击 `Start Hosting`。
 
 Join 面板连接 WSS 房间时，在 URL 中填写：
 
 ```text
-wss://your-domain.example:25566
+wss://chat.la5te2.online:25566
 ```
 
 ## Linux C++
@@ -182,8 +194,8 @@ cmake --build out/build/x64-linux-release --config Release
 
 ```bash
 export SECURECHAT_SIGNALING_TLS=1
-export SECURECHAT_TLS_CERT_FILE=/path/fullchain.pem
-export SECURECHAT_TLS_KEY_FILE=/path/privkey.pem
+export SECURECHAT_TLS_CERT_FILE=certs/fullchain.pem
+export SECURECHAT_TLS_KEY_FILE=certs/privkey.pem
 ./out/build/x64-linux-release/host secure-room 25566 host
 ```
 
@@ -226,15 +238,15 @@ chmod +x start.sh stop.sh
 
 ```bash
 export SECURECHAT_SIGNALING_TLS=1
-export SECURECHAT_TLS_CERT_FILE=/path/fullchain.pem
-export SECURECHAT_TLS_KEY_FILE=/path/privkey.pem
+export SECURECHAT_TLS_CERT_FILE=certs/fullchain.pem
+export SECURECHAT_TLS_KEY_FILE=certs/privkey.pem
 ./start.sh
 ```
 
 WSS Client：
 
 ```bash
-./out/build/x64-linux-release/client wss://your-domain.example:25566 secure-room user1
+./out/build/x64-linux-release/client wss://chat.la5te2.online:25566 secure-room user1
 ```
 
 ## Linux Web
@@ -274,21 +286,27 @@ Linux Web Host 使用 WSS：
 
 1. 打开浏览器中的 Host 面板。
 2. 打开 `WSS` 开关。
-3. 填写证书 PEM、私钥 PEM 和可选私钥密码。
+3. 填写证书 PEM、私钥 PEM 和可选私钥密码：
+
+```text
+Certificate PEM: certs/fullchain.pem
+Private key PEM: certs/privkey.pem
+```
+
 4. 点击 `Start Hosting`。
 
 Join 面板连接 WSS 房间时，在 URL 中填写：
 
 ```text
-wss://your-domain.example:25566
+wss://chat.la5te2.online:25566
 ```
 
 如果不通过 Web UI 开关，而是在启动 Web 进程前固定使用 WSS，也可以先设置环境变量：
 
 ```bash
 export SECURECHAT_SIGNALING_TLS=1
-export SECURECHAT_TLS_CERT_FILE=/path/fullchain.pem
-export SECURECHAT_TLS_KEY_FILE=/path/privkey.pem
+export SECURECHAT_TLS_CERT_FILE=certs/fullchain.pem
+export SECURECHAT_TLS_KEY_FILE=certs/privkey.pem
 dotnet app/web/bin/Release/net10.0/linux-x64/SecureChat.Web.dll --urls http://127.0.0.1:5188
 ```
 
