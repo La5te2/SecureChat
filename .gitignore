@@ -21,3 +21,6 @@ app/**/uploads/
 
 # Local plans
 todolist.md
+
+# Secret Certs
+certs/
