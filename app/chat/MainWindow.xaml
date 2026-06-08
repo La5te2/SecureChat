@@ -1,0 +1,341 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Window
+    x:Class="chat.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Title="SecureChat">
+
+    <Grid x:Name="RootGrid" Background="{ThemeResource ApplicationPageBackgroundThemeBrush}">
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition x:Name="SidebarColumn" Width="260" />
+            <ColumnDefinition x:Name="SidebarResizeColumn" Width="10" />
+            <ColumnDefinition Width="*" />
+            <ColumnDefinition Width="50" />
+        </Grid.ColumnDefinitions>
+
+        <Border
+            x:Name="SidebarPanel"
+            Grid.Column="0"
+            Padding="18"
+            Background="{ThemeResource LayerFillColorDefaultBrush}"
+            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+            BorderThickness="0,0,1,0">
+            <ScrollViewer VerticalScrollBarVisibility="Auto" VerticalScrollMode="Enabled">
+                <StackPanel Spacing="14">
+                    <InfoBar
+                        x:Name="ConnectionInfo"
+                        IsOpen="False"
+                        IsClosable="True"
+                        Severity="Informational" />
+
+                    <Pivot x:Name="MainPivot" Margin="0,-15,0,0" SelectionChanged="MainPivot_SelectionChanged">
+                        <PivotItem x:Name="HostPivotItem" Header="Host">
+                            <StackPanel Spacing="10" Padding="0,12,0,0">
+                                <TextBox x:Name="HostRoomBox" Header="Room" Text="secure-room" />
+                                <TextBox x:Name="HostPortBox" Header="Port" Text="25566" />
+                                <TextBox x:Name="HostUserBox" Header="User" Text="host" />
+                                <PasswordBox x:Name="HostPasswordBox" Header="Password" />
+                                <Button x:Name="HostButton" Content="Start Hosting" Click="Host_Click" HorizontalAlignment="Stretch" />
+                            </StackPanel>
+                        </PivotItem>
+
+                        <PivotItem x:Name="JoinPivotItem" Header="Join">
+                            <StackPanel Spacing="10" Padding="0,12,0,0">
+                                <TextBox x:Name="JoinUrlBox" Header="URL" />
+                                <TextBox x:Name="JoinRoomBox" Header="Room" Text="secure-room" />
+                                <TextBox x:Name="JoinUserBox" Header="User" Text="client" />
+                                <PasswordBox x:Name="JoinPasswordBox" Header="Password" />
+                                <Button x:Name="DiscoverButton" Content="Find LAN Room" Click="Discover_Click" HorizontalAlignment="Stretch" />
+                                <Button x:Name="JoinButton" Content="Join Room" Click="Join_Click" HorizontalAlignment="Stretch" />
+                            </StackPanel>
+                        </PivotItem>
+
+                        <PivotItem x:Name="RoomPivotItem" Header="Room">
+                            <StackPanel Spacing="12" Padding="0,12,0,0">
+                                <TextBlock x:Name="RoomStatusHeaderText" Text="Room Status" FontWeight="SemiBold" />
+                                <Border
+                                    Padding="10"
+                                    Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                    BorderThickness="1"
+                                    CornerRadius="8">
+                                    <StackPanel Spacing="6">
+                                        <TextBlock x:Name="RoomModeText" Text="Mode: not connected" TextWrapping="Wrap" />
+                                        <TextBlock x:Name="RoomNameText" Text="Room: -" TextWrapping="Wrap" />
+                                    </StackPanel>
+                                </Border>
+                                <TextBlock x:Name="RoomParticipantsHeaderText" Text="Participants" FontWeight="SemiBold" />
+                                <StackPanel x:Name="RoomParticipantsPanel" Spacing="6" />
+                            </StackPanel>
+                        </PivotItem>
+                    </Pivot>
+                </StackPanel>
+            </ScrollViewer>
+        </Border>
+
+        <Border
+            x:Name="SidebarResizeHandle"
+            Grid.Column="1"
+            Background="Transparent"
+            PointerPressed="SidebarResizeHandle_PointerPressed"
+            PointerMoved="SidebarResizeHandle_PointerMoved"
+            PointerEntered="SidebarResizeHandle_PointerEntered"
+            PointerExited="SidebarResizeHandle_PointerExited"
+            PointerReleased="SidebarResizeHandle_PointerReleased"
+            PointerCanceled="SidebarResizeHandle_PointerReleased">
+            <Border
+                x:Name="SidebarResizeIndicator"
+                Width="2"
+                Opacity="0"
+                HorizontalAlignment="Center"
+                Background="{ThemeResource TextFillColorTertiaryBrush}"
+                CornerRadius="1" />
+        </Border>
+
+        <Grid x:Name="ChatPanel" Grid.Column="2" Padding="18" RowSpacing="12">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="*" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+
+            <Border
+                x:Name="ChatFrame"
+                Grid.Row="0"
+                Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                BorderThickness="1"
+                CornerRadius="8">
+                <Grid>
+                    <Border x:Name="ChatBackgroundLayer" Opacity="0" />
+                    <Border x:Name="ChatBackgroundWash" Background="#CCFFFFFF" />
+                    <ScrollViewer x:Name="MessagesScrollViewer" Padding="10" VerticalScrollBarVisibility="Auto">
+                        <StackPanel x:Name="MessagesPanel" Spacing="8" HorizontalAlignment="Stretch" />
+                    </ScrollViewer>
+                </Grid>
+            </Border>
+
+            <Border
+                x:Name="InputFrame"
+                Grid.Row="1"
+                Padding="10"
+                Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                BorderThickness="1"
+                CornerRadius="8">
+                <Grid ColumnSpacing="6">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="96" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+
+                    <TextBox
+                        x:Name="MessageBox"
+                        AcceptsReturn="True"
+                        TextWrapping="Wrap"
+                        ScrollViewer.VerticalScrollBarVisibility="Auto"
+                        MinHeight="32"
+                        MaxHeight="72"
+                        PlaceholderText="Type a message"
+                        KeyDown="MessageBox_KeyDown" />
+                    <ComboBox
+                        x:Name="SendModeBox"
+                        Grid.Column="1"
+                        Width="96"
+                        HorizontalAlignment="Center"
+                        VerticalAlignment="Center"
+                        SelectedIndex="0">
+                        <ComboBoxItem Content="Text" Tag="Text" />
+                        <ComboBoxItem Content="Image" Tag="Image" />
+                        <ComboBoxItem Content="File" Tag="File" />
+                        <ComboBoxItem Content="Voice" Tag="Voice" />
+                    </ComboBox>
+                    <Button
+                        x:Name="SendButton"
+                        Grid.Column="2"
+                        Content="Send"
+                        Click="Send_Click"
+                        VerticalAlignment="Center" />
+                </Grid>
+            </Border>
+        </Grid>
+
+        <Border
+            x:Name="RightRailPanel"
+            Grid.Column="3"
+            Padding="6,16,6,16"
+            Background="{ThemeResource LayerFillColorDefaultBrush}"
+            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+            BorderThickness="0">
+            <StackPanel Spacing="6" HorizontalAlignment="Center">
+                <Button
+                    x:Name="StopButton"
+                    Click="Stop_Click"
+                    Background="Transparent"
+                    BorderBrush="Transparent"
+                    Opacity="0.72"
+                    Width="34"
+                    Height="34"
+                    Padding="0"
+                    IsEnabled="True">
+                    <Canvas Width="24" Height="24">
+                        <Path
+                            x:Name="StopIcon"
+                            Data="M12,3 L12,11 M6.35,6.35 A8,8 0 1 0 17.65,6.35"
+                            Stroke="#1C1C1C"
+                            StrokeThickness="2"
+                            StrokeStartLineCap="Round"
+                            StrokeEndLineCap="Round"
+                            StrokeLineJoin="Round" />
+                    </Canvas>
+                </Button>
+                <Button
+                    x:Name="SettingsButton"
+                    Click="Settings_Click"
+                    Background="Transparent"
+                    BorderBrush="Transparent"
+                    Opacity="0.72"
+                    Width="34"
+                    Height="34"
+                    Padding="0">
+                    <FontIcon x:Name="SettingsIcon" Glyph="&#xE713;" FontSize="22" />
+                </Button>
+                <Button
+                    x:Name="SidebarToggleButton"
+                    Click="ToggleSidebar_Click"
+                    Background="Transparent"
+                    BorderBrush="Transparent"
+                    Opacity="0.72"
+                    Width="34"
+                    Height="34"
+                    Padding="0">
+                    <Image x:Name="SidebarToggleIcon" Width="22" Height="22" Source="Assets/sidebar_toggle.png" Stretch="Uniform" />
+                </Button>
+            </StackPanel>
+        </Border>
+
+        <Grid
+            x:Name="SettingsOverlay"
+            Grid.ColumnSpan="4"
+            Background="#B3000000"
+            PointerPressed="SettingsOverlay_PointerPressed"
+            Visibility="Collapsed">
+            <Border
+                x:Name="SettingsPanel"
+                Width="520"
+                MaxHeight="680"
+                Opacity="0.99"
+                Padding="18"
+                CornerRadius="8"
+                HorizontalAlignment="Center"
+                VerticalAlignment="Center"
+                PointerPressed="SettingsPanel_PointerPressed"
+                Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                BorderThickness="1">
+                <ScrollViewer VerticalScrollBarVisibility="Auto">
+                    <StackPanel x:Name="SettingsPanelContent" Spacing="14" Width="420" HorizontalAlignment="Center">
+                        <TextBlock x:Name="StyleHeaderText" Text="Style" FontWeight="SemiBold" />
+                        <ComboBox x:Name="ThemeComboBox" Header="Theme" SelectionChanged="ThemeComboBox_SelectionChanged" SelectedIndex="0">
+                            <ComboBoxItem Content="Light" Tag="Light" />
+                            <ComboBoxItem Content="Dark" Tag="Dark" />
+                            <ComboBoxItem Content="Gothic" Tag="Gothic" />
+                        </ComboBox>
+                        <ComboBox x:Name="SkillLanguageComboBox" Header="Language" SelectionChanged="SkillLanguageComboBox_SelectionChanged" SelectedIndex="0">
+                            <ComboBoxItem Content="中文" Tag="Chinese" />
+                            <ComboBoxItem Content="English" Tag="English" />
+                        </ComboBox>
+                        <Slider x:Name="InfoBarSecondsSlider" Header="InfoBar seconds" Minimum="1" Maximum="15" Value="5" StepFrequency="1" ValueChanged="PersistedSetting_Changed" />
+                        <Slider x:Name="SettingsPanelOpacitySlider" Header="Settings panel opacity" Minimum="0.86" Maximum="1" Value="0.99" StepFrequency="0.01" ValueChanged="SettingsPanelOpacitySlider_ValueChanged" />
+                        <ToggleSwitch x:Name="ShowOnlyOwnToggleSwitch" Header="Only my messages" Toggled="ShowOnlyOwnToggleSwitch_Toggled" />
+                        <ToggleSwitch x:Name="HostSignalModeSwitch" Header="WSS" OffContent="Off" OnContent="On" Toggled="HostSignalModeSwitch_Toggled" />
+                        <StackPanel x:Name="HostTlsFieldsPanel" Spacing="10" Visibility="Collapsed">
+                            <TextBox x:Name="HostTlsCertBox" Header="Certificate PEM" PlaceholderText="/path/fullchain.pem" />
+                            <TextBox x:Name="HostTlsKeyBox" Header="Private key PEM" PlaceholderText="/path/privkey.pem" />
+                            <PasswordBox x:Name="HostTlsKeyPassBox" Header="Key password" />
+                        </StackPanel>
+
+                        <TextBlock x:Name="ChatBackgroundHeaderText" Text="Chat Background" FontWeight="SemiBold" />
+                        <Grid ColumnSpacing="8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <Button x:Name="ImportChatBackgroundButton" Content="Import Image" Click="ImportChatBackground_Click" HorizontalAlignment="Stretch" />
+                            <Button x:Name="ClearChatBackgroundButton" Grid.Column="1" Content="Clear Image" Click="ClearChatBackground_Click" HorizontalAlignment="Stretch" />
+                        </Grid>
+                        <Slider x:Name="BackgroundOpacitySlider" Header="Image opacity" Minimum="0" Maximum="1" Value="0.28" StepFrequency="0.01" ValueChanged="BackgroundOpacitySlider_ValueChanged" />
+                        <Grid ColumnSpacing="8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <ComboBox x:Name="BackgroundHorizontalComboBox" Header="Crop X" SelectionChanged="BackgroundCrop_SelectionChanged" SelectedIndex="1">
+                                <ComboBoxItem Content="Left" Tag="Left" />
+                                <ComboBoxItem Content="Center" Tag="Center" />
+                                <ComboBoxItem Content="Right" Tag="Right" />
+                            </ComboBox>
+                            <ComboBox x:Name="BackgroundVerticalComboBox" Grid.Column="1" Header="Crop Y" SelectionChanged="BackgroundCrop_SelectionChanged" SelectedIndex="1">
+                                <ComboBoxItem Content="Top" Tag="Top" />
+                                <ComboBoxItem Content="Center" Tag="Center" />
+                                <ComboBoxItem Content="Bottom" Tag="Bottom" />
+                            </ComboBox>
+                        </Grid>
+
+                        <TextBlock x:Name="MessageBubblesHeaderText" Text="Message Bubbles" FontWeight="SemiBold" />
+                        <ComboBox x:Name="BubbleColorComboBox" Header="Bubble color" SelectionChanged="BubbleStyle_Changed" SelectedIndex="0">
+                            <ComboBoxItem Content="Soft gray" Tag="SoftGray" />
+                            <ComboBoxItem Content="Warm parchment" Tag="Parchment" />
+                            <ComboBoxItem Content="Pale blue" Tag="PaleBlue" />
+                            <ComboBoxItem Content="Muted crimson" Tag="Crimson" />
+                        </ComboBox>
+                        <Slider x:Name="BubbleOpacitySlider" Header="Bubble opacity" Minimum="0.35" Maximum="1" Value="1" StepFrequency="0.01" ValueChanged="BubbleStyle_Changed" />
+
+                        <TextBlock x:Name="MessageTextHeaderText" Text="Message Text" FontWeight="SemiBold" />
+                        <Grid ColumnSpacing="8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <ComboBox x:Name="MessageTextColorComboBox" Header="Text color" SelectionChanged="MessageTextStyle_Changed" SelectedIndex="0">
+                                <ComboBoxItem Content="Auto" Tag="Auto" />
+                                <ComboBoxItem Content="Ink" Tag="Ink" />
+                                <ComboBoxItem Content="White" Tag="White" />
+                                <ComboBoxItem Content="Crimson" Tag="Crimson" />
+                                <ComboBoxItem Content="Gold" Tag="Gold" />
+                            </ComboBox>
+                            <ComboBox x:Name="MessageFontComboBox" Grid.Column="1" Header="Font" SelectionChanged="MessageTextStyle_Changed" SelectedIndex="0">
+                                <ComboBoxItem Content="Default" Tag="Default" />
+                                <ComboBoxItem Content="Serif" Tag="Serif" />
+                                <ComboBoxItem Content="Mono" Tag="Mono" />
+                            </ComboBox>
+                        </Grid>
+                        <Slider x:Name="MessageFontSizeSlider" Header="Message font size" Minimum="11" Maximum="20" Value="14" StepFrequency="1" ValueChanged="MessageTextStyle_Changed" />
+
+                        <TextBlock x:Name="LabelsHeaderText" Text="Labels" FontWeight="SemiBold" />
+                        <Grid ColumnSpacing="8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <ComboBox x:Name="MetaTextColorComboBox" Header="Label color" SelectionChanged="MetaTextStyle_Changed" SelectedIndex="0">
+                                <ComboBoxItem Content="Auto" Tag="Auto" />
+                                <ComboBoxItem Content="Muted" Tag="Muted" />
+                                <ComboBoxItem Content="Ink" Tag="Ink" />
+                                <ComboBoxItem Content="White" Tag="White" />
+                                <ComboBoxItem Content="Crimson" Tag="Crimson" />
+                                <ComboBoxItem Content="Gold" Tag="Gold" />
+                            </ComboBox>
+                            <ComboBox x:Name="MetaFontComboBox" Grid.Column="1" Header="Label font" SelectionChanged="MetaTextStyle_Changed" SelectedIndex="0">
+                                <ComboBoxItem Content="Default" Tag="Default" />
+                                <ComboBoxItem Content="Serif" Tag="Serif" />
+                                <ComboBoxItem Content="Mono" Tag="Mono" />
+                            </ComboBox>
+                        </Grid>
+                        <Slider x:Name="MetaFontSizeSlider" Header="Label font size" Minimum="9" Maximum="16" Value="11" StepFrequency="1" ValueChanged="MetaTextStyle_Changed" />
+                    </StackPanel>
+                </ScrollViewer>
+            </Border>
+        </Grid>
+    </Grid>
+</Window>

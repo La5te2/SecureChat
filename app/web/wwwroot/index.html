@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title></title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main class="shell">
+    <aside class="sidebar">
+      <div class="tabs" role="tablist">
+        <button class="tab active" data-tab="host">Host</button>
+        <button class="tab" data-tab="join">Join</button>
+      </div>
+
+      <section id="hostPanel" class="panel active">
+        <label>Room<input id="hostRoom" value="secure-room"></label>
+        <label>Port<input id="hostPort" value="25566" inputmode="numeric"></label>
+        <label>User<input id="hostUser" value="host"></label>
+        <label>Password<input id="hostPassword" value="123456" type="password"></label>
+        <div class="signalRow">
+          <span>WSS</span>
+          <label class="switchLabel">
+            <input id="hostSignalModeToggle" type="checkbox">
+          </label>
+        </div>
+        <div id="hostTlsFields" class="tlsFields" hidden>
+          <label>Certificate PEM<input id="hostTlsCert" placeholder="/path/fullchain.pem"></label>
+          <label>Private key PEM<input id="hostTlsKey" placeholder="/path/privkey.pem"></label>
+          <label>Key password<input id="hostTlsKeyPass" type="password"></label>
+        </div>
+        <button id="hostButton" class="primary">Start Hosting</button>
+      </section>
+
+      <section id="joinPanel" class="panel">
+        <label>URL<input id="joinUrl"></label>
+        <label>Room<input id="joinRoom" value="secure-room"></label>
+        <label>User<input id="joinUser" value="client"></label>
+        <label>Password<input id="joinPassword" value="123456" type="password"></label>
+        <div class="buttonRow">
+          <button id="discoverButton">Find LAN Room</button>
+          <button id="joinButton" class="primary">Join Room</button>
+        </div>
+      </section>
+
+      <section class="roomPanel">
+        <dl>
+          <div><dt>Mode</dt><dd id="roomMode">not connected</dd></div>
+          <div><dt>Room</dt><dd id="roomName">-</dd></div>
+        </dl>
+      </section>
+
+      <button id="stopButton" class="stopButton">Stop Session</button>
+    </aside>
+
+    <section class="chat">
+      <section id="messages" class="messages" aria-live="polite"></section>
+
+      <form id="sendForm" class="composer">
+        <textarea id="messageInput" rows="2" placeholder="Type a message"></textarea>
+        <select id="uploadKind" title="Attachment type">
+          <option value="file">File</option>
+          <option value="image">Image</option>
+          <option value="voice">Voice</option>
+        </select>
+        <input id="fileInput" type="file">
+        <button type="submit" class="primary">Send</button>
+      </form>
+    </section>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>

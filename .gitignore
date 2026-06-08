@@ -1,0 +1,23 @@
+# Build outputs
+out/
+build/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+
+# .NET build outputs
+app/**/bin/
+app/**/obj/
+
+# IDE/user-local files
+.vs/
+.vscode/
+*.user
+*.suo
+
+# Runtime scratch files
+app/**/uploads/
+*.log
+
+# Local plans
+todolist.md

@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
+    <RootNamespace>chat</RootNamespace>
+    <AssemblyName>SecureChat</AssemblyName>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\Chat.ico</ApplicationIcon>
+    <Platforms>x64</Platforms>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <UseWinUI>true</UseWinUI>
+    <WindowsPackageType>None</WindowsPackageType>
+    <EnableMsixTooling>false</EnableMsixTooling>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Content Include="Assets\Chat.ico" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="Assets\session_stop.png" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="Assets\session_stop_inverted.png" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="Assets\sidebar_toggle.png" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="Assets\sidebar_toggle_inverted.png" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="config.yml" CopyToOutputDirectory="PreserveNewest" />
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.8.251003001" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="..\..\out\build\x64-release\native.dll" Link="native.dll" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\..\out\build\x64-release\datachannel.dll" Link="datachannel.dll" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\..\out\build\x64-release\juice.dll" Link="juice.dll" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\..\out\build\x64-release\libcrypto-3-x64.dll" Link="libcrypto-3-x64.dll" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\..\out\build\x64-release\libssl-3-x64.dll" Link="libssl-3-x64.dll" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>
