@@ -44,15 +44,20 @@ sudo ln -s /snap/bin/certbot /usr/bin/certbot
 申请证书：
 
 ```bash
-sudo certbot certonly --standalone -d chat.example.com
+# sudo certbot certonly --standalone -d chat.example.com
+sudo certbot certonly --standalone -d chat.la5te2.online
 ```
 
 成功后文件通常在：
 
-```text
-/etc/letsencrypt/live/chat.example.com/fullchain.pem
-/etc/letsencrypt/live/chat.example.com/privkey.pem
+```bash
+#/etc/letsencrypt/live/chat.example.com/fullchain.pem
+#/etc/letsencrypt/live/chat.example.com/privkey.pem
+/etc/letsencrypt/live/chat.la5te2.online/fullchain.pem
+/etc/letsencrypt/live/chat.la5te2.online/privkey.pem
 ```
+
+![image-20260608163453526](C:\Users\theri\AppData\Roaming\Typora\typora-user-images\image-20260608163453526.png)
 
 启动 SecureChat WSS：
 
