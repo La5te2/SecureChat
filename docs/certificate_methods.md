@@ -77,11 +77,15 @@ sudo cp /etc/letsencrypt/live/chat.example.com/privkey.pem /etc/securechat/certs
 sudo chmod 640 /etc/securechat/certs/fullchain.pem /etc/securechat/certs/privkey.pem
 ```
 
+![image-20260608164532694](C:\Users\theri\AppData\Roaming\Typora\typora-user-images\image-20260608164532694.png)
+
 然后：
 
 ```bash
-export SECURECHAT_TLS_CERT_FILE=/etc/securechat/certs/fullchain.pem
-export SECURECHAT_TLS_KEY_FILE=/etc/securechat/certs/privkey.pem
+# export SECURECHAT_TLS_CERT_FILE=/etc/securechat/certs/fullchain.pem
+# export SECURECHAT_TLS_KEY_FILE=/etc/securechat/certs/privkey.pem
+export SECURECHAT_TLS_CERT_FILE=~/SecureChat/certs/fullchain.pem
+export SECURECHAT_TLS_KEY_FILE=~/SecureChat/certs/privkey.pem
 ```
 
 续期：
