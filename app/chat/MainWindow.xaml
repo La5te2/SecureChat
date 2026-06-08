@@ -250,9 +250,9 @@
                         <ToggleSwitch x:Name="ShowOnlyOwnToggleSwitch" Header="Only my messages" Toggled="ShowOnlyOwnToggleSwitch_Toggled" />
                         <ToggleSwitch x:Name="HostSignalModeSwitch" Header="WSS" OffContent="Off" OnContent="On" Toggled="HostSignalModeSwitch_Toggled" />
                         <StackPanel x:Name="HostTlsFieldsPanel" Spacing="10" Visibility="Collapsed">
-                            <TextBox x:Name="HostTlsCertBox" Header="Certificate PEM" PlaceholderText="/path/fullchain.pem" />
-                            <TextBox x:Name="HostTlsKeyBox" Header="Private key PEM" PlaceholderText="/path/privkey.pem" />
-                            <PasswordBox x:Name="HostTlsKeyPassBox" Header="Key password" />
+                            <TextBox x:Name="HostTlsCertBox" Header="Certificate PEM" PlaceholderText="/path/fullchain.pem" TextChanged="PersistedSetting_Changed" />
+                            <TextBox x:Name="HostTlsKeyBox" Header="Private key PEM" PlaceholderText="/path/privkey.pem" TextChanged="PersistedSetting_Changed" />
+                            <PasswordBox x:Name="HostTlsKeyPassBox" Header="Key password" PasswordChanged="PersistedPassword_Changed" />
                         </StackPanel>
 
                         <TextBlock x:Name="ChatBackgroundHeaderText" Text="Chat Background" FontWeight="SemiBold" />

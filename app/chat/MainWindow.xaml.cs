@@ -189,6 +189,7 @@ public sealed partial class MainWindow : Window
         HostTlsFieldsPanel.Visibility = HostSignalModeSwitch.IsOn
             ? Visibility.Visible
             : Visibility.Collapsed;
+        SaveAppConfigIfReady();
     }
 
     private void Join_Click(object sender, RoutedEventArgs e)
@@ -834,6 +835,16 @@ public sealed partial class MainWindow : Window
         SaveAppConfigIfReady();
     }
 
+    private void PersistedSetting_Changed(object sender, TextChangedEventArgs e)
+    {
+        SaveAppConfigIfReady();
+    }
+
+    private void PersistedPassword_Changed(object sender, RoutedEventArgs e)
+    {
+        SaveAppConfigIfReady();
+    }
+
     private void SettingsPanelOpacitySlider_ValueChanged(
         object sender,
         Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs e)
@@ -1346,6 +1357,10 @@ public sealed partial class MainWindow : Window
             AppendYaml(builder, "infobar_seconds", NumberString(InfoBarSecondsSlider.Value));
             AppendYaml(builder, "settings_panel_opacity", NumberString(SettingsPanelOpacitySlider.Value));
             AppendYaml(builder, "show_only_own", showOnlyOwnMessages ? "true" : "false");
+            AppendYaml(builder, "host_wss", HostSignalModeSwitch.IsOn ? "true" : "false");
+            AppendYaml(builder, "host_tls_cert_file", HostTlsCertBox.Text.Trim());
+            AppendYaml(builder, "host_tls_key_file", HostTlsKeyBox.Text.Trim());
+            AppendYaml(builder, "host_tls_key_pass", HostTlsKeyPassBox.Password);
             AppendYaml(builder, "chat_background_path", chatBackgroundPath ?? "");
             AppendYaml(builder, "chat_background_opacity", NumberString(BackgroundOpacitySlider.Value));
             AppendYaml(builder, "chat_background_crop_x", ComboTag(BackgroundHorizontalComboBox));
@@ -1383,6 +1398,11 @@ public sealed partial class MainWindow : Window
             SetSlider(SettingsPanelOpacitySlider, Value(chatValues, "settings_panel_opacity", "0.99"));
             showOnlyOwnMessages = Value(chatValues, "show_only_own", "false").Equals("true", StringComparison.OrdinalIgnoreCase);
             ShowOnlyOwnToggleSwitch.IsOn = showOnlyOwnMessages;
+            HostSignalModeSwitch.IsOn = Value(chatValues, "host_wss", "false").Equals("true", StringComparison.OrdinalIgnoreCase);
+            HostTlsCertBox.Text = Value(chatValues, "host_tls_cert_file", "");
+            HostTlsKeyBox.Text = Value(chatValues, "host_tls_key_file", "");
+            HostTlsKeyPassBox.Password = Value(chatValues, "host_tls_key_pass", "");
+            HostTlsFieldsPanel.Visibility = HostSignalModeSwitch.IsOn ? Visibility.Visible : Visibility.Collapsed;
             SetSlider(BackgroundOpacitySlider, Value(chatValues, "chat_background_opacity", "0.28"));
             SetComboByTag(BackgroundHorizontalComboBox, Value(chatValues, "chat_background_crop_x", "Center"));
             SetComboByTag(BackgroundVerticalComboBox, Value(chatValues, "chat_background_crop_y", "Center"));

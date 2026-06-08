@@ -39,6 +39,8 @@ sudo snap install --classic certbot
 sudo ln -s /snap/bin/certbot /usr/bin/certbot
 ```
 
+![image-20260608152311716](C:\Users\theri\AppData\Roaming\Typora\typora-user-images\image-20260608152311716.png)
+
 申请证书：
 
 ```bash
