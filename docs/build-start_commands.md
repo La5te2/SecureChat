@@ -343,3 +343,6 @@ Web Host 不再配置证书路径；WSS 证书属于独立 Server 进程。
 - 文本和附件 E2EE 使用 GKA v2 自动分发 room group key；Host/Client/Web/WinUI 不再需要设置共享 E2EE 口令。
 - 接收附件会写入 `logs/images`、`logs/voice`、`logs/files`。默认缓存总量上限为 512 MB，可用 `SECURECHAT_LOGS_MAX_BYTES` 覆盖，例如 `export SECURECHAT_LOGS_MAX_BYTES=1073741824`。
 - `./stop_server.sh`、`./stop_host.sh`、`./stop_client.sh` 会清理各自脚本进程内的 SecureChat 运行时环境变量。普通 stop 脚本不能修改父 shell 中已经 `export` 的变量；如果确实要清理当前 SSH 窗口，可执行对应的 `source ./stop_*.sh` 或手动 `unset`。
+- 公网 Server 部署加固、非 root 用户、可选 systemd 模板、SIGTERM 验证、日志清理和安全组来源 IP 收敛步骤见 `docs/deployment-hardening.md`。
+
+- 所有 `SECURECHAT_*` 环境变量的完整说明见 `docs/environment-variables.md`。

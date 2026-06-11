@@ -9,11 +9,16 @@ PID_FILE="${SECURECHAT_SERVER_PID_FILE:-server.pid}"
 LOG_FILE="${SECURECHAT_SERVER_LOG_FILE:-}"
 # Server is the only role that listens on a public port, so this script starts
 # it as a background daemon by default.
-# Server output contains room ids, usernames, ICE state, and connection events.
+# Server output contains room ids, usernames, and connection events.
 # Do not persist it unless diagnostics are explicitly requested.
 LOG_TARGET="${LOG_FILE:-/dev/null}"
 MODE_OVERRIDE=""
 
+if [[ "${EUID}" == "0" && "${SECURECHAT_ALLOW_ROOT:-}" != "1" ]]; then
+  echo "ERROR: Refusing to run SecureChat Server as root."
+  echo "Create a dedicated user such as 'securechat', or set SECURECHAT_ALLOW_ROOT=1 only for temporary diagnostics."
+  exit 1
+fi
 usage() {
   echo "Usage: ./start_server.sh [--mode ws|wss|insecure|secure|0|1]"
   echo

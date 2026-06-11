@@ -31,9 +31,9 @@
                     <Pivot x:Name="MainPivot" Margin="0,-15,0,0" SelectionChanged="MainPivot_SelectionChanged">
                         <PivotItem x:Name="HostPivotItem" Header="Host">
                             <StackPanel Spacing="10" Padding="0,12,0,0">
-                                <TextBox x:Name="HostRoomBox" Header="Room" Text="secure-room" />
-                                <TextBox x:Name="HostServerUrlBox" Header="Server URL" Text="ws://127.0.0.1:25566" />
-                                <TextBox x:Name="HostUserBox" Header="User" Text="host" />
+                                <TextBox x:Name="HostRoomBox" Header="Room" />
+                                <TextBox x:Name="HostServerUrlBox" Header="Server URL" />
+                                <TextBox x:Name="HostUserBox" Header="User" />
                                 <PasswordBox x:Name="HostPasswordBox" Header="Password" />
                                 <Button x:Name="HostButton" Content="Start Hosting" Click="Host_Click" HorizontalAlignment="Stretch" />
                             </StackPanel>
@@ -41,9 +41,9 @@
 
                         <PivotItem x:Name="JoinPivotItem" Header="Join">
                             <StackPanel Spacing="10" Padding="0,12,0,0">
-                                <TextBox x:Name="JoinUrlBox" Header="URL" />
-                                <TextBox x:Name="JoinRoomBox" Header="Room" Text="secure-room" />
-                                <TextBox x:Name="JoinUserBox" Header="User" Text="client" />
+                                <TextBox x:Name="JoinRoomBox" Header="Room" />
+                                <TextBox x:Name="JoinUrlBox" Header="Server URL" />
+                                <TextBox x:Name="JoinUserBox" Header="User" />
                                 <PasswordBox x:Name="JoinPasswordBox" Header="Password" />
                                 <Button x:Name="JoinButton" Content="Join Room" Click="Join_Click" HorizontalAlignment="Stretch" />
                             </StackPanel>

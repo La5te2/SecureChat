@@ -59,9 +59,6 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ -z "${SECURECHAT_ICE_SERVERS:-}" ]]; then
-  export SECURECHAT_ICE_SERVERS="stun:stun.cloudflare.com:3478"
-fi
 
 if [[ ! -x "${CLIENT_BIN}" ]]; then
   echo "ERROR: Client binary is missing or not executable: ${CLIENT_BIN}"
@@ -110,7 +107,6 @@ echo "Starting SecureChat Client..."
 echo "  room: ${ROOM}"
 echo "  user: ${USER_NAME}"
 echo "  server: ${SERVER_URL}"
-echo "  ice:  ${SECURECHAT_ICE_SERVERS}"
 echo "  password source: ${PASSWORD_SOURCE}"
 
 fifo="$(mktemp -u "${TMPDIR:-/tmp}/securechat-password.XXXXXX")"

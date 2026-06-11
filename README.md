@@ -32,7 +32,7 @@ SecureChat 当前更适合作为课程/论文实验系统，而不是已经完�
 - 房间密码能阻止普通误入，但不能替代 TLS、限速、防火墙和强认证。
 - 能限制安全组来源 IP 时，不建议长期使用 `0.0.0.0/0`。
 - 不建议把 Web UI 端口 `5188` 直接暴露到公网。
-- 长期运行时应尽量使用普通用户，不要用 `root`。
+- 长期运行时应使用普通用户，不要用 `root`；`start_server.sh` 默认拒绝 root 运行，临时诊断才可设置 `SECURECHAT_ALLOW_ROOT=1`。部署步骤见 `docs/deployment-hardening.md`，环境变量参考见 `docs/environment-variables.md`。
 - `start_server.sh` 默认把 Server 作为 daemon 常驻，且默认不保存 `server.log`。日志可能包含 room id、用户名和连接状态，只在临时排障时显式启用。
 - `start_host.sh` 和 `start_client.sh` 默认前台运行；只有显式 `--daemon` 时才后台运行，并通过短生命周期本地管道传递房间密码。
 - 接收附件会写入 `logs/`，需要定期清理并避免直接信任未知文件。
@@ -200,7 +200,7 @@ Linux CLI 加入：
 
 ## 公网云服务器部署
 
-华为云安全组至少需要放行：
+华为云安全组至少需要放行；来源 IP 能固定时，应按 `docs/deployment-hardening.md` 收敛来源 CIDR：
 
 ```text
 TCP 25566
@@ -330,6 +330,8 @@ export SECURECHAT_LOGS_MAX_BYTES=1073741824
 ```
 
 接收端会清理最旧的受管理附件缓存文件，但只清理 `logs/images`、`logs/voice`、`logs/files`。文件扩展名和文件头校验只能降低误传/伪装风险，不等于杀毒。
+
+附件当前已经实现应用层 E2EE relay：文件名、mime、metadata 和 binary chunk 都在 Host/Client 本地加密，Server 只转发 ciphertext。安全边界是：网络路径和不可信 Server 不应看到附件明文；接收成员本机会解密并缓存附件，因此成员设备、用户手动打开文件、图片/音频解码器和本地文件系统仍是信任边界。当前没有杀毒扫描、沙箱打开、复杂文档格式隔离或恶意文件内容检测。
 
 因此建议总是从项目根目录启动：
 

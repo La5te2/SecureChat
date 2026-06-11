@@ -61,9 +61,6 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ -z "${SECURECHAT_ICE_SERVERS:-}" ]]; then
-  export SECURECHAT_ICE_SERVERS="stun:stun.cloudflare.com:3478"
-fi
 
 if [[ ! -x "${HOST_BIN}" ]]; then
   echo "ERROR: Host binary is missing or not executable: ${HOST_BIN}"
@@ -111,7 +108,6 @@ fi
 echo "Starting SecureChat Host..."
 echo "  room: ${ROOM}"
 echo "  user: ${USER_NAME}"
-echo "  ice:  ${SECURECHAT_ICE_SERVERS}"
 echo "  password source: ${PASSWORD_SOURCE}"
 echo "  server: ${SERVER_URL}"
 

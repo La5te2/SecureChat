@@ -24,7 +24,6 @@ clear_securechat_client_env() {
   unset SECURECHAT_CLIENT_PID_FILE
   unset SECURECHAT_CLIENT_LOG_FILE
   unset SECURECHAT_ROOM_PASSWORD
-  unset SECURECHAT_ICE_SERVERS
 }
 
 stop_pid() {
