@@ -47,12 +47,10 @@ app.MapGet("/events", async (HttpContext context, ChatEventBus bus) =>
 
 app.MapPost("/api/host", (HostRequest request, ChatEventBus bus) =>
 {
-    ConfigureSignalingMode(request);
-    var ok = NativeChat.HostStart(request.RoomId, request.Port, request.Username, request.Password);
+    var ok = NativeChat.HostStart(request.ServerUrl, request.RoomId, request.Username, request.Password);
     if (ok == 0) return Results.BadRequest(new { ok = false });
 
-    var scheme = IsWss(request.SignalingMode) ? "wss" : "ws";
-    bus.Publish("status", $"Web host started on {scheme}://127.0.0.1:{request.Port}");
+    bus.Publish("status", $"Web host connected to {request.ServerUrl}");
     return Results.Ok(new { ok = true });
 });
 
@@ -102,49 +100,12 @@ app.MapPost("/api/upload", async (HttpRequest request) =>
     return ok == 0 ? Results.BadRequest(new { ok = false }) : Results.Ok(new { ok = true });
 });
 
-app.MapGet("/api/discover", (string? roomId, int? timeoutMs) =>
-{
-    var json = NativeChat.DiscoverRoomsJson(roomId ?? "", timeoutMs.GetValueOrDefault(1500));
-    return Results.Content(json, "application/json");
-});
-
 app.Run();
 
-static bool IsWss(string? mode)
-{
-    return string.Equals(mode, "wss", StringComparison.OrdinalIgnoreCase);
-}
-
-static void ConfigureSignalingMode(HostRequest request)
-{
-    if (!IsWss(request.SignalingMode))
-    {
-        Environment.SetEnvironmentVariable("SECURECHAT_SIGNALING_TLS", null);
-        Environment.SetEnvironmentVariable("SECURECHAT_TLS_CERT_FILE", null);
-        Environment.SetEnvironmentVariable("SECURECHAT_TLS_KEY_FILE", null);
-        Environment.SetEnvironmentVariable("SECURECHAT_TLS_KEY_PASS", null);
-        return;
-    }
-
-    if (string.IsNullOrWhiteSpace(request.TlsCertFile) || string.IsNullOrWhiteSpace(request.TlsKeyFile))
-    {
-        throw new BadHttpRequestException("WSS requires TLS certificate and private key files.");
-    }
-
-    Environment.SetEnvironmentVariable("SECURECHAT_SIGNALING_TLS", "1");
-    Environment.SetEnvironmentVariable("SECURECHAT_TLS_CERT_FILE", request.TlsCertFile);
-    Environment.SetEnvironmentVariable("SECURECHAT_TLS_KEY_FILE", request.TlsKeyFile);
-    Environment.SetEnvironmentVariable("SECURECHAT_TLS_KEY_PASS", string.IsNullOrEmpty(request.TlsKeyPass) ? null : request.TlsKeyPass);
-}
-
 internal sealed record HostRequest(
+    string ServerUrl,
     string RoomId,
-    int Port,
     string Username,
-    string Password,
-    string? SignalingMode,
-    string? TlsCertFile,
-    string? TlsKeyFile,
-    string? TlsKeyPass);
+    string Password);
 internal sealed record JoinRequest(string Url, string RoomId, string Username, string Password);
 internal sealed record SendRequest(string Text);

@@ -93,20 +93,14 @@ internal static partial class NativeChat
         chat_set_event_callback(Callback, IntPtr.Zero);
     }
 
-    internal static int HostStart(string roomId, int port, string username, string password)
+    internal static int HostStart(string serverUrl, string roomId, string username, string password)
     {
-        return chat_host_start(roomId, port, username, password);
+        return chat_host_start(serverUrl, roomId, username, password);
     }
 
     internal static int JoinStart(string url, string roomId, string username, string password)
     {
         return chat_join_start(url, roomId, username, password);
-    }
-
-    internal static string DiscoverRoomsJson(string roomId, int timeoutMs)
-    {
-        var ptr = chat_discover_rooms_json(roomId, timeoutMs);
-        return ptr == IntPtr.Zero ? "[]" : Marshal.PtrToStringUTF8(ptr) ?? "[]";
     }
 
     internal static int SendLine(string line)
@@ -208,8 +202,8 @@ internal static partial class NativeChat
 
     [DllImport("native", CallingConvention = CallingConvention.Winapi)]
     private static extern int chat_host_start(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string serverUrl,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string roomId,
-        int port,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string username,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string password);
 
@@ -219,11 +213,6 @@ internal static partial class NativeChat
         [MarshalAs(UnmanagedType.LPUTF8Str)] string roomId,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string username,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string password);
-
-    [DllImport("native", CallingConvention = CallingConvention.Winapi)]
-    private static extern IntPtr chat_discover_rooms_json(
-        [MarshalAs(UnmanagedType.LPUTF8Str)] string roomId,
-        int timeoutMs);
 
     [DllImport("native", CallingConvention = CallingConvention.Winapi)]
     private static extern int chat_send_line([MarshalAs(UnmanagedType.LPUTF8Str)] string line);

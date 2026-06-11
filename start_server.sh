@@ -3,20 +3,19 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-HOST_BIN="${SECURECHAT_HOST_BIN:-./out/build/x64-linux-release/host}"
-ROOM="${SECURECHAT_ROOM:-secure-room}"
+SERVER_BIN="${SECURECHAT_SERVER_BIN:-./out/build/x64-linux-release/server}"
 PORT="${SECURECHAT_PORT:-25566}"
-USER_NAME="${SECURECHAT_USER:-host}"
-PID_FILE="${SECURECHAT_PID_FILE:-host.pid}"
-LOG_FILE="${SECURECHAT_LOG_FILE:-}"
-# Host output contains room ids, usernames, ICE state, and connection events.
+PID_FILE="${SECURECHAT_SERVER_PID_FILE:-server.pid}"
+LOG_FILE="${SECURECHAT_SERVER_LOG_FILE:-}"
+# Server is the only role that listens on a public port, so this script starts
+# it as a background daemon by default.
+# Server output contains room ids, usernames, ICE state, and connection events.
 # Do not persist it unless diagnostics are explicitly requested.
 LOG_TARGET="${LOG_FILE:-/dev/null}"
-PASSWORD_SOURCE="prompt"
 MODE_OVERRIDE=""
 
 usage() {
-  echo "Usage: ./start.sh [--mode ws|wss|insecure|secure|0|1]"
+  echo "Usage: ./start_server.sh [--mode ws|wss|insecure|secure|0|1]"
   echo
   echo "Modes:"
   echo "  ws, insecure, 0   Start signaling without TLS."
@@ -28,7 +27,7 @@ show_log_hint() {
     echo "Log:"
     echo "  tail -f ${LOG_FILE}"
   else
-    echo "Log: disabled by default; set SECURECHAT_LOG_FILE=host.log to save diagnostics."
+    echo "Log: disabled by default; set SECURECHAT_SERVER_LOG_FILE=server.log to save diagnostics."
   fi
 }
 
@@ -62,16 +61,12 @@ done
 if [[ -n "${MODE_OVERRIDE}" ]]; then
   case "${MODE_OVERRIDE,,}" in
     0|ws|insecure)
-      # In insecure mode, remove every TLS-related value so a previous shell
-      # export cannot accidentally make this Host start as WSS.
       unset SECURECHAT_SIGNALING_TLS
       unset SECURECHAT_TLS_CERT_FILE
       unset SECURECHAT_TLS_KEY_FILE
       unset SECURECHAT_TLS_KEY_PASS
       ;;
     1|wss|secure)
-      # WSS is the public deployment default. The project certs/ paths match
-      # docs/certificate_methods.md and can still be overridden by environment.
       export SECURECHAT_SIGNALING_TLS=1
       export SECURECHAT_TLS_CERT_FILE="${SECURECHAT_TLS_CERT_FILE:-certs/fullchain.pem}"
       export SECURECHAT_TLS_KEY_FILE="${SECURECHAT_TLS_KEY_FILE:-certs/privkey.pem}"
@@ -84,34 +79,8 @@ if [[ -n "${MODE_OVERRIDE}" ]]; then
   esac
 fi
 
-if [[ -n "${SECURECHAT_ROOM_PASSWORD:-}" ]]; then
-  PASSWORD_SOURCE="environment"
-elif [[ -t 0 ]]; then
-  read -rsp "Room password: " SECURECHAT_ROOM_PASSWORD
-  echo
-  PASSWORD_SOURCE="hidden prompt"
-elif IFS= read -r SECURECHAT_ROOM_PASSWORD; then
-  PASSWORD_SOURCE="stdin"
-else
-  echo "ERROR: room password is required on stdin or SECURECHAT_ROOM_PASSWORD."
-  echo "Interactive use:"
-  echo "  ./start.sh"
-  echo "Non-interactive use:"
-  echo "  printf '%s\\n' 'your-password' | ./start.sh"
-  exit 1
-fi
-
-if [[ -z "${SECURECHAT_ROOM_PASSWORD}" ]]; then
-  echo "ERROR: room password is empty."
-  exit 1
-fi
-
-if [[ -z "${SECURECHAT_ICE_SERVERS:-}" ]]; then
-  export SECURECHAT_ICE_SERVERS="stun:stun.cloudflare.com:3478"
-fi
-
-if [[ ! -x "${HOST_BIN}" ]]; then
-  echo "ERROR: Host binary is missing or not executable: ${HOST_BIN}"
+if [[ ! -x "${SERVER_BIN}" ]]; then
+  echo "ERROR: Server binary is missing or not executable: ${SERVER_BIN}"
   echo "Build it first:"
   echo "  ./build.sh"
   exit 1
@@ -120,7 +89,7 @@ fi
 if [[ -f "${PID_FILE}" ]]; then
   old_pid="$(cat "${PID_FILE}" 2>/dev/null || true)"
   if [[ -n "${old_pid}" ]] && kill -0 "${old_pid}" 2>/dev/null; then
-    echo "Host is already running: pid ${old_pid}"
+    echo "Server is already running: pid ${old_pid}"
     show_log_hint
     exit 0
   fi
@@ -134,12 +103,8 @@ if command -v ss >/dev/null && ss -lnt 2>/dev/null | grep -q ":${PORT} "; then
   exit 1
 fi
 
-echo "Starting SecureChat Host..."
-echo "  room: ${ROOM}"
+echo "Starting SecureChat Server..."
 echo "  port: ${PORT}"
-echo "  user: ${USER_NAME}"
-echo "  ice:  ${SECURECHAT_ICE_SERVERS}"
-echo "  password source: ${PASSWORD_SOURCE}"
 
 case "${SECURECHAT_SIGNALING_TLS:-}" in
   1|true|TRUE|yes|on)
@@ -160,39 +125,21 @@ else
   echo "  signaling: ws insecure mode (no TLS)"
 fi
 
-fifo="$(mktemp -u "${TMPDIR:-/tmp}/securechat-password.XXXXXX")"
-mkfifo -m 600 "${fifo}"
-cleanup_secret_pipe() {
-  rm -f "${fifo}"
-}
-trap cleanup_secret_pipe EXIT
-
-# Feed the password through a short-lived pipe instead of argv or the child
-# environment. This keeps the Host process from inheriting SECURECHAT_ROOM_PASSWORD.
-(
-  printf '%s\n' "${SECURECHAT_ROOM_PASSWORD}" > "${fifo}"
-) &
-writer_pid="$!"
-unset SECURECHAT_ROOM_PASSWORD
-
-env -u SECURECHAT_ROOM_PASSWORD nohup "${HOST_BIN}" "${ROOM}" "${PORT}" "${USER_NAME}" --daemon < "${fifo}" > "${LOG_TARGET}" 2>&1 &
+env -u SECURECHAT_ROOM_PASSWORD nohup "${SERVER_BIN}" "${PORT}" > "${LOG_TARGET}" 2>&1 &
 pid="$!"
-wait "${writer_pid}" 2>/dev/null || true
-cleanup_secret_pipe
-trap - EXIT
 echo "${pid}" > "${PID_FILE}"
 
 sleep 1
 if kill -0 "${pid}" 2>/dev/null; then
-  echo "Host started: pid ${pid}"
+  echo "Server started: pid ${pid}"
   show_log_hint
 else
-  echo "ERROR: Host exited during startup."
+  echo "ERROR: Server exited during startup."
   if [[ -n "${LOG_FILE}" ]]; then
     echo "Last log lines:"
     tail -n 80 "${LOG_FILE}" 2>/dev/null || true
   else
-    echo "Logging was disabled; set SECURECHAT_LOG_FILE=host.log and retry for diagnostics."
+    echo "Logging was disabled; set SECURECHAT_SERVER_LOG_FILE=server.log and retry for diagnostics."
   fi
   rm -f "${PID_FILE}"
   exit 1

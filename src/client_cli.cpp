@@ -1,14 +1,24 @@
 #include "console_utils.hpp"
 #include "client_session_core.hpp"
 
+#include <atomic>
+#include <chrono>
+#include <csignal>
 #include <cstdlib>
 #include <iostream>
 #include <memory>
 #include <string>
 #include <stdexcept>
+#include <thread>
 #include <vector>
 
 namespace {
+std::atomic_bool gStopRequested = false;
+
+void handleStopSignal(int) {
+    gStopRequested.store(true);
+}
+
 ChatCallbacks consoleCallbacks() {
     ChatCallbacks callbacks;
     callbacks.onLog = [](const std::string& message) { std::cout << "[log] " << message << std::endl; };
@@ -22,9 +32,11 @@ ChatCallbacks consoleCallbacks() {
 }
 
 void printUsage() {
-    std::cerr << "Usage: client <ws-url> <room> <username>\n";
+    std::cerr << "Usage: client <ws-url> <room> <username> [--daemon]\n";
     std::cerr << "Password source: SECURECHAT_ROOM_PASSWORD, hidden prompt, or stdin.\n";
     std::cerr << "Commands: /image <path>, /file <path>, /voice <path>, /quit\n";
+    std::cerr << "Options:\n";
+    std::cerr << "  --daemon keeps the client connected without reading stdin.\n";
 }
 
 std::string envValue(const char* name) {
@@ -62,11 +74,40 @@ std::string roomPasswordFromEnvOrPrompt() {
     // Do not silently fall back to a built-in password or accept argv secrets.
     throw std::runtime_error("room password is required");
 }
+
+bool hasDaemonFlag(const std::vector<std::string>& args) {
+    for (std::size_t i = 1; i < args.size(); ++i) {
+        if (args[i] == "--daemon") return true;
+    }
+    return false;
+}
+
+std::vector<std::string> positionalArgs(const std::vector<std::string>& args) {
+    std::vector<std::string> positional;
+    positional.reserve(args.size());
+    for (const auto& arg : args) {
+        if (arg == "--daemon") continue;
+        positional.push_back(arg);
+    }
+    return positional;
+}
+
+void waitForDaemonStop(const std::shared_ptr<ClientSessionCore>& session) {
+    std::signal(SIGINT, handleStopSignal);
+    std::signal(SIGTERM, handleStopSignal);
+
+    std::cout << "Daemon mode enabled. Stop with SIGTERM, SIGINT, or kill <pid>." << std::endl;
+    while (!gStopRequested.load() && !session->shouldStop()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    }
+}
 }
 
 int main(int argc, char** argv) {
     configureConsoleUtf8();
-    const auto args = commandLineArgsUtf8(argc, argv);
+    const auto rawArgs = commandLineArgsUtf8(argc, argv);
+    const auto daemonMode = hasDaemonFlag(rawArgs);
+    const auto args = positionalArgs(rawArgs);
     if (args.size() != 4) {
         printUsage();
         return 1;
@@ -81,10 +122,15 @@ int main(int argc, char** argv) {
         session->setCallbacks(consoleCallbacks());
         session->start();
 
-        std::string line;
-        while (!session->shouldStop() && readInputLineUtf8(line)) {
-            if (line == "/quit" || line == "/exit") break;
-            session->sendLine(line);
+        if (daemonMode) {
+            waitForDaemonStop(session);
+        }
+        else {
+            std::string line;
+            while (!session->shouldStop() && readInputLineUtf8(line)) {
+                if (line == "/quit" || line == "/exit") break;
+                session->sendLine(line);
+            }
         }
 
         session->stop();

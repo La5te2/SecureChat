@@ -4,7 +4,7 @@ SecureChat 是一个双向通信实验项目，包含共享 C++ 核心、Windows
 
 ## 组件
 
-- `src/` 和 `include/`：C++ 信令服务器、WebRTC DataChannel 会话、附件传输、CLI 和 native API。
+- `src/` 和 `include/`：C++ 信令服务器、WebSocket encrypted relay 数据通路、附件传输、CLI 和 native API。
 - `app/chat/`：Windows WinUI 桌面客户端。
 - `app/web/`：Windows/Linux 可用的 ASP.NET Core Web UI。
 - `build.bat`：Windows 上只构建 C++。
@@ -13,33 +13,35 @@ SecureChat 是一个双向通信实验项目，包含共享 C++ 核心、Windows
 - `build.sh`：Linux 上（云服务器）只构建 C++。
 - `build_web.sh`：Linux 上（非云服务器）构建 C++ 和 Web UI。
 
+说明：当前仍依赖 libdatachannel，是因为项目使用它的 WebSocket/WebSocketServer 实现；Host/Client 不再建立 WebRTC PeerConnection/DataChannel。
+
 ## 安全说明
 
 SecureChat 当前更适合作为课程/论文实验系统，而不是已经完成加固的公网生产服务。
 
-公网 Host 常开时，主要暴露面是：
+公网 Server 常开时，主要暴露面是：
 
-- TCP `25566`：WebSocket 信令端口，用于创建/加入房间，以及交换 SDP/ICE。
-- UDP `32768-60999`：WebRTC ICE/DataChannel 候选端口。
+- TCP `25566`：WebSocket 信令和 opaque encrypted relay 端口，用于创建/加入房间、维护成员状态，以及转发密文 envelope。
 
 需要明确：
 
 - 信令支持 `ws://` insecure mode 和 `wss://` secure mode。`ws://` 配置简单、便于本地或无证书场景使用，但传输不加密；真实公网部署应使用 `wss://`。
-- WebRTC DataChannel 本身有传输层加密，但这不等于严格端到端群聊加密。
-- 如果云服务器运行的是聊天 Host，它在应用层能看到消息和附件内容。
-- STUN 只解决公网/NAT 可达性，不提供保密性。
+- 文本消息和附件 metadata/chunk 已走应用层 AES-256-GCM encrypted relay：Server 只转发 opaque envelope，不能解密应用内容。
+- Host/Client 使用 GKA v2：Client 加入时提交临时 X25519 public key，Host 生成 room group key，并为每个成员封装分发；文本和附件使用该 group key 做 AES-256-GCM。
+- 成员加入或离开时，Host 会轮换新的 room group key 并重新分发给当前成员。当前仍未实现长期身份密钥/指纹校验，因此恶意或被攻破的 Server 仍可能尝试公钥替换攻击；公网应使用 `wss://` 降低信令篡改风险。
 - 房间密码能阻止普通误入，但不能替代 TLS、限速、防火墙和强认证。
 - 能限制安全组来源 IP 时，不建议长期使用 `0.0.0.0/0`。
 - 不建议把 Web UI 端口 `5188` 直接暴露到公网。
 - 长期运行时应尽量使用普通用户，不要用 `root`。
-- `start.sh` 默认不保存 `host.log`。Host 输出可能包含 room id、用户名、ICE 和连接状态，只在临时排障时显式启用日志。
-- `start.sh` 默认隐藏读取房间密码，并通过短生命周期本地管道传给 Host，避免密码出现在命令行或 Host 进程环境变量中。
+- `start_server.sh` 默认把 Server 作为 daemon 常驻，且默认不保存 `server.log`。日志可能包含 room id、用户名和连接状态，只在临时排障时显式启用。
+- `start_host.sh` 和 `start_client.sh` 默认前台运行；只有显式 `--daemon` 时才后台运行，并通过短生命周期本地管道传递房间密码。
 - 接收附件会写入 `logs/`，需要定期清理并避免直接信任未知文件。
 
-信令安全细节见：
+信令和 relay 数据通路安全细节见：
 
 ```text
 docs/signaling-security.md
+docs/relay-attachment-security.md
 ```
 
 ## Windows 构建
@@ -138,6 +140,7 @@ chmod +x build.sh
 ```text
 out/build/x64-linux-release/host
 out/build/x64-linux-release/client
+out/build/x64-linux-release/server
 out/build/x64-linux-release/libnative.so
 ```
 
@@ -159,11 +162,16 @@ Web UI 端口 `5188` 只是浏览器界面端口，不是聊天室端口。
 25566
 ```
 
-启动 Host：
+启动不可信 Server：
 
 ```bash
-cd /SecureChat
-./out/build/x64-linux-release/host secure-room 25566 host
+./out/build/x64-linux-release/server 25566
+```
+
+群主 Host 作为可见成员连接 Server：
+
+```bash
+./out/build/x64-linux-release/host --server ws://127.0.0.1:25566 secure-room host
 ```
 
 其他机器加入：
@@ -192,22 +200,20 @@ Linux CLI 加入：
 
 ## 公网云服务器部署
 
-华为云安全组需要放行：
+华为云安全组至少需要放行：
 
 ```text
 TCP 25566
-UDP 32768-60999
 ```
 
 Ubuntu 防火墙：
 
 ```bash
 sudo ufw allow 25566/tcp
-sudo ufw allow 32768:60999/udp
 sudo ufw status
 ```
 
-检查 Host 是否监听：
+检查 Server 是否监听：
 
 ```bash
 ss -lntp | grep ':25566'
@@ -219,118 +225,81 @@ Windows 测试公网 TCP：
 Test-NetConnection 124.70.71.65 -Port 25566
 ```
 
-## STUN 和 ICE
+聊天文本和附件的应用数据都走 TCP `25566` 上的 WebSocket encrypted relay；当前代码不再建立 WebRTC/DataChannel，也不需要 STUN 或 UDP 候选端口。
 
-TCP `25566` 只能表示能进入信令服务器。真正聊天需要 WebRTC DataChannel 打开。
+## 运行 Server、Host 和 Client
 
-云服务器常见情况是：服务器网卡只有内网 IP，公网 IP 由云厂商 NAT 映射。如果没有 STUN，WebRTC 可能把内网 ICE 地址发给客户端，导致：
+阶段 3 起推荐把不可信转发者和群成员拆开：`server` 是公网常驻的不可信协调者，不是群成员，不会显示在成员列表中；Host 和 Client 都是需要输入房间密码的可见参与者。
 
-```text
-Data channel is not open yet
-Peer connection ended
-```
+同一个 Server 实例可以承载多个不同 `roomId`，但同一个 Server 实例内 `roomId` 不能重复；不同 Server 或不同端口上的房间名可以重复。一台机器可以启动多个 Server，只要监听端口不同。
 
-推荐公网 Host 启动前设置：
+Host 创建 roomId 后成为第一个群成员和群管理者。Client 加入时把临时 X25519 public key 发给 Server，Server 只转交给 Host；Host 生成/轮换 room group key，并把 group key 用每个 Client 的 public key 单独封装后交给 Server 转发。Server 不生成群密钥，不解密 group key envelope，也不参与密钥协商语义。
 
-```bash
-export SECURECHAT_ICE_SERVERS="stun:stun.cloudflare.com:3478"
-```
-
-写入 `~/.bashrc` 可长期生效：
-
-```bash
-echo 'export SECURECHAT_ICE_SERVERS="stun:stun.cloudflare.com:3478"' >> ~/.bashrc
-source ~/.bashrc
-```
-
-## 后台运行 Host
-
-如果 Host 需要自己输入消息，使用 `tmux`：
-
-```bash
-tmux new -s securechat
-cd /SecureChat
-export SECURECHAT_ICE_SERVERS="stun:stun.cloudflare.com:3478"
-./out/build/x64-linux-release/host secure-room 25566 host
-```
-
-挂起但保持运行：
-
-```text
-Ctrl+B
-D
-```
-
-重新进入：
-
-```bash
-tmux attach -t securechat
-```
-
-关闭会话：
-
-```bash
-tmux kill-session -t securechat
-```
-
-如果 Host 只需要常驻，不需要从终端发消息，用 `start.sh`：
+公网 Server 默认用 daemon 脚本后台运行：
 
 ```bash
 cd /SecureChat
-export SECURECHAT_ICE_SERVERS="stun:stun.cloudflare.com:3478"
-./start.sh
+chmod +x start_server.sh stop_server.sh start_host.sh stop_host.sh start_client.sh stop_client.sh
+./start_server.sh --mode wss
 ```
 
-`start.sh` 会提示输入房间密码，输入时不会回显。
-
-非交互启动可以从 stdin 传入密码：
-
-```bash
-printf '%s\n' 'your-password' | ./start.sh
-```
-
-`SECURECHAT_ROOM_PASSWORD` 仍可用于自动化兼容，但交互使用时不推荐把密码写入 shell 命令或 `.bashrc`。
-
-启用 WSS：
-
-```bash
-cd /SecureChat
-export SECURECHAT_SIGNALING_TLS=1
-export SECURECHAT_TLS_CERT_FILE=/path/fullchain.pem
-export SECURECHAT_TLS_KEY_FILE=/path/privkey.pem
-./start.sh
-```
-
-客户端连接：
+`--mode wss` 默认使用：
 
 ```text
-wss://your-domain.example:25566
+certs/fullchain.pem
+certs/privkey.pem
 ```
 
-`ws://` 和 `wss://` 不能在同一个端口同时开启。需要同时保留 insecure mode 和 secure mode 时，分别用不同端口运行，或停止后切换模式重启。
-
-查看：
+本地或无证书环境可以显式使用 WS：
 
 ```bash
-cat host.pid
+./start_server.sh --mode ws
+```
+
+群主 Host 默认前台运行，作为可见成员连接 Server：
+
+```bash
+./start_host.sh --server wss://chat.la5te2.online:25566
+```
+
+其他成员用 Client 加入：
+
+```bash
+./start_client.sh --server wss://chat.la5te2.online:25566
+```
+
+`start_host.sh` 和 `start_client.sh` 会由底层 CLI 隐藏提示房间密码；前台模式可继续从终端发送消息和文件命令。
+
+当前阶段文本消息和附件命令 `/image`、`/file`、`/voice` 都通过 Server relay 转发密文；附件 metadata 和二进制 chunk 会在发送端加密，接收端解密后写入本地附件缓存。代码层不再建立 WebRTC/DataChannel。
+
+如果 Host 或 Client 确实要后台运行，必须显式加 `--daemon`，并从 stdin 或环境变量提供房间密码：
+
+```bash
+printf '%s\n' 'your-password' | ./start_host.sh --server wss://chat.la5te2.online:25566 --daemon
+printf '%s\n' 'your-password' | ./start_client.sh --server wss://chat.la5te2.online:25566 --daemon
+```
+
+查看和停止：
+
+```bash
+cat server.pid
 ss -lntp | grep ':25566'
+./stop_server.sh
+./stop_host.sh
+./stop_client.sh
 ```
 
 默认不保存日志。需要临时排障时显式启用：
 
 ```bash
-export SECURECHAT_LOG_FILE=host.log
-./start.sh
-tail -f host.log
+export SECURECHAT_SERVER_LOG_FILE=server.log
+./start_server.sh --mode wss
+tail -f server.log
 ```
 
-排障后建议删除 `host.log`，不要长期保存房间运行信息。
+排障后建议删除日志，不要长期保存房间运行信息。
 
-关闭：
-
-```bash
-./stop.sh
-```
+`ws://` 和 `wss://` 不能在同一个端口同时开启。需要同时保留 insecure mode 和 secure mode 时，分别用不同端口运行，或停止后切换模式重启。
 
 ## 附件
 
@@ -354,11 +323,19 @@ logs/voice
 logs/files
 ```
 
+附件缓存默认总量上限为 512 MB。可通过环境变量覆盖：
+
+```bash
+export SECURECHAT_LOGS_MAX_BYTES=1073741824
+```
+
+接收端会清理最旧的受管理附件缓存文件，但只清理 `logs/images`、`logs/voice`、`logs/files`。文件扩展名和文件头校验只能降低误传/伪装风险，不等于杀毒。
+
 因此建议总是从项目根目录启动：
 
 ```bash
 cd /SecureChat
-./out/build/x64-linux-release/host secure-room 25566 host
+./out/build/x64-linux-release/host --server ws://127.0.0.1:25566 secure-room host
 ```
 
 ## 常见问题
@@ -381,30 +358,29 @@ Test-NetConnection 124.70.71.65 -Port 25566
 进入房间但不能发送：
 
 ```text
-Data channel is not open yet
-Peer connection ended
+Waiting for room group key
 ```
 
-检查 STUN、UDP 端口。若需要日志，先用 `SECURECHAT_LOG_FILE=host.log ./start.sh` 临时启用：
+检查 Host 是否仍在线、Server 是否能把 `group_key` envelope 转发给 Client，以及 Client 是否已经完成 joined 流程。若需要日志，先用 `SECURECHAT_SERVER_LOG_FILE=server.log ./start_server.sh --mode wss` 临时启用 Server 日志；Host 端可用 `SECURECHAT_LOG_FILE=host.log ./start_host.sh --server wss://chat.la5te2.online:25566 --daemon` 临时排障：
 
 ```bash
-echo "$SECURECHAT_ICE_SERVERS"
 sudo ufw status
 ss -lntp | grep ':25566'
 ```
 
-Host 仍然监听但新连接 timeout：
+Server 仍然监听但新连接 timeout：
 
 ```bash
 ss -lntp | grep ':25566'
 ```
 
-可先重启 Host：
+可先重启 Server，并重新启动 Host：
 
 ```bash
 cd /SecureChat
-./stop.sh
-./start.sh
+./stop_server.sh
+./start_server.sh --mode wss
+./start_host.sh --server wss://chat.la5te2.online:25566
 ```
 
 ## 代理说明

@@ -18,7 +18,7 @@
 
 class SignalingServer {
 public:
-    // Starts the WebSocket signaling server used before WebRTC DataChannels open.
+    // Starts the WebSocket signaling server and opaque encrypted relay.
     explicit SignalingServer(uint16_t port);
     // Stops signaling when the server object leaves scope.
     ~SignalingServer();
@@ -48,6 +48,7 @@ private:
         std::string clientId;
         std::string userId;
         std::string username;
+        std::string publicKey;
         std::string role;
         std::shared_ptr<rtc::WebSocket> ws;
         std::size_t badMessageCount = 0;
@@ -57,9 +58,8 @@ private:
     void handleMessage(rtc::WebSocket* key, const std::string& payload);
     void handleCreateRoom(rtc::WebSocket* key, const json& data);
     void handleJoinRoom(rtc::WebSocket* key, const json& data);
-    void relayOffer(rtc::WebSocket* key, const json& data);
-    void relayAnswer(rtc::WebSocket* key, const json& data);
-    void relayIce(rtc::WebSocket* key, const json& data);
+    void relayGroupKey(rtc::WebSocket* key, const json& data);
+    void relayEncrypted(rtc::WebSocket* key, const json& data);
     void cleanup(rtc::WebSocket* key);
     void broadcastRoomMembers(const std::string& roomId);
     void rejectClient(const std::shared_ptr<rtc::WebSocket>& ws, const std::string& message);

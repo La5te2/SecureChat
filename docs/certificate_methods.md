@@ -12,7 +12,7 @@ certs/privkey.pem
 - `fullchain.pem`：证书链，传给 `SECURECHAT_TLS_CERT_FILE`
 - `privkey.pem`：私钥，传给 `SECURECHAT_TLS_KEY_FILE`
 
-项目里的 `certs/` 是推荐的本地证书放置目录，方便 Linux、Windows、WinUI 和 Web UI 使用同一套路径。`certs/` 已在 `.gitignore` 中，不应提交证书和私钥。
+项目里的 `certs/` 是推荐的本地证书放置目录，方便 Linux 和 Windows 的独立 Server 使用同一套路径。`certs/` 已在 `.gitignore` 中，不应提交证书和私钥。
 
 ## 域名要求
 
@@ -102,7 +102,7 @@ sudo chown "$USER:$USER" certs/fullchain.pem certs/privkey.pem
 export SECURECHAT_SIGNALING_TLS=1
 export SECURECHAT_TLS_CERT_FILE=certs/fullchain.pem
 export SECURECHAT_TLS_KEY_FILE=certs/privkey.pem
-./start.sh
+./start_server.sh --mode wss
 ```
 
 如果使用 C++ CLI 直接启动：
@@ -111,14 +111,14 @@ export SECURECHAT_TLS_KEY_FILE=certs/privkey.pem
 export SECURECHAT_SIGNALING_TLS=1
 export SECURECHAT_TLS_CERT_FILE=certs/fullchain.pem
 export SECURECHAT_TLS_KEY_FILE=certs/privkey.pem
-./out/build/x64-linux-release/host secure-room 25566 host
+./out/build/x64-linux-release/server 25566
 ```
 
 切回 WS：
 
 ```bash
 export SECURECHAT_SIGNALING_TLS=0
-./start.sh
+./start_server.sh --mode ws
 ```
 
 或者清理环境变量：
@@ -127,7 +127,7 @@ export SECURECHAT_SIGNALING_TLS=0
 unset SECURECHAT_SIGNALING_TLS
 unset SECURECHAT_TLS_CERT_FILE
 unset SECURECHAT_TLS_KEY_FILE
-./start.sh
+./start_server.sh --mode ws
 ```
 
 ## Linux：续期后更新 certs/
@@ -153,11 +153,11 @@ sudo cp /etc/letsencrypt/live/chat.la5te2.online/privkey.pem certs/privkey.pem
 sudo chmod 600 certs/fullchain.pem certs/privkey.pem
 ```
 
-如果 Host 正在运行，需要重启，让它重新读取证书：
+如果 Server 正在运行，需要重启，让它重新读取证书：
 
 ```bash
-./stop.sh
-./start.sh
+./stop_server.sh
+./start_server.sh --mode wss
 ```
 
 ## Windows：使用 certs/
@@ -169,42 +169,28 @@ D:\Programming\CyberSecurity\Lessons\Experiment\SecureChat\certs\fullchain.pem
 D:\Programming\CyberSecurity\Lessons\Experiment\SecureChat\certs\privkey.pem
 ```
 
-WinUI：
-
-1. 打开设置面板；
-2. 打开 `WSS` 开关；
-3. 填写：
+WinUI 和 Windows Web 现在不配置证书路径。它们作为 Host/Client 连接外部 Server，只需要在 Host 或 Join 页面填写：
 
 ```text
-Certificate PEM: D:\Programming\CyberSecurity\Lessons\Experiment\SecureChat\certs\fullchain.pem
-Private key PEM: D:\Programming\CyberSecurity\Lessons\Experiment\SecureChat\certs\privkey.pem
+wss://chat.la5te2.online:25566
 ```
 
-Windows Web：
+证书和私钥只配置在独立 Server 进程上。
 
-1. 打开浏览器中的 Host 面板；
-2. 打开 `WSS` 开关；
-3. 填写：
-
-```text
-Certificate PEM: D:\Programming\CyberSecurity\Lessons\Experiment\SecureChat\certs\fullchain.pem
-Private key PEM: D:\Programming\CyberSecurity\Lessons\Experiment\SecureChat\certs\privkey.pem
-```
-
-Windows C++ CLI：
+Windows C++ Server：
 
 ```bat
 set SECURECHAT_SIGNALING_TLS=1
 set SECURECHAT_TLS_CERT_FILE=certs\fullchain.pem
 set SECURECHAT_TLS_KEY_FILE=certs\privkey.pem
-out\build\x64-release\host.exe secure-room 25566 host
+out\build\x64-release\server.exe 25566
 ```
 
 切回 WS：
 
 ```bat
 set SECURECHAT_SIGNALING_TLS=0
-out\build\x64-release\host.exe secure-room 25566 host
+out\build\x64-release\server.exe 25566
 ```
 
 ## Windows：获得 PEM 证书

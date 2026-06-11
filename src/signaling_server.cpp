@@ -12,8 +12,8 @@ constexpr std::size_t maxSignalingClients = 32;
 constexpr std::size_t maxRoomClients = 16;
 constexpr std::size_t maxBadMessagesPerClient = 4;
 constexpr std::size_t maxPasswordBytes = 256;
-constexpr std::size_t maxSdpBytes = 128 * 1024;
-constexpr std::size_t maxIceCandidateBytes = 4096;
+constexpr std::size_t maxRelayFieldBytes = 512 * 1024;
+constexpr std::size_t maxPublicKeyBytes = 128;
 constexpr auto maintenanceInterval = std::chrono::seconds(15);
 constexpr auto healthLogInterval = std::chrono::minutes(1);
 
@@ -78,37 +78,69 @@ void requireFieldsForType(const json& data, const std::string& type) {
         stringField(data, "password", maxPasswordBytes, true);
     }
     else if (type == "join_room") {
-        if (!hasOnlyFields(data, {"type", "roomId", "username", "password"})) {
+        if (!hasOnlyFields(data, {"type", "roomId", "username", "password", "publicKey"})) {
             throw std::runtime_error("join_room has unknown field");
         }
         stringField(data, "roomId", 64, true);
         stringField(data, "username", 64, true);
         stringField(data, "password", maxPasswordBytes, true);
+        stringField(data, "publicKey", maxPublicKeyBytes, true);
     }
-    else if (type == "offer") {
-        if (!hasOnlyFields(data, {"type", "roomId", "target", "sdp"})) {
-            throw std::runtime_error("offer has unknown field");
+    else if (type == "group_key") {
+        if (!hasOnlyFields(data, {
+                "type",
+                "version",
+                "roomId",
+                "targetId",
+                "senderId",
+                "alg",
+                "kdf",
+                "ephemeralPublicKey",
+                "nonce",
+                "ciphertext",
+                "tag"})) {
+            throw std::runtime_error("group_key has unknown field");
+        }
+        if (!data.contains("version") || !data["version"].is_number_integer()) {
+            throw std::runtime_error("group_key version must be an integer");
         }
         stringField(data, "roomId", 64, true);
-        stringField(data, "target", 64, true);
-        stringField(data, "sdp", maxSdpBytes, true);
+        stringField(data, "targetId", 64, true);
+        stringField(data, "senderId", 64, true);
+        stringField(data, "alg", 32, true);
+        stringField(data, "kdf", 64, true);
+        stringField(data, "ephemeralPublicKey", maxPublicKeyBytes, true);
+        stringField(data, "nonce", 64, true);
+        stringField(data, "ciphertext", 256, true);
+        stringField(data, "tag", 64, true);
     }
-    else if (type == "answer") {
-        if (!hasOnlyFields(data, {"type", "roomId", "from", "sdp"})) {
-            throw std::runtime_error("answer has unknown field");
+    else if (type == "encrypted_relay") {
+        if (!hasOnlyFields(data, {
+                "type",
+                "version",
+                "roomId",
+                "senderId",
+                "senderName",
+                "senderKind",
+                "alg",
+                "kdf",
+                "nonce",
+                "ciphertext",
+                "tag"})) {
+            throw std::runtime_error("encrypted_relay has unknown field");
+        }
+        if (!data.contains("version") || !data["version"].is_number_integer()) {
+            throw std::runtime_error("encrypted_relay version must be an integer");
         }
         stringField(data, "roomId", 64, true);
-        stringField(data, "from", 64, true);
-        stringField(data, "sdp", maxSdpBytes, true);
-    }
-    else if (type == "ice") {
-        if (!hasOnlyFields(data, {"type", "roomId", "from", "target", "candidate"})) {
-            throw std::runtime_error("ice has unknown field");
-        }
-        stringField(data, "roomId", 64, true);
-        stringField(data, "from", 64, false);
-        stringField(data, "target", 64, true);
-        stringField(data, "candidate", maxIceCandidateBytes, true);
+        stringField(data, "senderId", 64, true);
+        stringField(data, "senderName", 64, true);
+        stringField(data, "senderKind", 32, true);
+        stringField(data, "alg", 32, true);
+        stringField(data, "kdf", 64, true);
+        stringField(data, "nonce", 64, true);
+        stringField(data, "ciphertext", maxRelayFieldBytes, true);
+        stringField(data, "tag", 64, true);
     }
     else {
         throw std::runtime_error("unknown signaling type");
@@ -136,8 +168,8 @@ SignalingServer::SignalingServer(uint16_t port) {
         if (certFile.empty() || keyFile.empty()) {
             throw std::runtime_error("SECURECHAT_TLS_CERT_FILE and SECURECHAT_TLS_KEY_FILE are required when SECURECHAT_SIGNALING_TLS=1");
         }
-        // WSS protects room password, SDP, and ICE metadata in transit. It does
-        // not make the host unable to see application-layer chat content.
+        // WSS protects room passwords and relay envelopes in transit. It does
+        // not replace application-layer E2EE.
         config.enableTls = true;
         config.certificatePemFile = certFile;
         config.keyPemFile = keyFile;
@@ -202,7 +234,7 @@ void SignalingServer::addClient(std::shared_ptr<rtc::WebSocket> ws) {
             serverFull = true;
         }
         else {
-            mClients[key] = ClientState{"", "", "", "", "", ws};
+            mClients[key] = ClientState{"", "", "", "", "", "", ws};
         }
     }
     if (serverFull) {
@@ -242,14 +274,11 @@ void SignalingServer::handleMessage(rtc::WebSocket* key, const std::string& payl
         else if (type == "join_room") {
             handleJoinRoom(key, data);
         }
-        else if (type == "offer") {
-            relayOffer(key, data);
+        else if (type == "encrypted_relay") {
+            relayEncrypted(key, data);
         }
-        else if (type == "answer") {
-            relayAnswer(key, data);
-        }
-        else if (type == "ice") {
-            relayIce(key, data);
+        else if (type == "group_key") {
+            relayGroupKey(key, data);
         }
         else {
             sendToClient(key, {{"type", "error"}, {"message", "unknown type: " + type}});
@@ -282,15 +311,15 @@ void SignalingServer::handleCreateRoom(rtc::WebSocket* key, const json& data) {
 
     std::shared_ptr<rtc::WebSocket> ws;
     UserAccount account;
-    bool alreadyHosting = false;
+    bool roomAlreadyExists = false;
     {
         std::lock_guard<std::mutex> lock(mMutex);
         auto client = findClient(key);
         if (!client) return;
 
-        if (!mRooms.empty()) {
+        if (mRooms.find(roomId) != mRooms.end()) {
             ws = client->ws;
-            alreadyHosting = true;
+            roomAlreadyExists = true;
         }
         else {
             account = mAuth.registerOrLogin(username, "local-account");
@@ -306,10 +335,10 @@ void SignalingServer::handleCreateRoom(rtc::WebSocket* key, const json& data) {
         }
     }
 
-    if (alreadyHosting) {
-        // Send outside mMutex. libdatachannel callbacks can be re-entrant, and
-        // a slow/broken peer must not block the signaling server's client map.
-        safeSend(ws, {{"type", "error"}, {"message", "signaling server already hosts a room"}});
+    if (roomAlreadyExists) {
+        // Send outside mMutex. WebSocket callbacks can be re-entrant, and a
+        // slow/broken peer must not block the signaling server's client map.
+        safeSend(ws, {{"type", "error"}, {"message", "room already exists"}});
         return;
     }
 
@@ -327,12 +356,13 @@ void SignalingServer::handleJoinRoom(rtc::WebSocket* key, const json& data) {
     const std::string roomId = data.value("roomId", "");
     const std::string username = data.value("username", "");
     const std::string password = data.value("password", "");
+    const std::string publicKey = data.value("publicKey", "");
     std::shared_ptr<rtc::WebSocket> clientWs;
     std::shared_ptr<rtc::WebSocket> hostWs;
     std::string clientId;
     UserAccount account;
 
-    if (!validName(roomId, 64) || !validName(username, 64)) {
+    if (!validName(roomId, 64) || !validName(username, 64) || publicKey.empty()) {
         sendToClient(key, {{"type", "error"}, {"message", "invalid room or username"}});
         return;
     }
@@ -370,6 +400,7 @@ void SignalingServer::handleJoinRoom(rtc::WebSocket* key, const json& data) {
                 client->clientId = clientId;
                 client->userId = account.userId;
                 client->username = account.username;
+                client->publicKey = publicKey;
                 client->role = "client";
             }
         }
@@ -401,146 +432,119 @@ void SignalingServer::handleJoinRoom(rtc::WebSocket* key, const json& data) {
         {"roomId", roomId},
         {"clientId", clientId},
         {"userId", account.userId},
-        {"username", account.username}
+        {"username", account.username},
+        {"publicKey", publicKey}
     });
     safeSend(hostWs, {
         {"type", "new_client"},
         {"clientId", clientId},
         {"userId", account.userId},
-        {"username", account.username}
+        {"username", account.username},
+        {"publicKey", publicKey}
     });
     broadcastRoomMembers(roomId);
 }
 
-void SignalingServer::relayOffer(rtc::WebSocket* key, const json& data) {
-    const std::string target = data.value("target", "");
-    std::shared_ptr<rtc::WebSocket> sender;
-    std::shared_ptr<rtc::WebSocket> targetWs;
-    bool senderIsHost = false;
-
-    {
-        std::lock_guard<std::mutex> lock(mMutex);
-        auto state = findClient(key);
-        sender = state ? state->ws : nullptr;
-        senderIsHost = state && state->role == "host";
-        auto room = findRoom(data.value("roomId", ""), state);
-        if (room) {
-            auto targetClient = room->clients.find(target);
-            if (targetClient != room->clients.end()) targetWs = targetClient->second;
-        }
-    }
-
-    if (!senderIsHost) {
-        // Clients must not be able to inject offers to other clients.
-        safeSend(sender, {{"type", "error"}, {"message", "offer is host-only"}});
-        return;
-    }
-
-    if (!targetWs) {
-        safeSend(sender, {{"type", "error"}, {"message", "target client not found"}});
-        return;
-    }
-
-    safeSend(targetWs, {{"type", "offer"}, {"sdp", data.value("sdp", "")}});
-    std::cout << "[signal] offer host -> " << target << std::endl;
-}
-
-void SignalingServer::relayAnswer(rtc::WebSocket* key, const json& data) {
-    std::shared_ptr<rtc::WebSocket> senderWs;
-    std::shared_ptr<rtc::WebSocket> hostWs;
-    std::string senderId;
-    bool senderIsClient = false;
-    bool senderMatchesClaim = false;
-
-    {
-        std::lock_guard<std::mutex> lock(mMutex);
-        auto client = findClient(key);
-        senderWs = client ? client->ws : nullptr;
-        senderId = data.value("from", client ? client->clientId : "");
-        senderIsClient = client && client->role == "client";
-        senderMatchesClaim = client && senderId == client->clientId;
-        auto room = findRoom(data.value("roomId", ""), client);
-        if (room) hostWs = room->host;
-    }
-
-    if (!senderIsClient || !senderMatchesClaim) {
-        // Do not trust the JSON "from" field unless it matches the WebSocket state.
-        safeSend(senderWs, {{"type", "error"}, {"message", "invalid answer sender"}});
-        return;
-    }
-
-    if (!hostWs || senderId.empty()) {
-        safeSend(senderWs, {{"type", "error"}, {"message", "host or sender not found"}});
-        return;
-    }
-
-    safeSend(hostWs, {{"type", "answer"}, {"clientId", senderId}, {"sdp", data.value("sdp", "")}});
-    std::cout << "[signal] answer " << senderId << " -> host" << std::endl;
-}
-
-void SignalingServer::relayIce(rtc::WebSocket* key, const json& data) {
+void SignalingServer::relayGroupKey(rtc::WebSocket* key, const json& data) {
     std::shared_ptr<rtc::WebSocket> senderWs;
     std::shared_ptr<rtc::WebSocket> targetWs;
-    std::string logLine;
-    bool authorized = false;
+    json envelope = data;
+    std::string roomId;
+    std::string targetId;
+    std::string errorMessage;
 
     {
         std::lock_guard<std::mutex> lock(mMutex);
-        auto client = findClient(key);
-        senderWs = client ? client->ws : nullptr;
-        auto room = findRoom(data.value("roomId", ""), client);
-        if (!room) {
-            targetWs = nullptr;
+        auto sender = findClient(key);
+        senderWs = sender ? sender->ws : nullptr;
+        if (!sender || sender->role != "host" || sender->roomId.empty() || sender->roomId != data.value("roomId", "")) {
+            errorMessage = "invalid group key sender";
         }
         else {
-            const std::string target = data.value("target", "");
-            if (client && client->role == "client" && target == chat::protocol::HostActorId) {
-                const std::string senderId = data.value("from", "");
-                authorized = senderId == client->clientId;
-                targetWs = room->host;
-                logLine = "[signal] ice " + senderId + " -> host";
+            auto room = findRoom(sender->roomId, sender);
+            targetId = data.value("targetId", "");
+            if (!room) {
+                errorMessage = "room not found";
             }
-            else if (client && client->role == "host") {
-                authorized = true;
-                auto targetClient = room->clients.find(target);
-                if (targetClient != room->clients.end()) {
-                    targetWs = targetClient->second;
-                    logLine = "[signal] ice host -> " + target;
+            else {
+                auto target = room->clients.find(targetId);
+                if (target == room->clients.end()) {
+                    errorMessage = "target client not found";
+                }
+                else {
+                    roomId = sender->roomId;
+                    targetWs = target->second;
+                    envelope["roomId"] = roomId;
+                    envelope["senderId"] = chat::protocol::HostActorId;
+                    envelope["targetId"] = targetId;
                 }
             }
         }
     }
 
-    if (!authorized) {
-        // ICE candidates affect connection routing, so enforce direction by role.
-        safeSend(senderWs, {{"type", "error"}, {"message", "invalid ice sender"}});
+    if (!errorMessage.empty()) {
+        safeSend(senderWs, {{"type", "error"}, {"message", errorMessage}});
         return;
     }
 
-    if (!targetWs) {
-        // Keep network I/O outside the mutex so bad ICE traffic from one peer
-        // cannot stall new WebSocket accepts or room membership cleanup.
-        safeSend(senderWs, {{"type", "error"}, {"message", "room not found"}});
-        return;
-    }
+    safeSend(targetWs, envelope);
+    std::cout << "[signal] group key host -> " << targetId << " room " << roomId << std::endl;
+}
 
-    if (data.value("target", "") == chat::protocol::HostActorId) {
-        std::string senderId;
-        {
-            std::lock_guard<std::mutex> lock(mMutex);
-            auto client = findClient(key);
-            senderId = data.value("from", client ? client->clientId : "");
+void SignalingServer::relayEncrypted(rtc::WebSocket* key, const json& data) {
+    std::shared_ptr<rtc::WebSocket> senderWs;
+    std::vector<std::shared_ptr<rtc::WebSocket>> recipients;
+    json envelope = data;
+    std::string roomId;
+    std::string senderId;
+    std::string errorMessage;
+
+    {
+        std::lock_guard<std::mutex> lock(mMutex);
+        auto sender = findClient(key);
+        senderWs = sender ? sender->ws : nullptr;
+        if (!sender || sender->roomId.empty() || sender->roomId != data.value("roomId", "")) {
+            errorMessage = "invalid encrypted relay sender";
         }
-        safeSend(targetWs, {
-            {"type", "ice"},
-            {"clientId", senderId},
-            {"candidate", data.value("candidate", "")}
-        });
+        else {
+            auto room = findRoom(sender->roomId, sender);
+            if (!room) {
+                errorMessage = "room not found";
+            }
+            else {
+                roomId = sender->roomId;
+                senderId = sender->clientId;
+                const std::string senderKind = sender->role == "host"
+                    ? chat::protocol::HostActorKind
+                    : chat::protocol::ClientActorKind;
+
+                // Server remains blind to ciphertext, but it still binds clear
+                // relay metadata to authenticated WebSocket state before forwarding.
+                envelope["roomId"] = roomId;
+                envelope["senderId"] = senderId;
+                envelope["senderName"] = sender->username;
+                envelope["senderKind"] = senderKind;
+
+                if (room->host && room->host.get() != key) recipients.push_back(room->host);
+                for (const auto& [_, ws] : room->clients) {
+                    if (ws && ws.get() != key) recipients.push_back(ws);
+                }
+            }
+        }
     }
-    else {
-        safeSend(targetWs, {{"type", "ice"}, {"candidate", data.value("candidate", "")}});
+
+    if (!errorMessage.empty()) {
+        safeSend(senderWs, {{"type", "error"}, {"message", errorMessage}});
+        return;
     }
-    std::cout << logLine << std::endl;
+
+    for (const auto& recipient : recipients) {
+        safeSend(recipient, envelope);
+    }
+
+    std::cout << "[signal] encrypted relay " << senderId
+              << " -> room " << roomId
+              << " recipients=" << recipients.size() << std::endl;
 }
 
 void SignalingServer::cleanup(rtc::WebSocket* key) {
@@ -683,8 +687,8 @@ void SignalingServer::maintenanceLoop() {
         }
 
         // Close callbacks should normally remove these entries. The periodic
-        // sweep is a fallback for missed callbacks or peers that disappear in
-        // ways libdatachannel reports only as a closed socket state.
+        // sweep is a fallback for missed callbacks or sockets that disappear
+        // without a clean close notification.
         for (auto* key : closedClients) {
             cleanup(key);
         }
@@ -727,7 +731,7 @@ SignalingServer::RoomSnapshot SignalingServer::roomSnapshotLocked(const std::str
 
 bool SignalingServer::clientNameInRoomLocked(const std::string& roomId, const std::string& username) const {
     for (const auto& [_, client] : mClients) {
-        if (client.roomId == roomId && client.role == "client" && client.username == username) {
+        if (client.roomId == roomId && client.username == username) {
             return true;
         }
     }

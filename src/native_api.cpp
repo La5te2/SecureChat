@@ -2,18 +2,13 @@
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
-#include <WinSock2.h>
-#include <Ws2tcpip.h>
-#include <iphlpapi.h>
 #include <Windows.h>
 #endif
 
 #include "native_api.h"
 
 #include "host_session_core.hpp"
-#include "lan_discovery.hpp"
 #include "client_session_core.hpp"
-#include "signaling_server.hpp"
 
 #include <rtc/rtc.hpp>
 
@@ -29,7 +24,6 @@
 #include <memory>
 #include <mutex>
 #include <cstdint>
-#include <set>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -42,17 +36,13 @@ constexpr DWORD exceptionHeapCorruption = 0xC0000374;
 std::recursive_mutex gMutex;
 chat_event_callback gCallback = nullptr;
 void* gUserData = nullptr;
-std::unique_ptr<SignalingServer> gSignalingServer;
-std::unique_ptr<LanRoomDiscoveryResponder> gLanResponder;
 std::shared_ptr<HostSessionCore> gHostSession;
 std::shared_ptr<ClientSessionCore> gPlSession;
-std::vector<std::unique_ptr<SignalingServer>> gRetiredSignalingServers;
 std::vector<std::shared_ptr<HostSessionCore>> gRetiredHostSessions;
 std::vector<std::shared_ptr<ClientSessionCore>> gRetiredPlSessions;
 std::atomic_bool gShutdownCleanupQueued = false;
 bool gLoggerInitialized = false;
 std::once_flag gCrashHandlerOnce;
-thread_local std::string gReturnedString;
 
 // Converts nullable C API strings into safe std::string values.
 std::string safeString(const char* value) {
@@ -246,81 +236,9 @@ void installNativeCrashHandlersOnce() {
     });
 }
 
-#ifdef _WIN32
-// Filters out loopback, link-local, and unspecified IPv4 addresses.
-bool isUsableIpv4(const std::string& address) {
-    return address.rfind("127.", 0) != 0 &&
-        address.rfind("169.254.", 0) != 0 &&
-        address != "0.0.0.0";
-}
-
-// Enumerates local IPv4 addresses that Client clients may be able to reach.
-std::vector<std::string> getLocalIpv4Addresses() {
-    ULONG bufferSize = 15 * 1024;
-    std::vector<unsigned char> buffer(bufferSize);
-    IP_ADAPTER_ADDRESSES* adapters = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buffer.data());
-
-    ULONG result = GetAdaptersAddresses(
-        AF_INET,
-        GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER,
-        nullptr,
-        adapters,
-        &bufferSize);
-
-    if (result == ERROR_BUFFER_OVERFLOW) {
-        buffer.resize(bufferSize);
-        adapters = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buffer.data());
-        result = GetAdaptersAddresses(
-            AF_INET,
-            GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER,
-            nullptr,
-            adapters,
-            &bufferSize);
-    }
-
-    std::set<std::string> addresses;
-    if (result != NO_ERROR) return {};
-
-    for (auto adapter = adapters; adapter; adapter = adapter->Next) {
-        if (adapter->OperStatus != IfOperStatusUp) continue;
-
-        for (auto unicast = adapter->FirstUnicastAddress; unicast; unicast = unicast->Next) {
-            auto sockaddr = unicast->Address.lpSockaddr;
-            if (!sockaddr || sockaddr->sa_family != AF_INET) continue;
-
-            char text[INET_ADDRSTRLEN] = {};
-            auto ipv4 = reinterpret_cast<sockaddr_in*>(sockaddr);
-            if (!InetNtopA(AF_INET, &ipv4->sin_addr, text, sizeof(text))) continue;
-
-            std::string address(text);
-            if (isUsableIpv4(address)) addresses.insert(address);
-        }
-    }
-
-    return {addresses.begin(), addresses.end()};
-}
-#else
-// Non-Windows builds currently do not advertise local IPv4 join addresses.
-std::vector<std::string> getLocalIpv4Addresses() {
-    return {};
-}
-#endif
-
-// Emits same-machine and LAN join endpoints through the native event callback.
-void emitJoinAddresses(const std::string& scheme, const std::string& roomId, int port) {
-    emitEvent("status", "Clients can join with:");
-    emitEvent("status", "client " + scheme + "://127.0.0.1:" + std::to_string(port) + " " + roomId + "  (same machine)");
-    for (const auto& address : getLocalIpv4Addresses()) {
-        emitEvent("status", "client " + scheme + "://" + address + ":" + std::to_string(port) + " " + roomId);
-    }
-}
-
 // Keeps a bounded tail of retired sessions alive for in-flight callbacks.
 void trimRetiredObjects() {
     constexpr std::size_t maxRetiredObjects = 8;
-    if (gRetiredSignalingServers.size() > maxRetiredObjects) {
-        gRetiredSignalingServers.erase(gRetiredSignalingServers.begin());
-    }
     if (gRetiredHostSessions.size() > maxRetiredObjects) {
         gRetiredHostSessions.erase(gRetiredHostSessions.begin());
     }
@@ -333,20 +251,10 @@ void trimRetiredObjects() {
 void clearRetiredObjectsForShutdown() {
     gRetiredPlSessions.clear();
     gRetiredHostSessions.clear();
-    gRetiredSignalingServers.clear();
 }
 
 // Stops current sessions and moves them aside until callbacks drain.
 void retireActiveObjects() {
-    if (gSignalingServer) {
-        gSignalingServer->closeAllRooms("host disconnected");
-        gSignalingServer->stop();
-        gRetiredSignalingServers.push_back(std::move(gSignalingServer));
-    }
-    if (gLanResponder) {
-        gLanResponder->stop();
-        gLanResponder.reset();
-    }
     if (gHostSession) {
         gHostSession->stop();
         gRetiredHostSessions.push_back(std::move(gHostSession));
@@ -367,13 +275,11 @@ void CHAT_CALL chat_set_event_callback(chat_event_callback callback, void* user_
     gUserData = user_data;
 }
 
-// Starts a host session and its local signaling/LAN responder services.
-int CHAT_CALL chat_host_start(const char* room_id, int port, const char* username, const char* password) {
+// Starts a Host participant against an already-running Server.
+// Server is the only long-lived listener; Host remains a room member and should
+// not open its own signaling listen port.
+int CHAT_CALL chat_host_start(const char* server_url, const char* room_id, const char* username, const char* password) {
     installNativeCrashHandlersOnce();
-    if (port <= 0 || port > 65535) {
-        emitEvent("error", "Invalid port");
-        return 0;
-    }
 
     try {
         initLoggerOnce();
@@ -382,48 +288,32 @@ int CHAT_CALL chat_host_start(const char* room_id, int port, const char* usernam
             retireActiveObjects();
         }
 
+        const std::string serverUrl = safeString(server_url);
         const std::string roomId = safeString(room_id);
         const std::string hostName = safeString(username).empty() ? "host" : safeString(username);
         const std::string roomPassword = safeString(password);
+        if (serverUrl.empty()) {
+            emitEvent("error", "Server URL is required");
+            return 0;
+        }
         if (roomPassword.empty()) {
             emitEvent("error", "Room password is required");
             return 0;
         }
-        if (lanRoomExists(roomId, 700)) {
-            emitEvent("error", "Room name already exists on LAN");
-            return 0;
-        }
 
-        auto signalingServer = std::make_unique<SignalingServer>(static_cast<uint16_t>(port));
-        const auto scheme = signalingServer->urlScheme();
-        const std::string wsUrl = scheme + "://127.0.0.1:" + std::to_string(signalingServer->port());
-        rtc::WebSocket::Configuration loopbackConfig;
-        // The embedded Host connects back to the local signaling server. Public
-        // certificates normally do not match 127.0.0.1, so only this internal
-        // loopback client skips verification when the server is in WSS mode.
-        if (scheme == "wss") {
-            loopbackConfig.disableTlsVerification = true;
-            loopbackConfig.connectionTimeout = std::chrono::seconds(15);
-        }
         auto hostSession = std::make_shared<HostSessionCore>(
-            wsUrl,
+            serverUrl,
             roomId,
             hostName,
-            roomPassword,
-            loopbackConfig);
-        auto lanResponder = std::make_unique<LanRoomDiscoveryResponder>(roomId, signalingServer->port(), hostName);
+            roomPassword);
         {
             std::lock_guard<std::recursive_mutex> lock(gMutex);
-            gSignalingServer = std::move(signalingServer);
             gHostSession = hostSession;
-            gLanResponder = std::move(lanResponder);
             gHostSession->setCallbacks(makeCallbacks());
         }
 
         hostSession->start();
-        gLanResponder->start();
-        emitEvent("status", "Hosting room on " + wsUrl);
-        emitJoinAddresses(scheme, roomId, port);
+        emitEvent("status", "Hosting room through " + serverUrl);
         return 1;
     }
     catch (const std::exception& e) {
@@ -432,18 +322,6 @@ int CHAT_CALL chat_host_start(const char* room_id, int port, const char* usernam
         emitEvent("error", e.what());
         return 0;
     }
-}
-
-// Returns discovered LAN rooms as a thread-local UTF-8 JSON string.
-const char* CHAT_CALL chat_discover_rooms_json(const char* room_id, int timeout_ms) {
-    installNativeCrashHandlersOnce();
-    try {
-        gReturnedString = lanRoomsJson(discoverLanRooms(safeString(room_id), timeout_ms));
-    }
-    catch (const std::exception& e) {
-        gReturnedString = std::string("{\"error\":\"") + e.what() + "\"}";
-    }
-    return gReturnedString.c_str();
 }
 
 // Starts a client session by connecting to an existing signaling server.
@@ -611,9 +489,9 @@ void CHAT_CALL chat_shutdown() {
         retireActiveObjects();
     }
 
-    // libdatachannel may deliver a few close/ICE callbacks after stop(). Retired
-    // objects stay alive briefly, but the cleanup runs off the WinUI close path
-    // so clicking the window close button does not freeze the desktop shell.
+    // WebSocket close callbacks can arrive after stop(). Retired objects stay
+    // alive briefly, but cleanup runs off the WinUI close path so clicking the
+    // window close button does not freeze the desktop shell.
     if (!gShutdownCleanupQueued.exchange(true)) {
         std::thread([]() {
             std::this_thread::sleep_for(std::chrono::milliseconds(1200));

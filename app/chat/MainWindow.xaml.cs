@@ -110,34 +110,51 @@ public sealed partial class MainWindow : Window
         isClosing = true;
         infoBarTimer.Stop();
 
-        System.Threading.ThreadPool.QueueUserWorkItem(_ =>
+        try
+        {
+            NativeMethods.chat_set_event_callback(NoOpCallback, IntPtr.Zero);
+        }
+        catch
+        {
+        }
+
+        System.Threading.Tasks.Task.Run(() =>
         {
             try
             {
-                NativeMethods.chat_set_event_callback(NoOpCallback, IntPtr.Zero);
                 NativeMethods.chat_shutdown();
             }
             catch
             {
             }
+            finally
+            {
+                Environment.Exit(0);
+            }
         });
 
-        App.Current.Exit();
-        Environment.Exit(0);
+        // Native WebSocket shutdown can occasionally wait on network teardown. Keep
+        // the UI close path bounded so the window does not appear stuck.
+        System.Threading.Tasks.Task.Run(async () =>
+        {
+            await System.Threading.Tasks.Task.Delay(1200);
+            Environment.Exit(0);
+        });
     }
 
     private void Host_Click(object sender, RoutedEventArgs e)
     {
-        if (!int.TryParse(HostPortBox.Text.Trim(), out var port))
+        var serverUrl = HostServerUrlBox.Text.Trim();
+        if (serverUrl.Length == 0)
         {
-            AddLine("error", "Invalid port.");
+            AddLine("error", "Server URL is required.");
             return;
         }
-        if (!ConfigureHostSignalingEnvironment()) return;
 
+        // Host is a participant now; only Server owns listening and TLS setup.
         var ok = NativeMethods.chat_host_start(
+            serverUrl,
             HostRoomBox.Text.Trim(),
-            port,
             HostUserBox.Text.Trim(),
             HostPasswordBox.Password);
         if (ok != 0)
@@ -147,49 +164,6 @@ public sealed partial class MainWindow : Window
             AddParticipant(HostUserBox.Text.Trim());
             SetSessionMode(SessionMode.Host);
         }
-    }
-
-    private bool ConfigureHostSignalingEnvironment()
-    {
-        var useWss = HostSignalModeSwitch.IsOn;
-        if (!useWss)
-        {
-            ClearHostSignalingEnvironment();
-            return true;
-        }
-
-        var certFile = HostTlsCertBox.Text.Trim();
-        var keyFile = HostTlsKeyBox.Text.Trim();
-        if (certFile.Length == 0 || keyFile.Length == 0)
-        {
-            AddLine("error", "WSS requires TLS certificate and private key files.");
-            return false;
-        }
-
-        Environment.SetEnvironmentVariable("SECURECHAT_SIGNALING_TLS", "1");
-        Environment.SetEnvironmentVariable("SECURECHAT_TLS_CERT_FILE", certFile);
-        Environment.SetEnvironmentVariable("SECURECHAT_TLS_KEY_FILE", keyFile);
-        Environment.SetEnvironmentVariable(
-            "SECURECHAT_TLS_KEY_PASS",
-            string.IsNullOrEmpty(HostTlsKeyPassBox.Password) ? null : HostTlsKeyPassBox.Password);
-        return true;
-    }
-
-    private static void ClearHostSignalingEnvironment()
-    {
-        Environment.SetEnvironmentVariable("SECURECHAT_SIGNALING_TLS", null);
-        Environment.SetEnvironmentVariable("SECURECHAT_TLS_CERT_FILE", null);
-        Environment.SetEnvironmentVariable("SECURECHAT_TLS_KEY_FILE", null);
-        Environment.SetEnvironmentVariable("SECURECHAT_TLS_KEY_PASS", null);
-    }
-
-    private void HostSignalModeSwitch_Toggled(object sender, RoutedEventArgs e)
-    {
-        if (HostTlsFieldsPanel is null) return;
-        HostTlsFieldsPanel.Visibility = HostSignalModeSwitch.IsOn
-            ? Visibility.Visible
-            : Visibility.Collapsed;
-        SaveAppConfigIfReady();
     }
 
     private void Join_Click(object sender, RoutedEventArgs e)
@@ -323,29 +297,6 @@ public sealed partial class MainWindow : Window
         return await picker.PickSingleFileAsync();
     }
 
-    private void Discover_Click(object sender, RoutedEventArgs e)
-    {
-        try
-        {
-            var json = NativeMethods.ChatDiscoverRoomsJson(JoinRoomBox.Text.Trim(), 900);
-            using var document = JsonDocument.Parse(json);
-            if (document.RootElement.ValueKind != JsonValueKind.Array || document.RootElement.GetArrayLength() == 0)
-            {
-                AddLine("status", "No LAN room found.");
-                return;
-            }
-
-            var room = document.RootElement[0];
-            if (room.TryGetProperty("url", out var url)) JoinUrlBox.Text = url.GetString() ?? JoinUrlBox.Text;
-            if (room.TryGetProperty("roomId", out var roomId)) JoinRoomBox.Text = roomId.GetString() ?? JoinRoomBox.Text;
-            AddLine("status", "LAN room selected.");
-        }
-        catch (Exception ex)
-        {
-            AddLine("error", "LAN discovery failed: " + ex.Message);
-        }
-    }
-
     private void AddLine(string kind, string message)
     {
         UpdateSessionStatus(kind, message);
@@ -372,13 +323,12 @@ public sealed partial class MainWindow : Window
         if (string.Equals(kind, "log", StringComparison.OrdinalIgnoreCase)) return true;
         if (!string.Equals(kind, "status", StringComparison.OrdinalIgnoreCase)) return false;
 
-        // GUI status is intentionally user-facing only. Endpoint and ICE details
+        // GUI status is intentionally user-facing only. Endpoint details
         // stay in CLI/log paths so the chat area does not expose network internals.
         return message.StartsWith("client ws://", StringComparison.OrdinalIgnoreCase) ||
             message.StartsWith("client wss://", StringComparison.OrdinalIgnoreCase) ||
             message.StartsWith("Clients can join with:", StringComparison.OrdinalIgnoreCase) ||
-            message.Contains("endpoint", StringComparison.OrdinalIgnoreCase) ||
-            message.Contains("ICE candidate", StringComparison.OrdinalIgnoreCase);
+            message.Contains("endpoint", StringComparison.OrdinalIgnoreCase);
     }
 
     private bool TryRenderAttachment(string kind, string path)
@@ -581,12 +531,7 @@ public sealed partial class MainWindow : Window
     {
         sessionMode = mode;
         HostButton.IsEnabled = mode == SessionMode.None;
-        HostSignalModeSwitch.IsEnabled = mode == SessionMode.None;
-        HostTlsCertBox.IsEnabled = mode == SessionMode.None;
-        HostTlsKeyBox.IsEnabled = mode == SessionMode.None;
-        HostTlsKeyPassBox.IsEnabled = mode == SessionMode.None;
         JoinButton.IsEnabled = mode == SessionMode.None;
-        DiscoverButton.IsEnabled = mode == SessionMode.None;
         StopButton.IsEnabled = true;
         MessageBox.IsEnabled = mode != SessionMode.None;
         SendModeBox.IsEnabled = mode != SessionMode.None;
@@ -621,9 +566,6 @@ public sealed partial class MainWindow : Window
             message == "Room is no longer available" ||
             message == "Signaling connection ended" ||
             message == "Signaling failed" ||
-            message == "Data channel closed" ||
-            message == "Peer connection ended" ||
-            message == "Peer disconnected" ||
             message == "Username already in room")
         {
             SetSessionMode(SessionMode.None);
@@ -1204,21 +1146,14 @@ public sealed partial class MainWindow : Window
             JoinPivotItem.Header = UiText("Join", "加入");
             RoomPivotItem.Header = UiText("Room", "房间");
             HostRoomBox.Header = UiText("Room", "房间");
-            HostPortBox.Header = UiText("Port", "端口");
+            HostServerUrlBox.Header = UiText("Server URL", "服务器 URL");
             HostUserBox.Header = UiText("User", "用户");
             HostPasswordBox.Header = UiText("Password", "密码");
-            HostSignalModeSwitch.Header = "WSS";
-            HostSignalModeSwitch.OffContent = UiText("Off", "关");
-            HostSignalModeSwitch.OnContent = UiText("On", "开");
-            HostTlsCertBox.Header = UiText("Certificate PEM", "证书 PEM");
-            HostTlsKeyBox.Header = UiText("Private key PEM", "私钥 PEM");
-            HostTlsKeyPassBox.Header = UiText("Key password", "私钥密码");
             HostButton.Content = UiText("Start Hosting", "启动房间");
             JoinUrlBox.Header = UiText("URL", "地址");
             JoinRoomBox.Header = UiText("Room", "房间");
             JoinUserBox.Header = UiText("User", "用户");
             JoinPasswordBox.Header = UiText("Password", "密码");
-            DiscoverButton.Content = UiText("Find LAN Room", "搜索局域网房间");
             JoinButton.Content = UiText("Join Room", "加入房间");
             RoomStatusHeaderText.Text = UiText("Room Status", "房间状态");
             RoomParticipantsHeaderText.Text = UiText("Participants", "参与者");
@@ -1243,7 +1178,6 @@ public sealed partial class MainWindow : Window
             ShowOnlyOwnToggleSwitch.Header = UiText("Only my messages", "只看自己");
             ShowOnlyOwnToggleSwitch.OnContent = UiText("On", "开");
             ShowOnlyOwnToggleSwitch.OffContent = UiText("Off", "关");
-
             ChatBackgroundHeaderText.Text = UiText("Chat Background", "聊天背景");
             ImportChatBackgroundButton.Content = UiText("Import Image", "导入图片");
             ClearChatBackgroundButton.Content = UiText("Clear Image", "清除图片");
@@ -1357,10 +1291,7 @@ public sealed partial class MainWindow : Window
             AppendYaml(builder, "infobar_seconds", NumberString(InfoBarSecondsSlider.Value));
             AppendYaml(builder, "settings_panel_opacity", NumberString(SettingsPanelOpacitySlider.Value));
             AppendYaml(builder, "show_only_own", showOnlyOwnMessages ? "true" : "false");
-            AppendYaml(builder, "host_wss", HostSignalModeSwitch.IsOn ? "true" : "false");
-            AppendYaml(builder, "host_tls_cert_file", HostTlsCertBox.Text.Trim());
-            AppendYaml(builder, "host_tls_key_file", HostTlsKeyBox.Text.Trim());
-            AppendYaml(builder, "host_tls_key_pass", HostTlsKeyPassBox.Password);
+            AppendYaml(builder, "host_server_url", HostServerUrlBox.Text.Trim());
             AppendYaml(builder, "chat_background_path", chatBackgroundPath ?? "");
             AppendYaml(builder, "chat_background_opacity", NumberString(BackgroundOpacitySlider.Value));
             AppendYaml(builder, "chat_background_crop_x", ComboTag(BackgroundHorizontalComboBox));
@@ -1398,11 +1329,7 @@ public sealed partial class MainWindow : Window
             SetSlider(SettingsPanelOpacitySlider, Value(chatValues, "settings_panel_opacity", "0.99"));
             showOnlyOwnMessages = Value(chatValues, "show_only_own", "false").Equals("true", StringComparison.OrdinalIgnoreCase);
             ShowOnlyOwnToggleSwitch.IsOn = showOnlyOwnMessages;
-            HostSignalModeSwitch.IsOn = Value(chatValues, "host_wss", "false").Equals("true", StringComparison.OrdinalIgnoreCase);
-            HostTlsCertBox.Text = Value(chatValues, "host_tls_cert_file", "");
-            HostTlsKeyBox.Text = Value(chatValues, "host_tls_key_file", "");
-            HostTlsKeyPassBox.Password = Value(chatValues, "host_tls_key_pass", "");
-            HostTlsFieldsPanel.Visibility = HostSignalModeSwitch.IsOn ? Visibility.Visible : Visibility.Collapsed;
+            HostServerUrlBox.Text = Value(chatValues, "host_server_url", "ws://127.0.0.1:25566");
             SetSlider(BackgroundOpacitySlider, Value(chatValues, "chat_background_opacity", "0.28"));
             SetComboByTag(BackgroundHorizontalComboBox, Value(chatValues, "chat_background_crop_x", "Center"));
             SetComboByTag(BackgroundVerticalComboBox, Value(chatValues, "chat_background_crop_y", "Center"));

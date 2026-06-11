@@ -35,6 +35,7 @@ std::array<unsigned char, 32> hashRoomPassword(const std::string& roomId, const 
 
 void RoomRegistry::createRoom(const std::string& roomId, const UserAccount& host, const std::string& password) {
     if (roomId.empty()) throw std::runtime_error("missing roomId");
+    if (mRooms.find(roomId) != mRooms.end()) throw std::runtime_error("room already exists");
 
     RoomState room;
     room.roomId = roomId;

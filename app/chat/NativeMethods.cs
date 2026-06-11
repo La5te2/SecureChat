@@ -18,8 +18,8 @@ internal static class NativeMethods
 
     [DllImport("native.dll", CallingConvention = CallingConvention.StdCall)]
     internal static extern int chat_host_start(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string serverUrl,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string roomId,
-        int port,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string username,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string password);
 
@@ -29,17 +29,6 @@ internal static class NativeMethods
         [MarshalAs(UnmanagedType.LPUTF8Str)] string roomId,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string username,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string password);
-
-    [DllImport("native.dll", CallingConvention = CallingConvention.StdCall)]
-    private static extern IntPtr chat_discover_rooms_json(
-        [MarshalAs(UnmanagedType.LPUTF8Str)] string roomId,
-        int timeoutMs);
-
-    internal static string ChatDiscoverRoomsJson(string roomId, int timeoutMs)
-    {
-        var ptr = chat_discover_rooms_json(roomId, timeoutMs);
-        return ptr == IntPtr.Zero ? "[]" : Marshal.PtrToStringUTF8(ptr) ?? "[]";
-    }
 
     [DllImport("native.dll", CallingConvention = CallingConvention.StdCall)]
     internal static extern int chat_send_line([MarshalAs(UnmanagedType.LPUTF8Str)] string line);

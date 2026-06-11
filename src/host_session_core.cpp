@@ -1,7 +1,7 @@
 #include "host_session_core.hpp"
 
 #include "attachment_transfer.hpp"
-#include "ice_config.hpp"
+#include "secure_relay.hpp"
 
 #include <algorithm>
 #include <cstddef>
@@ -22,6 +22,34 @@ std::string trimCopy(std::string value) {
     return value.substr(first, last - first + 1);
 }
 
+bool attachmentKindForMeta(const std::string& type, attachment::Kind& kind) {
+    if (type == "image_meta") {
+        kind = attachment::Kind::Image;
+        return true;
+    }
+    if (type == "file_meta") {
+        kind = attachment::Kind::Text;
+        return true;
+    }
+    if (type == "voice_meta") {
+        kind = attachment::Kind::Voice;
+        return true;
+    }
+    return false;
+}
+
+bool isAttachmentBinaryType(const std::string& type) {
+    return type == "image_binary" || type == "file_binary" || type == "voice_binary";
+}
+
+std::string actorIdFromMessage(const Message& msg) {
+    if (msg.payload.is_object() && msg.payload.contains("actorId") && msg.payload["actorId"].is_string()) {
+        const auto id = msg.payload["actorId"].get<std::string>();
+        if (!id.empty()) return id;
+    }
+    return msg.from;
+}
+
 }
 
 // Stores signaling endpoint for a plain SecureChat host session.
@@ -36,7 +64,8 @@ HostSessionCore::HostSessionCore(
       mUsername(std::move(username)),
       mPassword(std::move(password)),
       mWsConfig(std::move(wsConfig)) {
-    srand(static_cast<unsigned>(time(nullptr)));
+    const auto groupKey = chat::secure_relay::generateGroupKey();
+    mGroupKey.assign(groupKey.begin(), groupKey.end());
 }
 
 HostSessionCore::~HostSessionCore() = default;
@@ -82,23 +111,6 @@ void HostSessionCore::start() {
 // Closes all host-owned transports and marks the session stopped.
 void HostSessionCore::stop() {
     if (mStopped.exchange(true)) return;
-
-    std::vector<std::shared_ptr<rtc::DataChannel>> dataChannels;
-    std::vector<std::shared_ptr<rtc::PeerConnection>> peers;
-    {
-        std::lock_guard<std::mutex> lock(mPeersMutex);
-        for (auto& [_, dc] : mDataChannels) dataChannels.push_back(dc);
-        for (auto& [_, peer] : mPeers) peers.push_back(peer);
-        mPendingRemoteCandidates.clear();
-        mRemoteDescriptionReadyPeers.clear();
-    }
-
-    for (auto& dc : dataChannels) {
-        if (dc && dc->isOpen()) dc->close();
-    }
-    for (auto& peer : peers) {
-        if (peer) peer->close();
-    }
     if (mWs && !mWs->isClosed()) {
         mWs->close();
     }
@@ -129,74 +141,173 @@ void HostSessionCore::sendLine(const std::string& line) {
     const auto actor = currentHostActorName();
     Message msg = makeTextMessage(actor, line);
     setCurrentHostActorMetadata(msg);
-    broadcast(msg);
+    if (!chat::secure_relay::hasUsableGroupKey(mGroupKey)) {
+        chatEmit(mCallbacks.onError, "Room group key is not ready");
+        return;
+    }
+    if (!mWs || mWs->isClosed()) {
+        chatEmit(mCallbacks.onStatus, "Signaling channel is not open yet");
+        return;
+    }
+
+    const auto envelope = chat::secure_relay::encryptMessageWithGroupKey(
+        msg,
+        mRoomId,
+        chat::protocol::HostActorId,
+        mUsername,
+        chat::protocol::HostActorKind,
+        mGroupKey);
+    mWs->send(envelope.dump());
     chatEmit(mCallbacks.onMessage, msg.toJson());
 }
 
-// Sends an image to all open client DataChannels.
+// Sends an image to all room members through encrypted Server relay.
 bool HostSessionCore::sendImage(const std::string& filePath) {
-    const auto bytes = attachment::readFileBytes(filePath, attachment::Kind::Image);
-    const auto raw = attachment::toRtcBytes(bytes);
-    const auto actor = currentHostActorName();
-    Message meta = attachment::makeBinaryMeta("image_meta", actor, filePath, "application/octet-stream", bytes.size());
-    setCurrentHostActorMetadata(meta);
-
-    broadcast(meta);
-    std::vector<std::shared_ptr<rtc::DataChannel>> channels;
-    {
-        std::lock_guard<std::mutex> lock(mPeersMutex);
-        for (auto& [_, dc] : mDataChannels) channels.push_back(dc);
-    }
-    for (auto& dc : channels) {
-        if (dc && dc->isOpen()) attachment::sendTransferChunks(*dc, raw, meta, "image_binary", actor);
-    }
-    chatEmit(mCallbacks.onMessage, meta.toJson());
-    chatEmit(mCallbacks.onImage, filePath);
-    return true;
+    return sendAttachmentRelay(
+        filePath,
+        attachment::Kind::Image,
+        "image_meta",
+        "image_binary",
+        "application/octet-stream");
 }
 
-// Sends a text handout to all open client DataChannels.
+// Sends a text handout to all room members through encrypted Server relay.
 bool HostSessionCore::sendTextFile(const std::string& filePath) {
-    const auto bytes = attachment::readFileBytes(filePath, attachment::Kind::Text);
-    const auto raw = attachment::toRtcBytes(bytes);
-    const auto actor = currentHostActorName();
-    Message meta = attachment::makeBinaryMeta("file_meta", actor, filePath, "text/plain; charset=utf-8", bytes.size());
-    setCurrentHostActorMetadata(meta);
+    return sendAttachmentRelay(
+        filePath,
+        attachment::Kind::Text,
+        "file_meta",
+        "file_binary",
+        "text/plain; charset=utf-8");
+}
 
-    broadcast(meta);
-    std::vector<std::shared_ptr<rtc::DataChannel>> channels;
-    {
-        std::lock_guard<std::mutex> lock(mPeersMutex);
-        for (auto& [_, dc] : mDataChannels) channels.push_back(dc);
+// Sends a short WAV voice clip to all room members through encrypted Server relay.
+bool HostSessionCore::sendVoice(const std::string& filePath) {
+    return sendAttachmentRelay(
+        filePath,
+        attachment::Kind::Voice,
+        "voice_meta",
+        "voice_binary",
+        "audio/wav");
+}
+
+bool HostSessionCore::sendRelayMessage(
+    const Message& msg,
+    const std::string& senderId,
+    const std::string& senderName,
+    const std::string& senderKind) {
+    if (!chat::secure_relay::hasUsableGroupKey(mGroupKey)) {
+        chatEmit(mCallbacks.onError, "Room group key is not ready");
+        return false;
     }
-    for (auto& dc : channels) {
-        if (dc && dc->isOpen()) attachment::sendTransferChunks(*dc, raw, meta, "file_binary", actor);
+    if (!mWs || mWs->isClosed()) {
+        chatEmit(mCallbacks.onStatus, "Signaling channel is not open yet");
+        return false;
     }
-    chatEmit(mCallbacks.onMessage, meta.toJson());
-    chatEmit(mCallbacks.onFile, filePath);
+
+    const auto envelope = chat::secure_relay::encryptMessageWithGroupKey(
+        msg,
+        mRoomId,
+        senderId,
+        senderName,
+        senderKind,
+        mGroupKey);
+    mWs->send(envelope.dump());
     return true;
 }
 
-// Sends a short WAV voice clip to all open client DataChannels.
-bool HostSessionCore::sendVoice(const std::string& filePath) {
-    const auto bytes = attachment::readFileBytes(filePath, attachment::Kind::Voice);
-    const auto raw = attachment::toRtcBytes(bytes);
-    // Voice clips use their own meta type so the GUI can render an inline client.
-    const auto actor = currentHostActorName();
-    Message meta = attachment::makeBinaryMeta("voice_meta", actor, filePath, "audio/wav", bytes.size());
-    setCurrentHostActorMetadata(meta);
+bool HostSessionCore::sendGroupKeyToClient(const std::string& clientId, const std::string& clientPublicKey) {
+    if (!chat::secure_relay::hasUsableGroupKey(mGroupKey)) {
+        chatEmit(mCallbacks.onError, "Room group key is not ready");
+        return false;
+    }
+    if (!mWs || mWs->isClosed()) {
+        chatEmit(mCallbacks.onStatus, "Signaling channel is not open yet");
+        return false;
+    }
 
-    broadcast(meta);
-    std::vector<std::shared_ptr<rtc::DataChannel>> channels;
+    const auto envelope = chat::secure_relay::encryptGroupKeyForMember(
+        mGroupKey,
+        mRoomId,
+        clientId,
+        clientPublicKey);
+    mWs->send(envelope.dump());
+    chatEmit(mCallbacks.onStatus, "Group key sent to " + displayNameForClient(clientId));
+    return true;
+}
+
+void HostSessionCore::rotateGroupKey(const std::string& reason) {
+    const auto groupKey = chat::secure_relay::generateGroupKey();
+    mGroupKey.assign(groupKey.begin(), groupKey.end());
+    chatEmit(mCallbacks.onStatus, "Room group key rotated: " + reason);
+    sendGroupKeyToAllClients();
+}
+
+void HostSessionCore::sendGroupKeyToAllClients() {
+    std::vector<std::pair<std::string, std::string>> clients;
     {
-        std::lock_guard<std::mutex> lock(mPeersMutex);
-        for (auto& [_, dc] : mDataChannels) channels.push_back(dc);
+        std::lock_guard<std::mutex> lock(mClientsMutex);
+        clients.reserve(mClientPublicKeys.size());
+        for (const auto& [clientId, publicKey] : mClientPublicKeys) {
+            clients.push_back({clientId, publicKey});
+        }
     }
-    for (auto& dc : channels) {
-        if (dc && dc->isOpen()) attachment::sendTransferChunks(*dc, raw, meta, "voice_binary", actor);
+
+    // Server relays one opaque key envelope per member. It never receives the
+    // raw group key or participates in the GKA semantics.
+    for (const auto& [clientId, publicKey] : clients) {
+        sendGroupKeyToClient(clientId, publicKey);
     }
+}
+
+bool HostSessionCore::sendAttachmentRelay(
+    const std::string& filePath,
+    attachment::Kind kind,
+    const std::string& metaType,
+    const std::string& binaryType,
+    const std::string& mime) {
+    const auto bytes = attachment::readFileBytes(filePath, kind);
+    const auto actor = currentHostActorName();
+    Message meta = attachment::makeBinaryMeta(metaType, actor, filePath, mime, bytes.size());
+    setCurrentHostActorMetadata(meta);
+    if (!sendRelayMessage(meta, chat::protocol::HostActorId, mUsername, chat::protocol::HostActorKind)) {
+        return false;
+    }
+
+    const auto transferId = attachment::transferIdFromMessage(meta);
+    for (std::size_t offset = 0; offset < bytes.size(); offset += attachment::RelayChunkBytes) {
+        const auto chunkSize = (std::min)(attachment::RelayChunkBytes, bytes.size() - offset);
+        Message chunk;
+        chunk.type = binaryType;
+        chunk.from = actor;
+        chunk.name = meta.name;
+        chunk.mime = meta.mime;
+        chunk.data = attachment::base64Encode(bytes, offset, chunkSize);
+        chunk.payload = {
+            {"transferId", transferId},
+            {"name", meta.name},
+            {"mime", meta.mime},
+            {"size", static_cast<int>(bytes.size())},
+            {"offset", static_cast<int>(offset)},
+            {"chunkSize", static_cast<int>(chunkSize)}
+        };
+        setCurrentHostActorMetadata(chunk);
+        if (!sendRelayMessage(chunk, chat::protocol::HostActorId, mUsername, chat::protocol::HostActorKind)) {
+            return false;
+        }
+    }
+
     chatEmit(mCallbacks.onMessage, meta.toJson());
-    chatEmit(mCallbacks.onVoice, filePath);
+    const auto uiKind = attachment::eventKind(kind);
+    if (uiKind == "image") {
+        chatEmit(mCallbacks.onImage, filePath);
+    }
+    else if (uiKind == "voice") {
+        chatEmit(mCallbacks.onVoice, filePath);
+    }
+    else {
+        chatEmit(mCallbacks.onFile, filePath);
+    }
     return true;
 }
 
@@ -205,9 +316,8 @@ void HostSessionCore::handleSignalingMessage(const std::string& s) {
     if (mStopped.load()) return;
 
     try {
-        // Signaling is still untrusted network input even though it is only
-        // used for room setup and ICE exchange. Apply the same size/depth
-        // budget before reading typed fields from the JSON object.
+        // Signaling and relay messages are untrusted network input. Apply the
+        // same size/depth budget before reading typed fields from the JSON object.
         auto j = chat::protocol::parseJsonObjectWithBudget(
             s,
             chat::protocol::MaxSignalingMessageBytes,
@@ -216,6 +326,7 @@ void HostSessionCore::handleSignalingMessage(const std::string& s) {
 
         if (type == "room_created") {
             chatEmit(mCallbacks.onStatus, "Room created: " + mRoomId);
+            chatEmit(mCallbacks.onStatus, "Group key ready");
         }
         else if (type == "room_members") {
             std::ostringstream members;
@@ -230,78 +341,38 @@ void HostSessionCore::handleSignalingMessage(const std::string& s) {
         else if (type == "new_client") {
             std::string clientId = j.value("clientId", "");
             std::string username = j.value("username", clientId);
+            std::string publicKey = j.value("publicKey", "");
             {
-                std::lock_guard<std::mutex> lock(mPeersMutex);
+                std::lock_guard<std::mutex> lock(mClientsMutex);
                 mClientNames[clientId] = username;
+                if (!publicKey.empty()) mClientPublicKeys[clientId] = publicKey;
             }
-            if (!clientId.empty()) createPeer(clientId);
-        }
-        else if (type == "answer") {
-            std::string clientId = j.value("clientId", "");
-            std::shared_ptr<rtc::PeerConnection> peer;
-            {
-                std::lock_guard<std::mutex> lock(mPeersMutex);
-                auto it = mPeers.find(clientId);
-                if (it != mPeers.end()) peer = it->second;
-            }
-            if (peer) {
-                peer->setRemoteDescription(rtc::Description(j.at("sdp").get<std::string>(), "answer"));
-                std::vector<std::string> queuedCandidates;
-                {
-                    std::lock_guard<std::mutex> lock(mPeersMutex);
-                    mRemoteDescriptionReadyPeers.insert(clientId);
-                    auto queued = mPendingRemoteCandidates.find(clientId);
-                    if (queued != mPendingRemoteCandidates.end()) {
-                        queuedCandidates = std::move(queued->second);
-                        mPendingRemoteCandidates.erase(queued);
-                    }
+            if (!clientId.empty()) {
+                chatEmit(mCallbacks.onStatus, "Client joined: " + username);
+                if (publicKey.empty()) {
+                    chatEmit(mCallbacks.onError, "Client public key is missing: " + username);
                 }
-                for (const auto& candidate : queuedCandidates) {
-                    peer->addRemoteCandidate(rtc::Candidate(candidate));
+                else {
+                    rotateGroupKey("member joined");
                 }
-                if (!queuedCandidates.empty()) {
-                    chatEmit(mCallbacks.onLog, "Applied queued remote ICE candidates for " + clientId + ": " + std::to_string(queuedCandidates.size()));
-                }
-            }
-        }
-        else if (type == "ice") {
-            std::string clientId = j.value("clientId", "");
-            const auto candidate = j.at("candidate").get<std::string>();
-            std::shared_ptr<rtc::PeerConnection> peer;
-            bool remoteDescriptionReady = false;
-            {
-                std::lock_guard<std::mutex> lock(mPeersMutex);
-                auto it = mPeers.find(clientId);
-                if (it != mPeers.end()) peer = it->second;
-                remoteDescriptionReady = mRemoteDescriptionReadyPeers.find(clientId) != mRemoteDescriptionReadyPeers.end();
-                // Queue only candidates for the current active peer. ICE from a
-                // closed WebSocket/DataChannel can arrive late after reconnects;
-                // keeping those stale candidates can poison the next attempt.
-                if (peer && !remoteDescriptionReady) {
-                    mPendingRemoteCandidates[clientId].push_back(candidate);
-                }
-            }
-            if (peer && remoteDescriptionReady) {
-                peer->addRemoteCandidate(rtc::Candidate(candidate));
-            }
-            else if (!peer) {
-                chatEmit(mCallbacks.onLog, "Dropped remote ICE candidate for inactive peer " + clientId);
-            }
-            else {
-                chatEmit(mCallbacks.onLog, "Queued remote ICE candidate for " + clientId + " until answer is applied");
             }
         }
         else if (type == "client_left") {
             const std::string clientId = j.value("clientId", "");
-            // A left notification means this signaling identity is no longer
-            // valid. Retire the PeerConnection immediately so late ICE is
-            // treated as stale instead of being queued for a future reconnect.
             removePeer(clientId);
+        }
+        else if (type == chat::secure_relay::EnvelopeType) {
+            if (!chat::secure_relay::hasUsableGroupKey(mGroupKey)) {
+                chatEmit(mCallbacks.onError, "Room group key is not ready");
+                return;
+            }
+            const auto msg = chat::secure_relay::decryptMessageWithGroupKey(j, mRoomId, mGroupKey);
+            handleRelayMessage(msg);
         }
         else if (type == "error") {
             const std::string message = j.value("message", "unknown");
             chatEmit(mCallbacks.onError, "Signaling server error: " + message);
-            if (message == "signaling server already hosts a room") {
+            if (message == "room already exists") {
                 mStopped.store(true);
                 if (mWs && !mWs->isClosed()) mWs->close();
                 chatEmit(mCallbacks.onStatus, "Session stopped");
@@ -313,267 +384,75 @@ void HostSessionCore::handleSignalingMessage(const std::string& s) {
     }
 }
 
-// Creates a host-side PeerConnection and DataChannel for one client.
-void HostSessionCore::createPeer(const std::string& id) {
-    if (mStopped.load()) return;
-
-    std::string displayName = id;
-    {
-        std::lock_guard<std::mutex> lock(mPeersMutex);
-        auto name = mClientNames.find(id);
-        if (name != mClientNames.end()) displayName = name->second;
-    }
-    chatEmit(mCallbacks.onStatus, "Client joined: " + displayName);
-
-    // We create the single "chat" DataChannel before generating the offer.
-    // With auto negotiation disabled, setLocalDescription() below is the point
-    // that asks libdatachannel to gather ICE and emit an SDP offer.
-    auto config = makePeerConfiguration();
-    auto pc = std::make_shared<rtc::PeerConnection>(config);
-    {
-        std::lock_guard<std::mutex> lock(mPeersMutex);
-        mPendingRemoteCandidates.erase(id);
-        mRemoteDescriptionReadyPeers.erase(id);
-        mPeers[id] = pc;
-    }
-
-    pc->onStateChange([this, id](rtc::PeerConnection::State state) {
-        if (mStopped.load()) return;
-        chatEmit(mCallbacks.onLog, "Peer " + id + " state: " + std::to_string(static_cast<int>(state)));
-        if (state == rtc::PeerConnection::State::Failed ||
-            state == rtc::PeerConnection::State::Closed) {
-            removePeer(id);
-        }
-        else if (state == rtc::PeerConnection::State::Disconnected) {
-            retireDataChannel(id);
-        }
-    });
-
-    pc->onLocalDescription([this, id](rtc::Description desc) {
-        if (mStopped.load() || !mWs || mWs->isClosed()) return;
-        // SDP is opaque to our signaling layer; it only needs to be relayed to
-        // the matching Client so both libdatachannel peers can agree on transport.
-        json msg = {
-            {"type", "offer"},
-            {"roomId", mRoomId},
-            {"target", id},
-            {"sdp", static_cast<std::string>(desc)}
-        };
-        mWs->send(msg.dump());
-    });
-
-    pc->onLocalCandidate([this, id](rtc::Candidate candidate) {
-        if (mStopped.load() || !mWs || mWs->isClosed()) return;
-        // ICE candidates may arrive after the offer. Keep relaying them over
-        // WebSocket until libdatachannel has enough network paths to connect.
-        json msg = {
-            {"type", "ice"},
-            {"roomId", mRoomId},
-            {"target", id},
-            {"candidate", static_cast<std::string>(candidate)}
-        };
-        mWs->send(msg.dump());
-    });
-
-    auto dc = pc->createDataChannel("chat");
-
-    dc->onOpen([this, id, dc]() {
-        if (mStopped.load()) return;
-        {
-            std::lock_guard<std::mutex> lock(mPeersMutex);
-            mDataChannels[id] = dc;
-        }
-        chatEmit(mCallbacks.onStatus, "Data channel open: " + id);
-
-        Message welcome = makeTextMessage(currentHostActorName(), "Welcome " + displayNameForClient(id));
-        setCurrentHostActorMetadata(welcome);
-        dc->send(welcome.toJson());
-    });
-
-    dc->onClosed([this, id]() {
-        if (mStopped.load()) return;
-        retireDataChannel(id);
-        chatEmit(mCallbacks.onStatus, "Data channel closed: " + id);
-    });
-
-    dc->onMessage([this, id](rtc::message_variant data) {
-        if (mStopped.load()) return;
-        if (auto bin = std::get_if<rtc::binary>(&data)) {
-            handleBinaryData(id, *bin);
-            return;
-        }
-        handleData(id, rtcMessageToString(data));
-    });
-
-    pc->setLocalDescription();
-}
-
-// Removes a client peer and retains it briefly for callback safety.
+// Removes a client member and clears any staged attachment transfer from it.
 void HostSessionCore::removePeer(const std::string& id) {
     if (id.empty()) return;
     if (mStopped.load()) return;
 
-    retireDataChannel(id);
-
     std::string displayName = id;
     {
-        std::lock_guard<std::mutex> lock(mPeersMutex);
+        std::lock_guard<std::mutex> lock(mClientsMutex);
         auto name = mClientNames.find(id);
         if (name != mClientNames.end()) displayName = name->second;
-        auto peer = mPeers.find(id);
-        if (peer != mPeers.end()) {
-            mRetiredPeers.push_back(peer->second);
-            mPeers.erase(peer);
-        }
-        mPendingRemoteCandidates.erase(id);
-        mRemoteDescriptionReadyPeers.erase(id);
-    }
-    chatEmit(mCallbacks.onStatus, "Client left: " + displayName);
-}
-
-// Removes a DataChannel from the active map while keeping its shared_ptr alive.
-void HostSessionCore::retireDataChannel(const std::string& id) {
-    {
-        std::lock_guard<std::mutex> lock(mPeersMutex);
-        auto channel = mDataChannels.find(id);
-        if (channel != mDataChannels.end()) {
-            mRetiredDataChannels.push_back(channel->second);
-            mDataChannels.erase(channel);
-        }
+        mClientNames.erase(id);
+        mClientPublicKeys.erase(id);
     }
     mPendingTransfers.clear(id);
+    chatEmit(mCallbacks.onStatus, "Client left: " + displayName);
+    rotateGroupKey("member left");
 }
 
-// Handles one JSON/text DataChannel message from a client.
-void HostSessionCore::handleData(const std::string& id, const std::string& s) {
-    if (mStopped.load()) return;
-
-    bool parsedProtocolMessage = false;
-    try {
-        Message msg = Message::fromJson(s);
-        parsedProtocolMessage = true;
-        if (msg.from.empty()) msg.from = id;
-
-        if (msg.type == "text") {
-            Message out = msg;
-            out.from = displayNameForClient(id);
-            setActorMetadata(out, id, chat::protocol::ClientActorKind, out.from);
-            broadcast(out);
-            chatEmit(mCallbacks.onMessage, out.toJson());
-        }
-        else if (msg.type == "image_meta") {
-            Message out = msg;
-            out.from = displayNameForClient(id);
-            setActorMetadata(out, id, chat::protocol::ClientActorKind, out.from);
-            const auto transferId = attachment::transferIdFromMessage(out);
-            const auto pending = mPendingTransfers.stage(
-                id,
-                attachment::Kind::Image,
-                transferId,
-                out.name,
-                attachment::expectedSizeFromMeta(out, attachment::Kind::Image));
-            out.name = pending.name;
-            out.payload["transferId"] = pending.transferId;
-            out.payload["name"] = pending.name;
-            broadcastExcept(out, id);
-            chatEmit(mCallbacks.onMessage, out.toJson());
-            chatEmit(mCallbacks.onStatus, "Image meta received: " + pending.name);
-        }
-        else if (msg.type == "image_binary") {
-            if (msg.payload.contains("transferId") &&
-                attachment::transferIdFromMessage(msg) != mPendingTransfers.activeTransferId(id)) {
-                throw std::runtime_error("image binary marker transfer id does not match pending meta");
-            }
-            broadcastExcept(msg, id);
-            chatEmit(mCallbacks.onStatus, "Image binary received");
-        }
-        else if (msg.type == "file_meta") {
-            Message out = msg;
-            out.from = displayNameForClient(id);
-            setActorMetadata(out, id, chat::protocol::ClientActorKind, out.from);
-            const auto transferId = attachment::transferIdFromMessage(out);
-            const auto pending = mPendingTransfers.stage(
-                id,
-                attachment::Kind::Text,
-                transferId,
-                out.name,
-                attachment::expectedSizeFromMeta(out, attachment::Kind::Text));
-            out.name = pending.name;
-            out.payload["transferId"] = pending.transferId;
-            out.payload["name"] = pending.name;
-            broadcastExcept(out, id);
-            chatEmit(mCallbacks.onMessage, out.toJson());
-            chatEmit(mCallbacks.onStatus, "File meta received: " + pending.name);
-        }
-        else if (msg.type == "file_binary") {
-            if (msg.payload.contains("transferId") &&
-                attachment::transferIdFromMessage(msg) != mPendingTransfers.activeTransferId(id)) {
-                throw std::runtime_error("file binary marker transfer id does not match pending meta");
-            }
-            broadcastExcept(msg, id);
-            chatEmit(mCallbacks.onStatus, "File binary received");
-        }
-        else if (msg.type == "voice_meta") {
-            Message out = msg;
-            out.from = displayNameForClient(id);
-            setActorMetadata(out, id, chat::protocol::ClientActorKind, out.from);
-            const auto transferId = attachment::transferIdFromMessage(out);
-            const auto pending = mPendingTransfers.stage(
-                id,
-                attachment::Kind::Voice,
-                transferId,
-                out.name,
-                attachment::expectedSizeFromMeta(out, attachment::Kind::Voice));
-            out.name = pending.name;
-            out.payload["transferId"] = pending.transferId;
-            out.payload["name"] = pending.name;
-            broadcastExcept(out, id);
-            chatEmit(mCallbacks.onMessage, out.toJson());
-            chatEmit(mCallbacks.onStatus, "Voice meta received: " + pending.name);
-        }
-        else if (msg.type == "voice_binary") {
-            if (msg.payload.contains("transferId") &&
-                attachment::transferIdFromMessage(msg) != mPendingTransfers.activeTransferId(id)) {
-                throw std::runtime_error("voice binary marker transfer id does not match pending meta");
-            }
-            broadcastExcept(msg, id);
-            chatEmit(mCallbacks.onStatus, "Voice binary received");
-        }
-        else if (msg.type == "attachment_cancel") {
-            mPendingTransfers.clear(id);
-            broadcastExcept(msg, id);
-            chatEmit(mCallbacks.onStatus, "Attachment transfer canceled by " + id);
-        }
+void HostSessionCore::handleRelayMessage(const Message& msg) {
+    if (msg.type == "text") {
+        chatEmit(mCallbacks.onMessage, msg.toJson());
+        return;
     }
-    catch (const std::exception& e) {
-        if (!parsedProtocolMessage && mPendingTransfers.has(id)) {
-            rtc::binary bytes;
-            bytes.reserve(s.size());
-            for (unsigned char ch : s) {
-                bytes.push_back(static_cast<rtc::byte>(ch));
-            }
-            handleBinaryData(id, bytes);
-            return;
-        }
 
-        chatEmit(mCallbacks.onError, std::string("Bad data message from ") + id + ": " + e.what());
+    attachment::Kind kind = attachment::Kind::Text;
+    const auto senderKey = actorIdFromMessage(msg);
+    if (attachmentKindForMeta(msg.type, kind)) {
+        const auto transferId = attachment::transferIdFromMessage(msg);
+        const auto pending = mPendingTransfers.stage(
+            senderKey,
+            kind,
+            transferId,
+            msg.name,
+            attachment::expectedSizeFromMeta(msg, kind));
+        Message out = msg;
+        out.name = pending.name;
+        out.payload["transferId"] = pending.transferId;
+        out.payload["name"] = pending.name;
+        chatEmit(mCallbacks.onMessage, out.toJson());
+        chatEmit(mCallbacks.onStatus, "Encrypted attachment meta received: " + pending.name);
+        return;
     }
+
+    if (isAttachmentBinaryType(msg.type)) {
+        handleRelayBinaryChunk(senderKey, msg);
+        return;
+    }
+
+    if (msg.type == "attachment_cancel") {
+        mPendingTransfers.clear(senderKey);
+        chatEmit(mCallbacks.onStatus, "Encrypted attachment transfer canceled: " + msg.content);
+        return;
+    }
+
+    chatEmit(mCallbacks.onMessage, msg.toJson());
 }
 
-// Persists one binary attachment payload and relays it to other clients.
-void HostSessionCore::handleBinaryData(const std::string& id, const rtc::binary& data) {
-    if (mStopped.load()) return;
-
+void HostSessionCore::handleRelayBinaryChunk(const std::string& senderKey, const Message& msg) {
     std::string transferId;
     try {
-        transferId = mPendingTransfers.activeTransferId(id);
-        const auto result = mPendingTransfers.appendChunk(id, data);
+        transferId = attachment::transferIdFromMessage(msg);
+        if (transferId != mPendingTransfers.activeTransferId(senderKey)) {
+            throw std::runtime_error("attachment chunk transfer id does not match pending meta");
+        }
+        const auto result = mPendingTransfers.appendChunk(senderKey, attachment::base64DecodeToRtcBytes(msg.data));
         if (!result.found) {
-            chatEmit(mCallbacks.onError, "Unexpected binary file data from " + id);
+            chatEmit(mCallbacks.onError, "Unexpected encrypted attachment chunk from " + senderKey);
             return;
         }
-
-        broadcastBinary(data, id);
         if (!result.complete) return;
 
         const auto uiKind = attachment::eventKind(result.slot.kind);
@@ -588,76 +467,9 @@ void HostSessionCore::handleBinaryData(const std::string& id, const rtc::binary&
         }
     }
     catch (const std::exception& e) {
-        mPendingTransfers.clear(id);
-        if (!transferId.empty()) {
-            broadcastExcept(
-                attachment::makeTransferCancel(displayNameForClient(id), transferId, e.what()),
-                id);
-        }
-        chatEmit(mCallbacks.onError, std::string("File receive failed from ") + id + ": " + e.what());
+        mPendingTransfers.clear(senderKey);
+        chatEmit(mCallbacks.onError, std::string("Encrypted attachment receive failed from ") + senderKey + ": " + e.what());
     }
-}
-
-// Broadcasts a JSON message to every open client DataChannel.
-void HostSessionCore::broadcast(const Message& msg) {
-    broadcastExcept(msg, "");
-}
-
-// Broadcasts a JSON message to every open client DataChannel except one sender.
-void HostSessionCore::broadcastExcept(const Message& msg, const std::string& exceptId) {
-    std::string payload = msg.toJson();
-    bool sent = false;
-    std::vector<std::shared_ptr<rtc::DataChannel>> channels;
-    {
-        std::lock_guard<std::mutex> lock(mPeersMutex);
-        for (auto& [id, dc] : mDataChannels) {
-            if (!exceptId.empty() && id == exceptId) continue;
-            channels.push_back(dc);
-        }
-    }
-
-    // Snapshot channels before send: libdatachannel callbacks can close or
-    // retire a channel while another thread is broadcasting.
-    for (auto& dc : channels) {
-        if (dc && dc->isOpen()) {
-            dc->send(payload);
-            sent = true;
-        }
-    }
-
-    if (!sent && exceptId.empty()) {
-        chatEmit(mCallbacks.onStatus, "No open client data channels");
-    }
-}
-
-// Broadcasts a binary payload to every open client DataChannel except one sender.
-void HostSessionCore::broadcastBinary(const rtc::binary& data, const std::string& exceptId) {
-    std::vector<std::pair<std::string, std::shared_ptr<rtc::DataChannel>>> channels;
-    {
-        std::lock_guard<std::mutex> lock(mPeersMutex);
-        for (auto& [id, dc] : mDataChannels) channels.emplace_back(id, dc);
-    }
-
-    for (auto& [id, dc] : channels) {
-        if (!exceptId.empty() && id == exceptId) continue;
-        if (dc && dc->isOpen()) {
-            dc->send(data);
-        }
-    }
-}
-
-// Sends one JSON message to a specific client DataChannel.
-bool HostSessionCore::sendToClient(const std::string& id, const Message& msg) {
-    std::shared_ptr<rtc::DataChannel> dc;
-    {
-        std::lock_guard<std::mutex> lock(mPeersMutex);
-        auto it = mDataChannels.find(id);
-        if (it != mDataChannels.end()) dc = it->second;
-    }
-
-    if (!dc || !dc->isOpen()) return false;
-    dc->send(msg.toJson());
-    return true;
 }
 
 std::string HostSessionCore::currentHostActorName() {
@@ -683,28 +495,16 @@ void HostSessionCore::setActorMetadata(
     msg.payload["displayName"] = displayName;
 }
 
-// Sends a non-chat room notice to one client.
-void HostSessionCore::sendNoticeToClient(const std::string& id, const std::string& content) {
-    Message notice;
-    notice.type = "room_notice";
-    notice.from = currentHostActorName();
-    notice.to = id;
-    notice.content = content;
-    setCurrentHostActorMetadata(notice);
-    sendToClient(id, notice);
-}
-
 // Chooses the visible participant name from the signaling username.
 std::string HostSessionCore::displayNameForClient(const std::string& id) {
-    std::lock_guard<std::mutex> lock(mPeersMutex);
+    std::lock_guard<std::mutex> lock(mClientsMutex);
     auto name = mClientNames.find(id);
     return name == mClientNames.end() ? id : name->second;
 }
 
 // Resolves a username or user id token into the underlying client id when possible.
 std::string HostSessionCore::resolveClientId(const std::string& token) {
-    std::lock_guard<std::mutex> lock(mPeersMutex);
-    if (mDataChannels.find(token) != mDataChannels.end()) return token;
+    std::lock_guard<std::mutex> lock(mClientsMutex);
     if (mClientNames.find(token) != mClientNames.end()) return token;
     for (const auto& [id, name] : mClientNames) {
         if (name == token) return id;

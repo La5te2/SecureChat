@@ -31,10 +31,6 @@ const updateFileAccept = () => {
   $("fileInput").value = "";
 };
 
-const updateHostTlsFields = () => {
-  $("hostTlsFields").hidden = !$("hostSignalModeToggle").checked;
-};
-
 const addMessage = (kind, message) => {
   if (kind === "log" || kind === "status") return;
 
@@ -131,15 +127,12 @@ $("hostButton").addEventListener("click", async () => {
   state.room = $("hostRoom").value.trim();
   state.ownUser = $("hostUser").value.trim();
   refreshRoom();
+  // Host is a participant. The separate Server process owns listening and TLS.
   await api("/api/host", {
+    serverUrl: $("hostServerUrl").value.trim(),
     roomId: state.room,
-    port: Number($("hostPort").value),
     username: state.ownUser,
-    password: $("hostPassword").value,
-    signalingMode: $("hostSignalModeToggle").checked ? "wss" : "ws",
-    tlsCertFile: $("hostTlsCert").value.trim(),
-    tlsKeyFile: $("hostTlsKey").value.trim(),
-    tlsKeyPass: $("hostTlsKeyPass").value
+    password: $("hostPassword").value
   });
 });
 
@@ -154,19 +147,6 @@ $("joinButton").addEventListener("click", async () => {
     username: state.ownUser,
     password: $("joinPassword").value
   });
-});
-
-$("discoverButton").addEventListener("click", async () => {
-  const roomId = encodeURIComponent($("joinRoom").value.trim());
-  const response = await fetch(`/api/discover?roomId=${roomId}&timeoutMs=1500`);
-  const rooms = await response.json();
-  if (!Array.isArray(rooms) || rooms.length === 0) {
-    addMessage("status", "No LAN room found.");
-    return;
-  }
-  $("joinUrl").value = rooms[0].url || $("joinUrl").value;
-  $("joinRoom").value = rooms[0].roomId || $("joinRoom").value;
-  addMessage("status", "LAN room selected.");
 });
 
 $("stopButton").addEventListener("click", async () => {
@@ -199,8 +179,6 @@ $("sendForm").addEventListener("submit", async (event) => {
 });
 
 $("uploadKind").addEventListener("change", updateFileAccept);
-$("hostSignalModeToggle").addEventListener("change", updateHostTlsFields);
 
 refreshRoom();
 updateFileAccept();
-updateHostTlsFields();

@@ -20,7 +20,7 @@ struct RoomMember {
 
 class RoomRegistry {
 public:
-    // Creates or replaces a room with the given host and room password.
+    // Creates a room with the given host and room password.
     void createRoom(const std::string& roomId, const UserAccount& host, const std::string& password);
     // Checks whether the supplied room password matches the stored room password.
     bool passwordMatches(const std::string& roomId, const std::string& password) const;

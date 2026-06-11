@@ -5,7 +5,8 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# 查找 depend
+# libdatachannel is still used for WebSocket/WebSocketServer. SecureChat no
+# longer creates WebRTC PeerConnection/DataChannel transports.
 find_package(LibDataChannel CONFIG REQUIRED)
 find_package(OpenSSL REQUIRED)
 find_package(nlohmann_json REQUIRED)
@@ -15,10 +16,9 @@ add_library(core STATIC
     src/auth_service.cpp
     src/console_utils.cpp
     src/host_session_core.cpp
-    src/ice_config.cpp
-    src/lan_discovery.cpp
     src/client_session_core.cpp
     src/room_registry.cpp
+    src/secure_relay.cpp
     src/signaling_server.cpp
 )
 set_target_properties(core PROPERTIES POSITION_INDEPENDENT_CODE ON)
@@ -49,6 +49,15 @@ if(WIN32)
     target_link_libraries(host PRIVATE iphlpapi ws2_32 shell32)
 endif()
 target_include_directories(host PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+add_executable(server src/server_cli.cpp)
+target_link_libraries(server PRIVATE
+    core
+)
+if(WIN32)
+    target_link_libraries(server PRIVATE shell32)
+endif()
+target_include_directories(server PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 add_executable(client src/client_cli.cpp)
 target_link_libraries(client PRIVATE

@@ -13,25 +13,18 @@ fi
 ORIGINAL_DIR="$(pwd)"
 cd "$(dirname "${SCRIPT_PATH}")"
 
-PORT="${SECURECHAT_PORT:-25566}"
-PID_FILE="${SECURECHAT_PID_FILE:-host.pid}"
-LOG_FILE="${SECURECHAT_LOG_FILE:-}"
+PID_FILE="${SECURECHAT_CLIENT_PID_FILE:-client.pid}"
+LOG_FILE="${SECURECHAT_CLIENT_LOG_FILE:-}"
 
-clear_securechat_env() {
-  # stop.sh may be sourced during SSH diagnostics. Keep runtime cleanup in one
-  # place so stale SecureChat exports do not accidentally affect the next start.
-  unset SECURECHAT_HOST_BIN
+clear_securechat_client_env() {
+  unset SECURECHAT_CLIENT_BIN
+  unset SECURECHAT_SERVER_URL
   unset SECURECHAT_ROOM
-  unset SECURECHAT_PORT
   unset SECURECHAT_USER
-  unset SECURECHAT_PID_FILE
-  unset SECURECHAT_LOG_FILE
+  unset SECURECHAT_CLIENT_PID_FILE
+  unset SECURECHAT_CLIENT_LOG_FILE
   unset SECURECHAT_ROOM_PASSWORD
   unset SECURECHAT_ICE_SERVERS
-  unset SECURECHAT_SIGNALING_TLS
-  unset SECURECHAT_TLS_CERT_FILE
-  unset SECURECHAT_TLS_KEY_FILE
-  unset SECURECHAT_TLS_KEY_PASS
 }
 
 stop_pid() {
@@ -40,7 +33,7 @@ stop_pid() {
     return 0
   fi
 
-  echo "Stopping SecureChat Host: pid ${pid}"
+  echo "Stopping SecureChat Client: pid ${pid}"
   kill "${pid}" 2>/dev/null || true
 
   for _ in {1..20}; do
@@ -60,35 +53,24 @@ main() {
     pid="$(cat "${PID_FILE}" 2>/dev/null || true)"
   fi
 
-  if [[ -z "${pid}" ]] && command -v ss >/dev/null; then
-    pid="$(ss -lntp 2>/dev/null | sed -n "/:${PORT} /s/.*pid=\([0-9][0-9]*\).*/\1/p" | head -n 1)"
-  fi
-
   if [[ -z "${pid}" ]] && command -v pgrep >/dev/null; then
-    pid="$(pgrep -f 'out/build/x64-linux-release/host' | head -n 1 || true)"
+    pid="$(pgrep -f 'out/build/x64-linux-release/client' | head -n 1 || true)"
   fi
 
   if [[ -z "${pid}" ]]; then
-    echo "No SecureChat Host process found."
+    echo "No SecureChat Client process found."
     rm -f "${PID_FILE}"
-    clear_securechat_env
-    echo "SecureChat runtime environment cleared for this shell process."
+    clear_securechat_client_env
+    echo "SecureChat Client runtime environment cleared for this shell process."
     return 0
   fi
 
   stop_pid "${pid}"
   rm -f "${PID_FILE}"
-  clear_securechat_env
+  clear_securechat_client_env
 
-  if command -v ss >/dev/null && ss -lnt 2>/dev/null | grep -q ":${PORT} "; then
-    echo "WARNING: TCP port ${PORT} is still listening."
-    echo "Inspect it with:"
-    echo "  ss -lntp | grep ':${PORT}'"
-    return 1
-  fi
-
-  echo "Host stopped."
-  echo "SecureChat runtime environment cleared for this shell process."
+  echo "Client stopped."
+  echo "SecureChat Client runtime environment cleared for this shell process."
   if [[ -n "${LOG_FILE}" ]]; then
     echo "Log file kept:"
     echo "  ${LOG_FILE}"

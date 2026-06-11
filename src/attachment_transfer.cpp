@@ -1,22 +1,28 @@
 #include "attachment_transfer.hpp"
 
+#include <openssl/evp.h>
+
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <ctime>
 #include <fstream>
 #include <iterator>
 #include <limits>
 #include <sstream>
 #include <stdexcept>
+#include <system_error>
+#include <vector>
 
 namespace chat::attachment {
 namespace {
 constexpr std::size_t maxImageFileBytes = 10 * 1024 * 1024;
 constexpr std::size_t maxTextFileBytes = 50 * 1024 * 1024;
 constexpr std::size_t maxVoiceFileBytes = 100 * 1024 * 1024;
-constexpr std::size_t transferChunkBytes = 64 * 1024;
+constexpr std::uintmax_t defaultReceiveCacheBytes = 512ull * 1024ull * 1024ull;
 
 std::atomic_uint64_t gTransferCounter = 0;
 
@@ -30,6 +36,162 @@ std::string trimCopy(std::string value) {
     if (first == std::string::npos) return "";
     const auto last = value.find_last_not_of(" \t\r\n");
     return value.substr(first, last - first + 1);
+}
+
+std::string lowerAscii(std::string value) {
+    for (char& ch : value) {
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    }
+    return value;
+}
+
+std::string extensionOf(const std::string& name) {
+    const auto fileName = fileNameFromPath(name);
+    const auto dot = fileName.find_last_of('.');
+    if (dot == std::string::npos || dot == 0 || dot + 1 >= fileName.size()) return "";
+    return lowerAscii(fileName.substr(dot));
+}
+
+bool hasAllowedExtension(const std::string& name, Kind kind) {
+    const auto ext = extensionOf(name);
+    switch (kind) {
+    case Kind::Image:
+        return ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".bmp";
+    case Kind::Voice:
+        return ext == ".wav";
+    case Kind::Text:
+        return ext == ".txt" || ext == ".md" || ext == ".markdown" ||
+               ext == ".log" || ext == ".csv" || ext == ".json" ||
+               ext == ".xml" || ext == ".yml" || ext == ".yaml" ||
+               ext == ".ini" || ext == ".conf" || ext == ".cfg";
+    }
+    return false;
+}
+
+const char* extensionError(Kind kind) {
+    switch (kind) {
+    case Kind::Image: return "image extension must be PNG, JPEG, or BMP";
+    case Kind::Voice: return "voice extension must be WAV";
+    case Kind::Text: return "file extension is not in the supported text list";
+    }
+    return "file extension is not supported";
+}
+
+void validateExtensionOrThrow(const std::string& name, Kind kind) {
+    if (!hasAllowedExtension(name, kind)) {
+        throw std::runtime_error(extensionError(kind));
+    }
+}
+
+std::string stemOfLowerAscii(const std::string& name) {
+    auto fileName = fileNameFromPath(name);
+    const auto dot = fileName.find_last_of('.');
+    if (dot != std::string::npos) fileName.resize(dot);
+    return lowerAscii(fileName);
+}
+
+bool isWindowsReservedName(const std::string& name) {
+    const auto stem = stemOfLowerAscii(name);
+    if (stem == "con" || stem == "prn" || stem == "aux" || stem == "nul") return true;
+    if (stem.size() == 4 && (stem.rfind("com", 0) == 0 || stem.rfind("lpt", 0) == 0)) {
+        return stem[3] >= '1' && stem[3] <= '9';
+    }
+    return false;
+}
+
+std::uintmax_t receiveCacheLimitBytes() {
+    const char* raw = std::getenv("SECURECHAT_LOGS_MAX_BYTES");
+    if (!raw || !*raw) return defaultReceiveCacheBytes;
+
+    try {
+        const auto parsed = std::stoull(trimCopy(raw));
+        return parsed == 0 ? defaultReceiveCacheBytes : static_cast<std::uintmax_t>(parsed);
+    }
+    catch (...) {
+        return defaultReceiveCacheBytes;
+    }
+}
+
+std::filesystem::path receiveRootDirectory() {
+    return std::filesystem::current_path() / "logs";
+}
+
+void ensurePrivateDirectory(const std::filesystem::path& dir) {
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    if (ec) {
+        throw std::runtime_error("could not create attachment cache directory");
+    }
+
+    // On POSIX this makes received attachment caches owner-only. On Windows the
+    // standard permissions call may be a no-op, so failures are ignored.
+    std::filesystem::permissions(
+        dir,
+        std::filesystem::perms::owner_all,
+        std::filesystem::perm_options::replace,
+        ec);
+}
+
+struct CacheFile {
+    std::filesystem::path path;
+    std::uintmax_t size = 0;
+    std::filesystem::file_time_type modified{};
+};
+
+std::vector<std::filesystem::path> managedReceiveDirectories(const std::filesystem::path& root) {
+    return {
+        root / "images",
+        root / "voice",
+        root / "files"
+    };
+}
+
+std::uintmax_t pruneReceiveCacheFor(std::uintmax_t incomingBytes) {
+    const auto limit = receiveCacheLimitBytes();
+    if (incomingBytes > limit) {
+        throw std::runtime_error("attachment cache limit is smaller than incoming attachment");
+    }
+
+    const auto root = receiveRootDirectory();
+    ensurePrivateDirectory(root);
+    for (const auto& dir : managedReceiveDirectories(root)) {
+        ensurePrivateDirectory(dir);
+    }
+
+    std::vector<CacheFile> files;
+    std::uintmax_t total = 0;
+    std::error_code ec;
+    for (const auto& dir : managedReceiveDirectories(root)) {
+        if (!std::filesystem::exists(dir, ec)) continue;
+
+        for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
+            if (ec) break;
+            if (!entry.is_regular_file(ec)) continue;
+            const auto size = entry.file_size(ec);
+            if (ec) continue;
+            total += size;
+            files.push_back({entry.path(), size, entry.last_write_time(ec)});
+            ec.clear();
+        }
+    }
+
+    if (total + incomingBytes <= limit) return total;
+
+    std::sort(files.begin(), files.end(), [](const CacheFile& lhs, const CacheFile& rhs) {
+        return lhs.modified < rhs.modified;
+    });
+
+    for (const auto& file : files) {
+        std::filesystem::remove(file.path, ec);
+        if (ec) {
+            ec.clear();
+            continue;
+        }
+        total = file.size > total ? 0 : total - file.size;
+        if (total + incomingBytes <= limit) return total;
+    }
+
+    throw std::runtime_error("attachment cache is full; clear logs/ or increase SECURECHAT_LOGS_MAX_BYTES");
 }
 
 const char* defaultFileName(Kind kind) {
@@ -137,19 +299,30 @@ std::string safeTransferName(const std::string& name, const std::string& fallbac
         }
     }
     while (!safe.empty() && (safe.back() == '.' || safe.back() == ' ')) safe.pop_back();
-    return safe.empty() ? fallback : safe;
+    if (safe.empty() || isWindowsReservedName(safe)) safe = fallback;
+
+    constexpr std::size_t maxSafeFileNameBytes = 120;
+    if (safe.size() > maxSafeFileNameBytes) {
+        const auto ext = extensionOf(safe);
+        const auto keep = ext.size() < maxSafeFileNameBytes ? maxSafeFileNameBytes - ext.size() : maxSafeFileNameBytes;
+        safe = safe.substr(0, keep) + ext;
+    }
+    return safe;
 }
 
 std::string receiveDirectory(Kind kind) {
     const auto leaf = kind == Kind::Image ? "images" : (kind == Kind::Voice ? "voice" : "files");
-    auto dir = std::filesystem::current_path() / "logs" / leaf;
-    std::filesystem::create_directories(dir);
+    const auto root = receiveRootDirectory();
+    ensurePrivateDirectory(root);
+    auto dir = root / leaf;
+    ensurePrivateDirectory(dir);
     return pathToUtf8(dir);
 }
 
 std::string transferPath(const std::string& directory, const std::string& name, const std::string& fallback) {
     const auto safeName = safeTransferName(name, fallback);
-    const auto fileName = std::to_string(std::time(nullptr)) + "_" + safeName;
+    const auto unique = ++gTransferCounter;
+    const auto fileName = std::to_string(std::time(nullptr)) + "_" + std::to_string(unique) + "_" + safeName;
     return pathToUtf8(pathFromUtf8(directory) / pathFromUtf8(fileName));
 }
 
@@ -227,6 +400,8 @@ ReceiveSlot ReceiveStore::stage(
     if (expectedSize > maxBytes(kind)) {
         throw std::runtime_error(limitError(kind));
     }
+    validateExtensionOrThrow(name, kind);
+    pruneReceiveCacheFor(expectedSize);
 
     const auto fallback = defaultFileName(kind);
     ReceiveSlot slot;
@@ -336,6 +511,8 @@ bool hasExpectedFileSignature(const std::string& filePath, Kind kind) {
 }
 
 std::vector<unsigned char> readFileBytes(const std::string& filePath, Kind kind) {
+    validateExtensionOrThrow(filePath, kind);
+
     std::ifstream file(pathFromUtf8(filePath), std::ios::binary);
     if (!file) {
         throw std::runtime_error(std::string("could not open ") + label(kind) + " file");
@@ -352,12 +529,44 @@ std::vector<unsigned char> readFileBytes(const std::string& filePath, Kind kind)
     return bytes;
 }
 
-std::vector<rtc::byte> toRtcBytes(const std::vector<unsigned char>& bytes) {
-    std::vector<rtc::byte> raw(bytes.size());
-    for (std::size_t i = 0; i < bytes.size(); ++i) {
-        raw[i] = static_cast<rtc::byte>(bytes[i]);
+std::string base64Encode(const unsigned char* data, std::size_t size) {
+    if (size == 0) return "";
+    std::string out(static_cast<std::size_t>(4 * ((size + 2) / 3)), '\0');
+    const int written = EVP_EncodeBlock(
+        reinterpret_cast<unsigned char*>(out.data()),
+        data,
+        static_cast<int>(size));
+    if (written < 0) throw std::runtime_error("attachment base64 encode failed");
+    out.resize(static_cast<std::size_t>(written));
+    return out;
+}
+
+std::string base64Encode(const std::vector<unsigned char>& data, std::size_t offset, std::size_t size) {
+    if (offset > data.size()) throw std::runtime_error("attachment chunk offset is out of range");
+    const auto available = data.size() - offset;
+    if (size > available) throw std::runtime_error("attachment chunk size is out of range");
+    return base64Encode(data.data() + offset, size);
+}
+
+rtc::binary base64DecodeToRtcBytes(const std::string& value) {
+    if (value.empty()) return {};
+    std::vector<unsigned char> decoded(static_cast<std::size_t>(3 * value.size() / 4 + 3));
+    const int written = EVP_DecodeBlock(
+        decoded.data(),
+        reinterpret_cast<const unsigned char*>(value.data()),
+        static_cast<int>(value.size()));
+    if (written < 0) throw std::runtime_error("attachment base64 decode failed");
+
+    std::size_t padding = 0;
+    if (!value.empty() && value[value.size() - 1] == '=') ++padding;
+    if (value.size() > 1 && value[value.size() - 2] == '=') ++padding;
+    decoded.resize(static_cast<std::size_t>(written) - padding);
+    rtc::binary out;
+    out.reserve(decoded.size());
+    for (auto byte : decoded) {
+        out.push_back(static_cast<rtc::byte>(byte));
     }
-    return raw;
+    return out;
 }
 
 Message makeBinaryMeta(
@@ -391,29 +600,6 @@ Message makeTransferCancel(const std::string& from, const std::string& transferI
         {"reason", reason}
     };
     return cancel;
-}
-
-void sendTransferChunks(
-    rtc::DataChannel& channel,
-    const std::vector<rtc::byte>& raw,
-    const Message& meta,
-    const std::string& binaryType,
-    const std::string& from) {
-    Message binary;
-    binary.type = binaryType;
-    binary.from = from;
-    binary.payload = {
-        {"transferId", transferIdFromMessage(meta)},
-        {"name", meta.name},
-        {"mime", meta.mime},
-        {"size", static_cast<int>(raw.size())}
-    };
-    channel.send(binary.toJson());
-
-    for (std::size_t offset = 0; offset < raw.size(); offset += transferChunkBytes) {
-        const auto end = (std::min)(offset + transferChunkBytes, raw.size());
-        channel.send(rtc::binary(raw.begin() + static_cast<std::ptrdiff_t>(offset), raw.begin() + static_cast<std::ptrdiff_t>(end)));
-    }
 }
 
 } // namespace chat::attachment

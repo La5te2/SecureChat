@@ -3,6 +3,7 @@
 #include "attachment_transfer.hpp"
 #include "common.hpp"
 #include "events.hpp"
+#include "secure_relay.hpp"
 
 #include <rtc/rtc.hpp>
 
@@ -21,34 +22,34 @@ public:
 
     // Installs UI or console callbacks used for events and logs.
     void setCallbacks(ChatCallbacks callbacks);
-    // Connects to signaling and waits for the Host peer offer.
+    // Connects to the Server and joins the configured room.
     void start();
-    // Stops signaling, peer, and active transfer state.
+    // Stops signaling and active transfer state.
     void stop();
     // Reports whether the client session has been asked to stop.
     bool shouldStop() const;
-    // Reports whether the WebRTC DataChannel is currently open.
-    bool isDataChannelOpen() const;
     // Sends a text or attachment command to the host.
     void sendLine(const std::string& line);
-    // Sends an image file through the open DataChannel.
+    // Sends an image file through encrypted Server relay.
     bool sendImage(const std::string& filePath);
-    // Sends a text file through the open DataChannel.
+    // Sends a text file through encrypted Server relay.
     bool sendTextFile(const std::string& filePath);
-    // Sends a recorded voice clip through the open DataChannel.
+    // Sends a recorded voice clip through encrypted Server relay.
     bool sendVoice(const std::string& filePath);
 
 private:
     // Queues a local shutdown with a user-visible reason.
     void requestShutdown(const std::string& reason);
-    // Dispatches joined, SDP, ICE, and error signaling events.
+    // Dispatches joined, room membership, encrypted relay, and error events.
     void handleSignalingMessage(const std::string& s);
-    // Creates the client-side peer connection from the Host offer.
-    void createPeer(const std::string& sdp);
-    // Handles a binary DataChannel payload from Host.
-    void printDataBinary(const rtc::binary& data);
-    // Handles a JSON/text DataChannel payload from Host.
-    void printDataMessage(const std::string& s);
+    // Sends one encrypted relay message through the untrusted Server.
+    bool sendRelayMessage(const Message& msg, const std::string& senderId, const std::string& senderName, const std::string& senderKind);
+    // Sends one local attachment as encrypted metadata followed by encrypted chunks.
+    bool sendAttachmentRelay(const std::string& filePath, chat::attachment::Kind kind, const std::string& metaType, const std::string& binaryType, const std::string& mime);
+    // Handles one decrypted encrypted_relay application message.
+    void handleRelayMessage(const Message& msg);
+    // Reassembles one encrypted attachment chunk into the local cache.
+    void handleRelayBinaryChunk(const std::string& senderKey, const Message& msg);
     // Converts raw console/UI input into a protocol message.
     Message parseInput(const std::string& line);
 
@@ -60,17 +61,10 @@ private:
     std::string mClientId;
     ChatCallbacks mCallbacks;
     std::shared_ptr<rtc::WebSocket> mWs;
-    std::shared_ptr<rtc::PeerConnection> mPc;
-    std::shared_ptr<rtc::DataChannel> mDc;
-    std::atomic_bool mRemoteDescriptionReady = false;
-    std::atomic_bool mDataChannelEverOpened = false;
-    std::atomic_bool mDataChannelOpen = false;
+    chat::secure_relay::MemberKeyPair mMemberKeys;
+    std::vector<unsigned char> mGroupKey;
     std::atomic_bool mShutdownRequested = false;
     std::atomic_bool mStopped = false;
-    // Core attachment receive state. Client has one Host DataChannel, so all incoming
-    // transfers use the same store key.
+    // Core attachment receive state, keyed by sender actor id.
     chat::attachment::ReceiveStore mPendingTransfers;
-    // ICE candidates can be signaled before the SDP offer is fully applied.
-    // Keep them here so transport setup is not lost to WebSocket message order.
-    std::vector<std::string> mPendingRemoteCandidates;
 };

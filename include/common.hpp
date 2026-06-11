@@ -17,7 +17,7 @@ inline constexpr const char* ClientActorKind = "participant";
 inline constexpr const char* HostActorKind = "host";
 inline constexpr const char* ControlledActorKind = "controlled";
 
-inline constexpr std::size_t MaxDataChannelTextMessageBytes = 1024 * 1024;
+inline constexpr std::size_t MaxApplicationMessageBytes = 1024 * 1024;
 inline constexpr std::size_t MaxSignalingMessageBytes = 512 * 1024;
 inline constexpr std::size_t MaxJsonPayloadDepth = 16;
 inline constexpr std::size_t MaxJsonPayloadNodes = 4096;
@@ -104,7 +104,7 @@ inline void validateMessageSchema(const json& object) {
 }
 }
 
-// Message payload exchanged over WebRTC data channels.
+// Application payload exchanged through encrypted relay and local handlers.
 struct Message {
     std::string type;
     std::string from;
@@ -122,7 +122,7 @@ struct Message {
     static Message fromJson(const std::string& jsonStr) {
         auto j = chat::protocol::parseJsonObjectWithBudget(
             jsonStr,
-            chat::protocol::MaxDataChannelTextMessageBytes,
+            chat::protocol::MaxApplicationMessageBytes,
             "protocol message");
         chat::protocol::validateMessageSchema(j);
         Message msg;

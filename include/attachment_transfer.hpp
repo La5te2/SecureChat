@@ -15,6 +15,8 @@
 // UTF-8 paths, transfer metadata, binary chunking, and receive-side cache state.
 namespace chat::attachment {
 
+inline constexpr std::size_t RelayChunkBytes = 192 * 1024;
+
 // Attachment kinds share the same transport path but keep separate limits and UI events.
 enum class Kind {
     Image,
@@ -22,8 +24,8 @@ enum class Kind {
     Voice
 };
 
-// One staged incoming transfer, keyed by the DataChannel sender on Host or by a
-// fixed local key on Client. Session code consumes this snapshot to emit UI events.
+// One staged incoming transfer, keyed by the encrypted relay sender actor id.
+// Session code consumes this snapshot to emit UI events.
 struct ReceiveSlot {
     Kind kind = Kind::Text;
     std::string transferId;
@@ -33,7 +35,7 @@ struct ReceiveSlot {
     std::size_t receivedSize = 0;
 };
 
-// Result of appending one binary DataChannel payload into a staged transfer.
+// Result of appending one decrypted binary relay chunk into a staged transfer.
 struct ReceiveChunkResult {
     bool found = false;
     bool complete = false;
@@ -101,8 +103,10 @@ bool hasExpectedFileSignature(const std::string& filePath, Kind kind);
 // Reads a local attachment and enforces the per-kind transfer limit.
 std::vector<unsigned char> readFileBytes(const std::string& filePath, Kind kind);
 
-// Converts file bytes into libdatachannel's binary byte container.
-std::vector<rtc::byte> toRtcBytes(const std::vector<unsigned char>& bytes);
+// Encodes binary data for an attachment chunk carried inside encrypted relay.
+std::string base64Encode(const unsigned char* data, std::size_t size);
+std::string base64Encode(const std::vector<unsigned char>& data, std::size_t offset, std::size_t size);
+rtc::binary base64DecodeToRtcBytes(const std::string& value);
 
 // Builds the JSON metadata message that must be sent before binary payload chunks.
 Message makeBinaryMeta(
@@ -114,13 +118,5 @@ Message makeBinaryMeta(
 
 // Builds a failure/cancel message so receivers can clear pending transfer UI/state.
 Message makeTransferCancel(const std::string& from, const std::string& transferId, const std::string& reason);
-
-// Sends the JSON binary marker followed by fixed-size binary chunks.
-void sendTransferChunks(
-    rtc::DataChannel& channel,
-    const std::vector<rtc::byte>& raw,
-    const Message& meta,
-    const std::string& binaryType,
-    const std::string& from);
 
 } // namespace chat::attachment

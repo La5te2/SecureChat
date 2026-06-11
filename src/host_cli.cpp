@@ -1,7 +1,5 @@
 #include "console_utils.hpp"
 #include "host_session_core.hpp"
-#include "lan_discovery.hpp"
-#include "signaling_server.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -34,10 +32,13 @@ ChatCallbacks consoleCallbacks() {
 }
 
 void printUsage() {
-    std::cerr << "Usage: host <room> <port> [username] [--daemon]\n";
+    std::cerr << "Usage:\n";
+    std::cerr << "  host --server <ws-url> <room> [username] [--daemon]\n";
     std::cerr << "Password source: SECURECHAT_ROOM_PASSWORD, hidden prompt, or stdin.\n";
     std::cerr << "Commands: /image <path>, /file <path>, /voice <path>, /quit\n";
-    std::cerr << "Options: --daemon keeps the room running without reading stdin.\n";
+    std::cerr << "Options:\n";
+    std::cerr << "  --daemon keeps the room running without reading stdin.\n";
+    std::cerr << "  --server connects this Host as a visible group-owner member to an untrusted Server.\n";
 }
 
 std::string envValue(const char* name) {
@@ -87,10 +88,29 @@ bool hasDaemonFlag(const std::vector<std::string>& args) {
 std::vector<std::string> positionalArgs(const std::vector<std::string>& args) {
     std::vector<std::string> positional;
     positional.reserve(args.size());
-    for (const auto& arg : args) {
-        if (arg != "--daemon") positional.push_back(arg);
+    for (std::size_t i = 0; i < args.size(); ++i) {
+        if (args[i] == "--daemon") continue;
+        if (args[i] == "--server") {
+            ++i;
+            continue;
+        }
+        positional.push_back(args[i]);
     }
     return positional;
+}
+
+std::string serverUrlFromArgs(const std::vector<std::string>& args) {
+    for (std::size_t i = 1; i + 1 < args.size(); ++i) {
+        if (args[i] == "--server") return args[i + 1];
+    }
+    return "";
+}
+
+bool hasServerFlagWithoutValue(const std::vector<std::string>& args) {
+    for (std::size_t i = 1; i < args.size(); ++i) {
+        if (args[i] == "--server" && i + 1 >= args.size()) return true;
+    }
+    return false;
 }
 
 void waitForDaemonStop(const std::shared_ptr<HostSessionCore>& session) {
@@ -103,18 +123,15 @@ void waitForDaemonStop(const std::shared_ptr<HostSessionCore>& session) {
     }
 }
 
-void runSession(
+void runExternalServerSession(
     const std::shared_ptr<HostSessionCore>& session,
-    LanRoomDiscoveryResponder& lan,
-    SignalingServer& signaling,
     const std::string& roomId,
     const std::string& wsUrl,
     bool daemonMode) {
     session->setCallbacks(consoleCallbacks());
     session->start();
-    lan.start();
 
-    std::cout << "Hosting " << roomId << " on " << wsUrl << std::endl;
+    std::cout << "Hosting " << roomId << " through external Server " << wsUrl << std::endl;
     if (daemonMode) {
         waitForDaemonStop(session);
     }
@@ -126,10 +143,7 @@ void runSession(
         }
     }
 
-    lan.stop();
     session->stop();
-    signaling.closeAllRooms("host disconnected");
-    signaling.stop();
 }
 }
 
@@ -137,31 +151,24 @@ int main(int argc, char** argv) {
     configureConsoleUtf8();
     const auto rawArgs = commandLineArgsUtf8(argc, argv);
     const auto daemonMode = hasDaemonFlag(rawArgs);
+    if (hasServerFlagWithoutValue(rawArgs)) {
+        printUsage();
+        return 1;
+    }
+    const auto serverUrl = serverUrlFromArgs(rawArgs);
     const auto args = positionalArgs(rawArgs);
-    if (args.size() < 3 || args.size() > 4) {
+    if (serverUrl.empty() || args.size() < 2 || args.size() > 3) {
         printUsage();
         return 1;
     }
 
     try {
         const auto roomId = args[1];
-        const auto port = static_cast<uint16_t>(std::stoi(args[2]));
-        const auto username = args.size() > 3 && !args[3].empty() ? args[3] : std::string("host");
+        const auto username = args.size() > 2 && !args[2].empty() ? args[2] : std::string("host");
         const auto password = roomPasswordFromEnvOrPrompt();
 
-        SignalingServer signaling(port);
-        const std::string wsUrl = signaling.urlScheme() + "://127.0.0.1:" + std::to_string(signaling.port());
-        rtc::WebSocket::Configuration loopbackConfig;
-        // The host connects back to its own signaling server. With a public
-        // certificate, 127.0.0.1 will not match the certificate hostname, so
-        // only this loopback client disables TLS verification.
-        if (signaling.urlScheme() == "wss") {
-            loopbackConfig.disableTlsVerification = true;
-            loopbackConfig.connectionTimeout = std::chrono::seconds(15);
-        }
-        auto session = std::make_shared<HostSessionCore>(wsUrl, roomId, username, password, loopbackConfig);
-        LanRoomDiscoveryResponder lan(roomId, signaling.port(), username);
-        runSession(session, lan, signaling, roomId, wsUrl, daemonMode);
+        auto session = std::make_shared<HostSessionCore>(serverUrl, roomId, username, password);
+        runExternalServerSession(session, roomId, serverUrl, daemonMode);
         return 0;
     }
     catch (const std::exception& e) {

@@ -32,7 +32,7 @@
                         <PivotItem x:Name="HostPivotItem" Header="Host">
                             <StackPanel Spacing="10" Padding="0,12,0,0">
                                 <TextBox x:Name="HostRoomBox" Header="Room" Text="secure-room" />
-                                <TextBox x:Name="HostPortBox" Header="Port" Text="25566" />
+                                <TextBox x:Name="HostServerUrlBox" Header="Server URL" Text="ws://127.0.0.1:25566" />
                                 <TextBox x:Name="HostUserBox" Header="User" Text="host" />
                                 <PasswordBox x:Name="HostPasswordBox" Header="Password" />
                                 <Button x:Name="HostButton" Content="Start Hosting" Click="Host_Click" HorizontalAlignment="Stretch" />
@@ -45,7 +45,6 @@
                                 <TextBox x:Name="JoinRoomBox" Header="Room" Text="secure-room" />
                                 <TextBox x:Name="JoinUserBox" Header="User" Text="client" />
                                 <PasswordBox x:Name="JoinPasswordBox" Header="Password" />
-                                <Button x:Name="DiscoverButton" Content="Find LAN Room" Click="Discover_Click" HorizontalAlignment="Stretch" />
                                 <Button x:Name="JoinButton" Content="Join Room" Click="Join_Click" HorizontalAlignment="Stretch" />
                             </StackPanel>
                         </PivotItem>
@@ -248,13 +247,6 @@
                         <Slider x:Name="InfoBarSecondsSlider" Header="InfoBar seconds" Minimum="1" Maximum="15" Value="5" StepFrequency="1" ValueChanged="PersistedSetting_Changed" />
                         <Slider x:Name="SettingsPanelOpacitySlider" Header="Settings panel opacity" Minimum="0.86" Maximum="1" Value="0.99" StepFrequency="0.01" ValueChanged="SettingsPanelOpacitySlider_ValueChanged" />
                         <ToggleSwitch x:Name="ShowOnlyOwnToggleSwitch" Header="Only my messages" Toggled="ShowOnlyOwnToggleSwitch_Toggled" />
-                        <ToggleSwitch x:Name="HostSignalModeSwitch" Header="WSS" OffContent="Off" OnContent="On" Toggled="HostSignalModeSwitch_Toggled" />
-                        <StackPanel x:Name="HostTlsFieldsPanel" Spacing="10" Visibility="Collapsed">
-                            <TextBox x:Name="HostTlsCertBox" Header="Certificate PEM" PlaceholderText="/path/fullchain.pem" TextChanged="PersistedSetting_Changed" />
-                            <TextBox x:Name="HostTlsKeyBox" Header="Private key PEM" PlaceholderText="/path/privkey.pem" TextChanged="PersistedSetting_Changed" />
-                            <PasswordBox x:Name="HostTlsKeyPassBox" Header="Key password" PasswordChanged="PersistedPassword_Changed" />
-                        </StackPanel>
-
                         <TextBlock x:Name="ChatBackgroundHeaderText" Text="Chat Background" FontWeight="SemiBold" />
                         <Grid ColumnSpacing="8">
                             <Grid.ColumnDefinitions>
