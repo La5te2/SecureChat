@@ -4,10 +4,11 @@
 
 ## 总览
 
-当前共有 20 个 `SECURECHAT_*` 变量：
+当前共有 21 个 `SECURECHAT_*` 变量：
 
 ```text
 SECURECHAT_ALLOW_ROOT
+SECURECHAT_ATTACHMENT_MAX_BYTES
 SECURECHAT_CLIENT_BIN
 SECURECHAT_CLIENT_LOG_FILE
 SECURECHAT_CLIENT_PID_FILE
@@ -85,15 +86,17 @@ printf '%s\n' 'room-password' | ./start_client.sh --server wss://chat.la5te2.onl
 
 `ws://` 是明文 WebSocket；公网部署建议使用 `wss://`。
 
-## 附件缓存
+## 附件
 
 | 变量 | 默认值 | 用途 |
 | --- | --- | --- |
+| `SECURECHAT_ATTACHMENT_MAX_BYTES` | `104857600` | 单个发送附件大小上限，默认 100 MB；图片、语音、文本附件共用同一个上限。 |
 | `SECURECHAT_LOGS_MAX_BYTES` | `536870912` | 接收附件缓存总量上限，默认 512 MB。 |
 
 示例：
 
 ```bash
+export SECURECHAT_ATTACHMENT_MAX_BYTES=104857600
 export SECURECHAT_LOGS_MAX_BYTES=1073741824
 ```
 

@@ -390,6 +390,36 @@ int CHAT_CALL chat_send_line(const char* line) {
     }
 }
 
+// Sends one text or slash-command line to a selected member. Empty target keeps room broadcast.
+int CHAT_CALL chat_send_line_to(const char* target, const char* line) {
+    installNativeCrashHandlersOnce();
+    try {
+        const auto targetText = safeString(target);
+        const auto text = safeString(line);
+        std::shared_ptr<HostSessionCore> hostSession;
+        std::shared_ptr<ClientSessionCore> plSession;
+        {
+            std::lock_guard<std::recursive_mutex> lock(gMutex);
+            hostSession = gHostSession;
+            plSession = gPlSession;
+        }
+        if (hostSession && !hostSession->shouldStop()) {
+            hostSession->sendLineTo(targetText, text);
+            return 1;
+        }
+        if (plSession && !plSession->shouldStop()) {
+            plSession->sendLineTo(targetText, text);
+            return 1;
+        }
+        emitEvent("error", "No active session");
+        return 0;
+    }
+    catch (const std::exception& e) {
+        emitEvent("error", e.what());
+        return 0;
+    }
+}
+
 // Sends an image file through the active Host/Client session.
 int CHAT_CALL chat_send_image(const char* file_path) {
     installNativeCrashHandlersOnce();
@@ -407,6 +437,33 @@ int CHAT_CALL chat_send_image(const char* file_path) {
         }
         if (plSession && !plSession->shouldStop()) {
             return plSession->sendImage(filePath) ? 1 : 0;
+        }
+        emitEvent("error", "No active session");
+        return 0;
+    }
+    catch (const std::exception& e) {
+        emitEvent("error", e.what());
+        return 0;
+    }
+}
+
+int CHAT_CALL chat_send_image_to(const char* target, const char* file_path) {
+    installNativeCrashHandlersOnce();
+    try {
+        const auto targetText = safeString(target);
+        const auto filePath = safeString(file_path);
+        std::shared_ptr<HostSessionCore> hostSession;
+        std::shared_ptr<ClientSessionCore> plSession;
+        {
+            std::lock_guard<std::recursive_mutex> lock(gMutex);
+            hostSession = gHostSession;
+            plSession = gPlSession;
+        }
+        if (hostSession && !hostSession->shouldStop()) {
+            return hostSession->sendImageTo(targetText, filePath) ? 1 : 0;
+        }
+        if (plSession && !plSession->shouldStop()) {
+            return plSession->sendImageTo(targetText, filePath) ? 1 : 0;
         }
         emitEvent("error", "No active session");
         return 0;
@@ -444,6 +501,33 @@ int CHAT_CALL chat_send_file(const char* file_path) {
     }
 }
 
+int CHAT_CALL chat_send_file_to(const char* target, const char* file_path) {
+    installNativeCrashHandlersOnce();
+    try {
+        const auto targetText = safeString(target);
+        const auto filePath = safeString(file_path);
+        std::shared_ptr<HostSessionCore> hostSession;
+        std::shared_ptr<ClientSessionCore> plSession;
+        {
+            std::lock_guard<std::recursive_mutex> lock(gMutex);
+            hostSession = gHostSession;
+            plSession = gPlSession;
+        }
+        if (hostSession && !hostSession->shouldStop()) {
+            return hostSession->sendTextFileTo(targetText, filePath) ? 1 : 0;
+        }
+        if (plSession && !plSession->shouldStop()) {
+            return plSession->sendTextFileTo(targetText, filePath) ? 1 : 0;
+        }
+        emitEvent("error", "No active session");
+        return 0;
+    }
+    catch (const std::exception& e) {
+        emitEvent("error", e.what());
+        return 0;
+    }
+}
+
 // Sends a short voice clip through the active Host/Client session.
 int CHAT_CALL chat_send_voice(const char* file_path) {
     installNativeCrashHandlersOnce();
@@ -461,6 +545,33 @@ int CHAT_CALL chat_send_voice(const char* file_path) {
         }
         if (plSession && !plSession->shouldStop()) {
             return plSession->sendVoice(filePath) ? 1 : 0;
+        }
+        emitEvent("error", "No active session");
+        return 0;
+    }
+    catch (const std::exception& e) {
+        emitEvent("error", e.what());
+        return 0;
+    }
+}
+
+int CHAT_CALL chat_send_voice_to(const char* target, const char* file_path) {
+    installNativeCrashHandlersOnce();
+    try {
+        const auto targetText = safeString(target);
+        const auto filePath = safeString(file_path);
+        std::shared_ptr<HostSessionCore> hostSession;
+        std::shared_ptr<ClientSessionCore> plSession;
+        {
+            std::lock_guard<std::recursive_mutex> lock(gMutex);
+            hostSession = gHostSession;
+            plSession = gPlSession;
+        }
+        if (hostSession && !hostSession->shouldStop()) {
+            return hostSession->sendVoiceTo(targetText, filePath) ? 1 : 0;
+        }
+        if (plSession && !plSession->shouldStop()) {
+            return plSession->sendVoiceTo(targetText, filePath) ? 1 : 0;
         }
         emitEvent("error", "No active session");
         return 0;

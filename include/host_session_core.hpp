@@ -42,13 +42,19 @@ public:
     bool sendTextFile(const std::string& filePath);
     // Sends a recorded voice clip through encrypted Server relay.
     bool sendVoice(const std::string& filePath);
+    // Sends a text or attachment command to one member. Empty target means room broadcast.
+    void sendLineTo(const std::string& target, const std::string& line);
+    // Sends one attachment to one member. Empty target means room broadcast.
+    bool sendImageTo(const std::string& target, const std::string& filePath);
+    bool sendTextFileTo(const std::string& target, const std::string& filePath);
+    bool sendVoiceTo(const std::string& target, const std::string& filePath);
 private:
     // Dispatches room creation, membership, encrypted relay, and error events.
     void handleSignalingMessage(const std::string& s);
     // Removes a client member and updates local room state.
     void removePeer(const std::string& id);
     // Sends one encrypted relay message through the untrusted Server.
-    bool sendRelayMessage(const Message& msg, const std::string& senderId, const std::string& senderName, const std::string& senderKind);
+    bool sendRelayMessage(const Message& msg, const std::string& senderId, const std::string& senderName, const std::string& senderKind, const std::string& targetId);
     // Wraps the room group key for one newly joined member and asks Server to relay it.
     bool sendGroupKeyToClient(const std::string& clientId, const std::string& clientPublicKey);
     // Generates a fresh room group key and sends it to every current client.
@@ -56,7 +62,7 @@ private:
     // Re-sends the current room group key to every known client public key.
     void sendGroupKeyToAllClients();
     // Sends one local attachment as encrypted metadata followed by encrypted chunks.
-    bool sendAttachmentRelay(const std::string& filePath, chat::attachment::Kind kind, const std::string& metaType, const std::string& binaryType, const std::string& mime);
+    bool sendAttachmentRelay(const std::string& filePath, chat::attachment::Kind kind, const std::string& metaType, const std::string& binaryType, const std::string& mime, const std::string& targetId);
     // Handles one decrypted encrypted_relay application message.
     void handleRelayMessage(const Message& msg);
     // Reassembles one encrypted attachment chunk into the local cache.

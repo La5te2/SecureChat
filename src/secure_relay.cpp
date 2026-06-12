@@ -67,8 +67,9 @@ std::array<unsigned char, keyBytes> keyArrayFromVector(const std::vector<unsigne
 std::vector<unsigned char> aadForEnvelope(
     const std::string& roomId,
     const std::string& senderId,
-    const std::string& senderKind) {
-    const std::string aad = std::string("securechat-relay|") + roomId + "|" + senderId + "|" + senderKind;
+    const std::string& senderKind,
+    const std::string& targetId) {
+    const std::string aad = std::string("securechat-relay|") + roomId + "|" + senderId + "|" + senderKind + "|" + targetId;
     return {aad.begin(), aad.end()};
 }
 
@@ -274,9 +275,12 @@ json encryptMessageWithGroupKey(
     const std::string& senderId,
     const std::string& senderName,
     const std::string& senderKind,
+    const std::string& targetId,
     const std::vector<unsigned char>& groupKey) {
+    // targetId is clear routing metadata, so bind it into AAD. A malicious
+    // relay cannot silently retarget a private envelope without breaking GCM.
     const auto key = keyArrayFromVector(groupKey);
-    const auto aad = aadForEnvelope(roomId, senderId, senderKind);
+    const auto aad = aadForEnvelope(roomId, senderId, senderKind, targetId);
     return encryptWithAesGcm(message.toJson(), key, aad, {
         {"type", EnvelopeType},
         {"version", 2},
@@ -284,6 +288,7 @@ json encryptMessageWithGroupKey(
         {"senderId", senderId},
         {"senderName", senderName},
         {"senderKind", senderKind},
+        {"targetId", targetId},
         {"alg", "AES-256-GCM"},
         {"kdf", "GKA-X25519-HKDF-SHA256"}
     });
@@ -293,6 +298,8 @@ Message decryptMessageWithGroupKey(
     const json& envelope,
     const std::string& roomId,
     const std::vector<unsigned char>& groupKey) {
+    // Rebuild the same AAD from envelope metadata before decrypting. This
+    // authenticates room, sender role, and private target routing fields.
     if (envelope.value("type", "") != EnvelopeType) {
         throw std::runtime_error("not an encrypted relay envelope");
     }
@@ -305,7 +312,8 @@ Message decryptMessageWithGroupKey(
     const auto key = keyArrayFromVector(groupKey);
     const auto senderId = envelope.value("senderId", "");
     const auto senderKind = envelope.value("senderKind", "");
-    const auto plaintext = decryptWithAesGcm(envelope, key, aadForEnvelope(roomId, senderId, senderKind));
+    const auto targetId = envelope.value("targetId", "");
+    const auto plaintext = decryptWithAesGcm(envelope, key, aadForEnvelope(roomId, senderId, senderKind, targetId));
     return Message::fromJson(plaintext);
 }
 
@@ -314,6 +322,8 @@ json encryptGroupKeyForMember(
     const std::string& roomId,
     const std::string& targetId,
     const std::string& targetPublicKey) {
+    // Wraps the room group key to one Client using an ephemeral X25519 ECDH.
+    // The Server forwards this envelope but cannot derive the wrapping key.
     const auto groupKeyArray = keyArrayFromVector(groupKey);
     const auto recipientPublic = base64Decode(targetPublicKey);
     auto ephemeral = generateMemberKeyPair();
@@ -337,6 +347,8 @@ std::vector<unsigned char> decryptGroupKeyForMember(
     const std::string& roomId,
     const std::string& clientId,
     const std::vector<unsigned char>& privateKey) {
+    // A Client only accepts group keys addressed to its own server-assigned id.
+    // This prevents replaying another member's key envelope into this session.
     if (envelope.value("type", "") != GroupKeyType ||
         envelope.value("version", 0) != 2 ||
         envelope.value("roomId", "") != roomId ||

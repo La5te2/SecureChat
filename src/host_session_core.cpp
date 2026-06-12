@@ -22,7 +22,34 @@ std::string trimCopy(std::string value) {
     return value.substr(first, last - first + 1);
 }
 
+bool parseDirectPrefix(const std::string& line, std::string& target, std::string& body) {
+    // Splits "/to bob ..." before normal command parsing so private text and
+    // private attachments reuse the same send functions as room broadcast.
+    if (line.rfind("/to ", 0) != 0) return false;
+    const auto rest = trimCopy(line.substr(4));
+    const auto split = rest.find_first_of(" \t\r\n");
+    if (split == std::string::npos) {
+        target = rest;
+        body.clear();
+        return true;
+    }
+    target = rest.substr(0, split);
+    body = trimCopy(rest.substr(split + 1));
+    return true;
+}
+
+void markPrivateTarget(Message& msg, const std::string& targetId, const std::string& targetName) {
+    if (targetId.empty()) return;
+    // The encrypted payload carries UI intent; the clear envelope carries only
+    // the routing id that Server needs for opaque private delivery.
+    msg.payload["private"] = true;
+    msg.payload["targetId"] = targetId;
+    msg.payload["targetName"] = targetName.empty() ? targetId : targetName;
+}
+
 bool attachmentKindForMeta(const std::string& type, attachment::Kind& kind) {
+    // Converts decrypted attachment metadata message types into the shared
+    // receive-store enum used by Host and Client.
     if (type == "image_meta") {
         kind = attachment::Kind::Image;
         return true;
@@ -39,10 +66,14 @@ bool attachmentKindForMeta(const std::string& type, attachment::Kind& kind) {
 }
 
 bool isAttachmentBinaryType(const std::string& type) {
+    // Binary chunks are still JSON relay messages; this helper identifies the
+    // encrypted payload chunks that should be appended to a staged transfer.
     return type == "image_binary" || type == "file_binary" || type == "voice_binary";
 }
 
 std::string actorIdFromMessage(const Message& msg) {
+    // Prefer stable actor ids over display names when grouping attachment
+    // chunks from the same sender.
     if (msg.payload.is_object() && msg.payload.contains("actorId") && msg.payload["actorId"].is_string()) {
         const auto id = msg.payload["actorId"].get<std::string>();
         if (!id.empty()) return id;
@@ -125,6 +156,13 @@ bool HostSessionCore::shouldStop() const {
 
 // Parses one host input line and sends chat, commands, or attachments.
 void HostSessionCore::sendLine(const std::string& line) {
+    std::string directTarget;
+    std::string directBody;
+    if (parseDirectPrefix(line, directTarget, directBody)) {
+        sendLineTo(directTarget, directBody);
+        return;
+    }
+
     if (line.empty()) return;
     if (line.rfind("/image ", 0) == 0 || line.rfind("/img ", 0) == 0) {
         sendImage(trimCopy(line.substr(line.find(' ') + 1)));
@@ -156,46 +194,101 @@ void HostSessionCore::sendLine(const std::string& line) {
         chat::protocol::HostActorId,
         mUsername,
         chat::protocol::HostActorKind,
+        "",
         mGroupKey);
     mWs->send(envelope.dump());
     chatEmit(mCallbacks.onMessage, msg.toJson());
 }
 
+void HostSessionCore::sendLineTo(const std::string& target, const std::string& line) {
+    // Host can privately address any current Client by name or id. The Server
+    // still only sees targetId and ciphertext, not the plaintext body.
+    const auto targetId = resolveClientId(trimCopy(target));
+    if (targetId.empty()) {
+        sendLine(line);
+        return;
+    }
+    if (line.empty()) {
+        chatEmit(mCallbacks.onError, "Private message body is empty");
+        return;
+    }
+    if (line.rfind("/image ", 0) == 0 || line.rfind("/img ", 0) == 0) {
+        sendImageTo(targetId, trimCopy(line.substr(line.find(' ') + 1)));
+        return;
+    }
+    if (line.rfind("/file ", 0) == 0) {
+        sendTextFileTo(targetId, trimCopy(line.substr(line.find(' ') + 1)));
+        return;
+    }
+    if (line.rfind("/voice ", 0) == 0) {
+        sendVoiceTo(targetId, trimCopy(line.substr(line.find(' ') + 1)));
+        return;
+    }
+
+    const auto targetName = displayNameForClient(targetId);
+    const auto actor = currentHostActorName();
+    Message msg = makeTextMessage(actor, line);
+    setCurrentHostActorMetadata(msg);
+    markPrivateTarget(msg, targetId, targetName);
+    if (sendRelayMessage(msg, chat::protocol::HostActorId, mUsername, chat::protocol::HostActorKind, targetId)) {
+        chatEmit(mCallbacks.onMessage, msg.toJson());
+    }
+}
+
 // Sends an image to all room members through encrypted Server relay.
 bool HostSessionCore::sendImage(const std::string& filePath) {
+    return sendImageTo("", filePath);
+}
+
+bool HostSessionCore::sendImageTo(const std::string& target, const std::string& filePath) {
+    const auto targetId = resolveClientId(trimCopy(target));
     return sendAttachmentRelay(
         filePath,
         attachment::Kind::Image,
         "image_meta",
         "image_binary",
-        "application/octet-stream");
+        "application/octet-stream",
+        targetId);
 }
 
 // Sends a text handout to all room members through encrypted Server relay.
 bool HostSessionCore::sendTextFile(const std::string& filePath) {
+    return sendTextFileTo("", filePath);
+}
+
+bool HostSessionCore::sendTextFileTo(const std::string& target, const std::string& filePath) {
+    const auto targetId = resolveClientId(trimCopy(target));
     return sendAttachmentRelay(
         filePath,
         attachment::Kind::Text,
         "file_meta",
         "file_binary",
-        "text/plain; charset=utf-8");
+        "text/plain; charset=utf-8",
+        targetId);
 }
 
 // Sends a short WAV voice clip to all room members through encrypted Server relay.
 bool HostSessionCore::sendVoice(const std::string& filePath) {
+    return sendVoiceTo("", filePath);
+}
+
+bool HostSessionCore::sendVoiceTo(const std::string& target, const std::string& filePath) {
+    const auto targetId = resolveClientId(trimCopy(target));
     return sendAttachmentRelay(
         filePath,
         attachment::Kind::Voice,
         "voice_meta",
         "voice_binary",
-        "audio/wav");
+        "audio/wav",
+        targetId);
 }
 
 bool HostSessionCore::sendRelayMessage(
     const Message& msg,
     const std::string& senderId,
     const std::string& senderName,
-    const std::string& senderKind) {
+    const std::string& senderKind,
+    const std::string& targetId) {
     if (!chat::secure_relay::hasUsableGroupKey(mGroupKey)) {
         chatEmit(mCallbacks.onError, "Room group key is not ready");
         return false;
@@ -211,12 +304,15 @@ bool HostSessionCore::sendRelayMessage(
         senderId,
         senderName,
         senderKind,
+        targetId,
         mGroupKey);
     mWs->send(envelope.dump());
     return true;
 }
 
 bool HostSessionCore::sendGroupKeyToClient(const std::string& clientId, const std::string& clientPublicKey) {
+    // Host is the GKA coordinator: it wraps the current room group key to a
+    // single Client public key and asks the Server to forward the opaque result.
     if (!chat::secure_relay::hasUsableGroupKey(mGroupKey)) {
         chatEmit(mCallbacks.onError, "Room group key is not ready");
         return false;
@@ -265,12 +361,17 @@ bool HostSessionCore::sendAttachmentRelay(
     attachment::Kind kind,
     const std::string& metaType,
     const std::string& binaryType,
-    const std::string& mime) {
+    const std::string& mime,
+    const std::string& targetId) {
+    // Attachments are encrypted as metadata plus chunk messages. Passing a
+    // targetId switches the Server from broadcast relay to private relay.
     const auto bytes = attachment::readFileBytes(filePath, kind);
     const auto actor = currentHostActorName();
+    const auto targetName = targetId.empty() ? std::string() : displayNameForClient(targetId);
     Message meta = attachment::makeBinaryMeta(metaType, actor, filePath, mime, bytes.size());
     setCurrentHostActorMetadata(meta);
-    if (!sendRelayMessage(meta, chat::protocol::HostActorId, mUsername, chat::protocol::HostActorKind)) {
+    markPrivateTarget(meta, targetId, targetName);
+    if (!sendRelayMessage(meta, chat::protocol::HostActorId, mUsername, chat::protocol::HostActorKind, targetId)) {
         return false;
     }
 
@@ -292,7 +393,8 @@ bool HostSessionCore::sendAttachmentRelay(
             {"chunkSize", static_cast<int>(chunkSize)}
         };
         setCurrentHostActorMetadata(chunk);
-        if (!sendRelayMessage(chunk, chat::protocol::HostActorId, mUsername, chat::protocol::HostActorKind)) {
+        markPrivateTarget(chunk, targetId, targetName);
+        if (!sendRelayMessage(chunk, chat::protocol::HostActorId, mUsername, chat::protocol::HostActorKind, targetId)) {
             return false;
         }
     }
@@ -331,10 +433,21 @@ void HostSessionCore::handleSignalingMessage(const std::string& s) {
         else if (type == "room_members") {
             std::ostringstream members;
             bool first = true;
-            for (const auto& member : j.value("members", json::array())) {
+            for (const auto& member : j.value("memberInfos", json::array())) {
+                if (!member.is_object()) continue;
                 if (!first) members << "; ";
-                members << member.get<std::string>();
+                const auto id = member.value("id", "");
+                // Emit "name / id" for UI display and manual private-message
+                // targeting without exposing raw signaling JSON to the UI.
+                members << member.value("username", id) << " / " << id;
                 first = false;
+            }
+            if (first) {
+                for (const auto& member : j.value("members", json::array())) {
+                    if (!first) members << "; ";
+                    members << member.get<std::string>();
+                    first = false;
+                }
             }
             chatEmit(mCallbacks.onStatus, "Room members: " + members.str());
         }

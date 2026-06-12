@@ -122,6 +122,7 @@ void requireFieldsForType(const json& data, const std::string& type) {
                 "senderId",
                 "senderName",
                 "senderKind",
+                "targetId",
                 "alg",
                 "kdf",
                 "nonce",
@@ -136,6 +137,7 @@ void requireFieldsForType(const json& data, const std::string& type) {
         stringField(data, "senderId", 64, true);
         stringField(data, "senderName", 64, true);
         stringField(data, "senderKind", 32, true);
+        stringField(data, "targetId", 64, true);
         stringField(data, "alg", 32, true);
         stringField(data, "kdf", 64, true);
         stringField(data, "nonce", 64, true);
@@ -492,11 +494,14 @@ void SignalingServer::relayGroupKey(rtc::WebSocket* key, const json& data) {
 }
 
 void SignalingServer::relayEncrypted(rtc::WebSocket* key, const json& data) {
+    // Relays opaque application ciphertext. The Server validates membership
+    // and routing metadata, but never has the room group key needed to decrypt.
     std::shared_ptr<rtc::WebSocket> senderWs;
     std::vector<std::shared_ptr<rtc::WebSocket>> recipients;
     json envelope = data;
     std::string roomId;
     std::string senderId;
+    std::string targetId;
     std::string errorMessage;
 
     {
@@ -514,6 +519,7 @@ void SignalingServer::relayEncrypted(rtc::WebSocket* key, const json& data) {
             else {
                 roomId = sender->roomId;
                 senderId = sender->clientId;
+                targetId = data.value("targetId", "");
                 const std::string senderKind = sender->role == "host"
                     ? chat::protocol::HostActorKind
                     : chat::protocol::ClientActorKind;
@@ -524,10 +530,36 @@ void SignalingServer::relayEncrypted(rtc::WebSocket* key, const json& data) {
                 envelope["senderId"] = senderId;
                 envelope["senderName"] = sender->username;
                 envelope["senderKind"] = senderKind;
+                envelope["targetId"] = targetId;
 
-                if (room->host && room->host.get() != key) recipients.push_back(room->host);
-                for (const auto& [_, ws] : room->clients) {
-                    if (ws && ws.get() != key) recipients.push_back(ws);
+                if (!targetId.empty()) {
+                    // Private relay is delivery-level isolation: Server checks
+                    // that the target is a current member and forwards only to it.
+                    if (targetId == senderId) {
+                        errorMessage = "cannot relay to self";
+                    }
+                    else if (targetId == chat::protocol::HostActorId) {
+                        if (room->host && room->host.get() != key) recipients.push_back(room->host);
+                        else errorMessage = "target member not found";
+                    }
+                    else {
+                        auto target = room->clients.find(targetId);
+                        if (target != room->clients.end() && target->second && target->second.get() != key) {
+                            recipients.push_back(target->second);
+                        }
+                        else {
+                            errorMessage = "target member not found";
+                        }
+                    }
+                }
+                else {
+                    // Empty targetId preserves the normal room broadcast path:
+                    // every current member except the sender receives the same
+                    // authenticated encrypted envelope.
+                    if (room->host && room->host.get() != key) recipients.push_back(room->host);
+                    for (const auto& [_, ws] : room->clients) {
+                        if (ws && ws.get() != key) recipients.push_back(ws);
+                    }
                 }
             }
         }
@@ -543,7 +575,7 @@ void SignalingServer::relayEncrypted(rtc::WebSocket* key, const json& data) {
     }
 
     std::cout << "[signal] encrypted relay " << senderId
-              << " -> room " << roomId
+              << " -> " << (targetId.empty() ? std::string("room ") + roomId : std::string("member ") + targetId)
               << " recipients=" << recipients.size() << std::endl;
 }
 
@@ -604,6 +636,8 @@ void SignalingServer::cleanup(rtc::WebSocket* key) {
 }
 
 void SignalingServer::broadcastRoomMembers(const std::string& roomId) {
+    // Sends both human-readable member labels and structured ids. Existing UI
+    // can display members, while private relay can resolve name/id targets.
     RoomSnapshot snapshot;
     {
         std::lock_guard<std::mutex> lock(mMutex);
@@ -613,7 +647,8 @@ void SignalingServer::broadcastRoomMembers(const std::string& roomId) {
     json msg = {
         {"type", "room_members"},
         {"roomId", roomId},
-        {"members", snapshot.members}
+        {"members", snapshot.members},
+        {"memberInfos", snapshot.memberInfos}
     };
     for (auto& ws : snapshot.recipients) {
         safeSend(ws, msg);
@@ -715,6 +750,11 @@ SignalingServer::RoomSnapshot SignalingServer::roomSnapshotLocked(const std::str
 
         if (client.role == "host") {
             snapshot.members.push_back(client.username + " (Host)");
+            snapshot.memberInfos.push_back({
+                {"id", chat::protocol::HostActorId},
+                {"username", client.username},
+                {"role", "host"}
+            });
             snapshot.recipients.push_back(client.ws);
         }
     }
@@ -723,6 +763,11 @@ SignalingServer::RoomSnapshot SignalingServer::roomSnapshotLocked(const std::str
         if (client.roomId != roomId || client.role != "client") continue;
 
         snapshot.members.push_back(client.username);
+        snapshot.memberInfos.push_back({
+            {"id", client.clientId},
+            {"username", client.username},
+            {"role", "client"}
+        });
         snapshot.recipients.push_back(client.ws);
     }
 

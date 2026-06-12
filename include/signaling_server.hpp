@@ -41,6 +41,7 @@ private:
     struct RoomSnapshot {
         std::vector<std::shared_ptr<rtc::WebSocket>> recipients;
         json members = json::array();
+        json memberInfos = json::array();
     };
 
     struct ClientState {
@@ -54,22 +55,39 @@ private:
         std::size_t badMessageCount = 0;
     };
 
+    // Registers a newly accepted socket before it has authenticated into a room.
     void addClient(std::shared_ptr<rtc::WebSocket> ws);
+    // Validates one JSON signaling frame and dispatches it by protocol type.
     void handleMessage(rtc::WebSocket* key, const std::string& payload);
+    // Lets a Host member register a unique room on this Server.
     void handleCreateRoom(rtc::WebSocket* key, const json& data);
+    // Lets a Client member join an existing room and publish its GKA public key.
     void handleJoinRoom(rtc::WebSocket* key, const json& data);
+    // Forwards an encrypted group-key envelope from Host to exactly one Client.
     void relayGroupKey(rtc::WebSocket* key, const json& data);
+    // Relays authenticated chat ciphertext to the room or to one target member.
     void relayEncrypted(rtc::WebSocket* key, const json& data);
+    // Removes a disconnected socket from member and room indexes.
     void cleanup(rtc::WebSocket* key);
+    // Broadcasts structured member name/id state to all members in a room.
     void broadcastRoomMembers(const std::string& roomId);
+    // Sends a terminal error to a socket that failed admission.
     void rejectClient(const std::shared_ptr<rtc::WebSocket>& ws, const std::string& message);
+    // Counts malformed frames and disconnects abusive clients.
     void recordBadMessage(rtc::WebSocket* key, const std::string& message);
+    // Periodically expires stale rooms and related authentication state.
     void maintenanceLoop();
+    // Builds a locked room view for membership broadcasts.
     RoomSnapshot roomSnapshotLocked(const std::string& roomId);
+    // Enforces per-room display-name uniqueness.
     bool clientNameInRoomLocked(const std::string& roomId, const std::string& username) const;
+    // Finds the mutable state record for a connected socket.
     ClientState* findClient(rtc::WebSocket* key);
+    // Resolves a room from an explicit id or from the socket's current state.
     Room* findRoom(const std::string& explicitRoomId, ClientState* client);
+    // Sends JSON to one connected socket if it is still open.
     void sendToClient(rtc::WebSocket* key, const json& data);
+    // Shared guarded send helper used after recipient snapshots leave the mutex.
     static void safeSend(const std::shared_ptr<rtc::WebSocket>& ws, const json& data);
 
     std::unique_ptr<rtc::WebSocketServer> mServer;

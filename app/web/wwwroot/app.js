@@ -23,6 +23,7 @@ const refreshRoom = () => {
 
 const updateFileAccept = () => {
   const kind = $("uploadKind").value;
+  // Keep the picker aligned with the native attachment validator.
   $("fileInput").accept = kind === "image"
     ? ".png,.jpg,.jpeg,.bmp,image/png,image/jpeg,image/bmp"
     : kind === "voice"
@@ -43,7 +44,9 @@ const addMessage = (kind, message) => {
       const parsed = JSON.parse(message);
       sender = parsed.payload?.displayName || parsed.from || "";
       type = parsed.type || kind;
+      // Metadata frames are used to prepare attachment rendering; the file callback draws the item.
       if (type.endsWith("_meta")) return;
+      if (parsed.payload?.private === true) type = `${type} private`;
       body = parsed.content || parsed.name || message;
     } catch {
       body = message;
@@ -158,11 +161,14 @@ $("stopButton").addEventListener("click", async () => {
 
 $("sendForm").addEventListener("submit", async (event) => {
   event.preventDefault();
+  const target = $("targetInput").value.trim();
 
+  // The same optional target applies to the selected attachment and the text line.
   const file = $("fileInput").files[0];
   if (file) {
     const form = new FormData();
     form.append("file", file);
+    form.append("target", target);
     const response = await fetch(`/api/upload?kind=${encodeURIComponent($("uploadKind").value)}`, {
       method: "POST",
       body: form
@@ -173,7 +179,7 @@ $("sendForm").addEventListener("submit", async (event) => {
 
   const text = $("messageInput").value.trim();
   if (text) {
-    await api("/api/send", { text });
+    await api("/api/send", { text, target });
     $("messageInput").value = "";
   }
 });

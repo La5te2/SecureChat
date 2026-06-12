@@ -34,6 +34,7 @@ json encryptMessageWithGroupKey(
     const std::string& senderId,
     const std::string& senderName,
     const std::string& senderKind,
+    const std::string& targetId,
     const std::vector<unsigned char>& groupKey);
 
 // Decrypts one relay envelope with the negotiated room group key.

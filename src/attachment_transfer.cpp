@@ -19,9 +19,7 @@
 
 namespace chat::attachment {
 namespace {
-constexpr std::size_t maxImageFileBytes = 10 * 1024 * 1024;
-constexpr std::size_t maxTextFileBytes = 50 * 1024 * 1024;
-constexpr std::size_t maxVoiceFileBytes = 100 * 1024 * 1024;
+constexpr std::size_t defaultAttachmentMaxBytes = 100 * 1024 * 1024;
 constexpr std::uintmax_t defaultReceiveCacheBytes = 512ull * 1024ull * 1024ull;
 
 std::atomic_uint64_t gTransferCounter = 0;
@@ -109,6 +107,22 @@ std::uintmax_t receiveCacheLimitBytes() {
     }
     catch (...) {
         return defaultReceiveCacheBytes;
+    }
+}
+
+std::size_t attachmentMaxBytes() {
+    const char* raw = std::getenv("SECURECHAT_ATTACHMENT_MAX_BYTES");
+    if (!raw || !*raw) return defaultAttachmentMaxBytes;
+
+    try {
+        const auto parsed = std::stoull(trimCopy(raw));
+        if (parsed == 0 || parsed > static_cast<unsigned long long>(std::numeric_limits<std::size_t>::max())) {
+            return defaultAttachmentMaxBytes;
+        }
+        return static_cast<std::size_t>(parsed);
+    }
+    catch (...) {
+        return defaultAttachmentMaxBytes;
     }
 }
 
@@ -203,22 +217,12 @@ const char* defaultFileName(Kind kind) {
     return "file";
 }
 
-std::size_t maxBytes(Kind kind) {
-    switch (kind) {
-    case Kind::Image: return maxImageFileBytes;
-    case Kind::Text: return maxTextFileBytes;
-    case Kind::Voice: return maxVoiceFileBytes;
-    }
-    return maxTextFileBytes;
+std::size_t maxBytes(Kind) {
+    return attachmentMaxBytes();
 }
 
-const char* limitError(Kind kind) {
-    switch (kind) {
-    case Kind::Image: return "image file is larger than 10 MB";
-    case Kind::Text: return "text file is larger than 50 MB";
-    case Kind::Voice: return "voice clip is larger than 100 MB";
-    }
-    return "file is too large";
+std::string limitError(Kind) {
+    return "attachment file is larger than SECURECHAT_ATTACHMENT_MAX_BYTES";
 }
 
 const char* label(Kind kind) {
@@ -391,6 +395,8 @@ ReceiveSlot ReceiveStore::stage(
     const std::string& transferId,
     const std::string& name,
     std::size_t expectedSize) {
+    // Metadata arrives before chunks. Stage the sanitized output path and
+    // expected size so later chunks cannot choose their own filesystem target.
     if (transferId.empty()) {
         throw std::runtime_error("attachment transfer id is missing");
     }
@@ -437,6 +443,9 @@ void ReceiveStore::clear(const std::string& key) {
 }
 
 ReceiveChunkResult ReceiveStore::appendChunk(const std::string& key, const rtc::binary& data) {
+    // Appends exactly one decrypted chunk for the sender's active transfer.
+    // Completion clears the pending slot so the next attachment must start
+    // with fresh metadata.
     std::lock_guard<std::mutex> lock(mMutex);
     auto pending = mSlots.find(key);
     if (pending == mSlots.end()) return {};

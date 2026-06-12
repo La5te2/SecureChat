@@ -226,8 +226,11 @@ public sealed partial class MainWindow : Window
 
     private void SendCurrentMessage()
     {
+        // The target box is optional: empty means room broadcast; otherwise the
+        // native layer resolves the member name/id and sends private relay.
         var text = MessageBox.Text.Trim();
         if (text.Length == 0) return;
+        var target = PrivateTargetBox.Text.Trim();
 
         if (text.Equals("/clear", StringComparison.OrdinalIgnoreCase))
         {
@@ -236,7 +239,10 @@ public sealed partial class MainWindow : Window
             return;
         }
 
-        if (NativeMethods.chat_send_line(text) != 0)
+        var ok = target.Length == 0
+            ? NativeMethods.chat_send_line(text)
+            : NativeMethods.chat_send_line_to(target, text);
+        if (ok != 0)
         {
             MessageBox.Text = "";
         }
@@ -251,20 +257,31 @@ public sealed partial class MainWindow : Window
 
     private async System.Threading.Tasks.Task SendPickedFileAsync(FileKind kind)
     {
+        // File picker paths stay local to this process. The native layer reads,
+        // validates, encrypts, and chunks the file before sending.
         var file = await PickFileAsync(kind);
         if (file is null) return;
+        var target = PrivateTargetBox.Text.Trim();
 
         _ = kind switch
         {
-            FileKind.Image => NativeMethods.chat_send_image(file.Path),
-            FileKind.File => NativeMethods.chat_send_file(file.Path),
-            FileKind.Voice => NativeMethods.chat_send_voice(file.Path),
+            FileKind.Image => target.Length == 0
+                ? NativeMethods.chat_send_image(file.Path)
+                : NativeMethods.chat_send_image_to(target, file.Path),
+            FileKind.File => target.Length == 0
+                ? NativeMethods.chat_send_file(file.Path)
+                : NativeMethods.chat_send_file_to(target, file.Path),
+            FileKind.Voice => target.Length == 0
+                ? NativeMethods.chat_send_voice(file.Path)
+                : NativeMethods.chat_send_voice_to(target, file.Path),
             _ => 0
         };
     }
 
     private async System.Threading.Tasks.Task<Windows.Storage.StorageFile?> PickFileAsync(FileKind kind)
     {
+        // UI filters mirror native validation. Native validation remains the
+        // final security boundary if a path is supplied by another frontend.
         var picker = new FileOpenPicker();
         InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(this));
         switch (kind)
@@ -299,6 +316,8 @@ public sealed partial class MainWindow : Window
 
     private void AddLine(string kind, string message)
     {
+        // Every native callback enters here. Status updates refresh room state;
+        // attachment callbacks render media; encrypted chat JSON becomes bubbles.
         UpdateSessionStatus(kind, message);
         UpdateParticipants(kind, message);
 
@@ -492,16 +511,24 @@ public sealed partial class MainWindow : Window
                 {
                     from = displayName.GetString() ?? from;
                 }
+                var privateTypeSuffix = root.TryGetProperty("payload", out var privatePayload) &&
+                    privatePayload.ValueKind == JsonValueKind.Object &&
+                    privatePayload.TryGetProperty("private", out var privateValue) &&
+                    privateValue.ValueKind == JsonValueKind.True
+                    ? " private"
+                    : "";
 
                 if (type == "text")
                 {
                     body = root.TryGetProperty("content", out var content) ? content.GetString() ?? "" : "";
                     sender = from;
+                    displayKind = "message" + privateTypeSuffix;
                 }
                 else if (type.EndsWith("_meta", StringComparison.OrdinalIgnoreCase))
                 {
                     var name = root.TryGetProperty("name", out var nameValue) ? nameValue.GetString() ?? "" : "";
                     sender = from;
+                    displayKind = "message" + privateTypeSuffix;
                     RememberAttachmentSender(type, sender);
                     body = type == "file_meta"
                         ? $"sent file {name}"
@@ -535,6 +562,8 @@ public sealed partial class MainWindow : Window
         StopButton.IsEnabled = true;
         MessageBox.IsEnabled = mode != SessionMode.None;
         SendModeBox.IsEnabled = mode != SessionMode.None;
+        PrivateTargetBox.IsEnabled = mode != SessionMode.None;
+        SendButton.IsEnabled = mode != SessionMode.None;
         if (mode == SessionMode.None)
         {
             roomName = "-";
@@ -615,6 +644,8 @@ public sealed partial class MainWindow : Window
 
     private void UpdateParticipants(string kind, string message)
     {
+        // The native core currently emits room membership as a status string.
+        // Entries are formatted as "name / id" so users can target private sends.
         if (kind != "status") return;
 
         const string membersPrefix = "Room members: ";
@@ -664,6 +695,8 @@ public sealed partial class MainWindow : Window
 
     private void RefreshParticipants()
     {
+        // Rebuilds the side rail from the normalized participant set. Keeping
+        // this render-only avoids mixing UI controls with membership parsing.
         if (RoomParticipantsPanel is null) return;
 
         RoomParticipantsPanel.Children.Clear();
@@ -1150,8 +1183,8 @@ public sealed partial class MainWindow : Window
             HostUserBox.Header = UiText("User", "用户");
             HostPasswordBox.Header = UiText("Password", "密码");
             HostButton.Content = UiText("Start Hosting", "启动房间");
-            JoinUrlBox.Header = UiText("URL", "地址");
             JoinRoomBox.Header = UiText("Room", "房间");
+            JoinUrlBox.Header = UiText("Server URL", "服务器 URL");
             JoinUserBox.Header = UiText("User", "用户");
             JoinPasswordBox.Header = UiText("Password", "密码");
             JoinButton.Content = UiText("Join Room", "加入房间");
@@ -1159,6 +1192,7 @@ public sealed partial class MainWindow : Window
             RoomParticipantsHeaderText.Text = UiText("Participants", "参与者");
 
             MessageBox.PlaceholderText = UiText("Type a message", "输入消息");
+            PrivateTargetBox.PlaceholderText = UiText("To: member", "私信目标");
             SendButton.Content = UiText("Send", "发送");
             SetComboItemContent(SendModeBox, "Text", UiText("Texts", "文字"));
             SetComboItemContent(SendModeBox, "Image", UiText("Image", "图片"));
@@ -1329,7 +1363,12 @@ public sealed partial class MainWindow : Window
             SetSlider(SettingsPanelOpacitySlider, Value(chatValues, "settings_panel_opacity", "0.99"));
             showOnlyOwnMessages = Value(chatValues, "show_only_own", "false").Equals("true", StringComparison.OrdinalIgnoreCase);
             ShowOnlyOwnToggleSwitch.IsOn = showOnlyOwnMessages;
-            HostServerUrlBox.Text = Value(chatValues, "host_server_url", "ws://127.0.0.1:25566");
+            var hostServerUrl = Value(chatValues, "host_server_url", "");
+            // Migrate the old built-in localhost default to an empty field; users
+            // should choose the Server endpoint explicitly for each deployment.
+            HostServerUrlBox.Text = string.Equals(hostServerUrl, "ws://127.0.0.1:25566", StringComparison.OrdinalIgnoreCase)
+                ? ""
+                : hostServerUrl;
             SetSlider(BackgroundOpacitySlider, Value(chatValues, "chat_background_opacity", "0.28"));
             SetComboByTag(BackgroundHorizontalComboBox, Value(chatValues, "chat_background_crop_x", "Center"));
             SetComboByTag(BackgroundVerticalComboBox, Value(chatValues, "chat_background_crop_y", "Center"));

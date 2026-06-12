@@ -272,6 +272,8 @@ certs/privkey.pem
 
 当前阶段文本消息和附件命令 `/image`、`/file`、`/voice` 都通过 Server relay 转发密文；附件 metadata 和二进制 chunk 会在发送端加密，接收端解密后写入本地附件缓存。代码层不再建立 WebRTC/DataChannel。
 
+私发可使用 `/to <成员名或成员id> <消息>`，附件也可以写成 `/to <成员名或成员id> /image <path>`、`/to <成员名或成员id> /file <path>` 或 `/to <成员名或成员id> /voice <path>`。WinUI/Web 的发送栏也提供 `To: room` 输入框，留空表示群发，填写成员名或 id 表示私发。当前私发是 group key 下的定向投递：Server 只把密文转发给目标成员，但目标消息仍使用当前 room group key，而不是独立的点对点私聊密钥。
+
 如果 Host 或 Client 确实要后台运行，必须显式加 `--daemon`，并从 stdin 或环境变量提供房间密码：
 
 ```bash
@@ -309,11 +311,11 @@ tail -f server.log
 - 语音：WAV
 - 普通文件：TXT、MD、LOG、CSV、JSON、XML、YAML、INI、CONF、CFG 等文本类文件
 
-大小限制：
+发送大小默认统一限制为 100 MB，可通过环境变量覆盖：
 
-- 图片：10 MB
-- 文件：50 MB
-- 语音：100 MB
+```bash
+export SECURECHAT_ATTACHMENT_MAX_BYTES=104857600
+```
 
 接收文件保存到当前工作目录下：
 

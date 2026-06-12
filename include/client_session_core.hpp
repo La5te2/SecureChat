@@ -12,6 +12,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 class ClientSessionCore {
@@ -36,6 +37,12 @@ public:
     bool sendTextFile(const std::string& filePath);
     // Sends a recorded voice clip through encrypted Server relay.
     bool sendVoice(const std::string& filePath);
+    // Sends a text or attachment command to one member. Empty target means room broadcast.
+    void sendLineTo(const std::string& target, const std::string& line);
+    // Sends one attachment to one member. Empty target means room broadcast.
+    bool sendImageTo(const std::string& target, const std::string& filePath);
+    bool sendTextFileTo(const std::string& target, const std::string& filePath);
+    bool sendVoiceTo(const std::string& target, const std::string& filePath);
 
 private:
     // Queues a local shutdown with a user-visible reason.
@@ -43,15 +50,17 @@ private:
     // Dispatches joined, room membership, encrypted relay, and error events.
     void handleSignalingMessage(const std::string& s);
     // Sends one encrypted relay message through the untrusted Server.
-    bool sendRelayMessage(const Message& msg, const std::string& senderId, const std::string& senderName, const std::string& senderKind);
+    bool sendRelayMessage(const Message& msg, const std::string& senderId, const std::string& senderName, const std::string& senderKind, const std::string& targetId);
     // Sends one local attachment as encrypted metadata followed by encrypted chunks.
-    bool sendAttachmentRelay(const std::string& filePath, chat::attachment::Kind kind, const std::string& metaType, const std::string& binaryType, const std::string& mime);
+    bool sendAttachmentRelay(const std::string& filePath, chat::attachment::Kind kind, const std::string& metaType, const std::string& binaryType, const std::string& mime, const std::string& targetId);
     // Handles one decrypted encrypted_relay application message.
     void handleRelayMessage(const Message& msg);
     // Reassembles one encrypted attachment chunk into the local cache.
     void handleRelayBinaryChunk(const std::string& senderKey, const Message& msg);
     // Converts raw console/UI input into a protocol message.
     Message parseInput(const std::string& line);
+    // Resolves a member name/id from the latest room_members update.
+    std::string resolveMemberId(const std::string& token);
 
 private:
     std::string mWsUrl;
@@ -59,6 +68,8 @@ private:
     std::string mUsername;
     std::string mPassword;
     std::string mClientId;
+    std::mutex mMembersMutex;
+    std::unordered_map<std::string, std::string> mMemberNamesById;
     ChatCallbacks mCallbacks;
     std::shared_ptr<rtc::WebSocket> mWs;
     chat::secure_relay::MemberKeyPair mMemberKeys;

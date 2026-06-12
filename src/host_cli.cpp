@@ -35,7 +35,7 @@ void printUsage() {
     std::cerr << "Usage:\n";
     std::cerr << "  host --server <ws-url> <room> [username] [--daemon]\n";
     std::cerr << "Password source: SECURECHAT_ROOM_PASSWORD, hidden prompt, or stdin.\n";
-    std::cerr << "Commands: /image <path>, /file <path>, /voice <path>, /quit\n";
+    std::cerr << "Commands: /image <path>, /file <path>, /voice <path>, /to <member> <text|attachment-command>, /quit\n";
     std::cerr << "Options:\n";
     std::cerr << "  --daemon keeps the room running without reading stdin.\n";
     std::cerr << "  --server connects this Host as a visible group-owner member to an untrusted Server.\n";

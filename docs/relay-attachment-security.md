@@ -65,6 +65,7 @@ Server 会校验 WebSocket 会话所属 room 和 sender identity，然后转发 
   "senderId": "client-id-or-host",
   "senderName": "display-name",
   "senderKind": "host-or-client",
+  "targetId": "",
   "alg": "AES-256-GCM",
   "kdf": "GKA-X25519-HKDF-SHA256",
   "nonce": "base64",
@@ -72,6 +73,10 @@ Server 会校验 WebSocket 会话所属 room 和 sender identity，然后转发 
   "tag": "base64"
 }
 ```
+
+`targetId` 为空表示群发；填写 `host` 或某个 clientId 时，Server 会校验目标成员是否仍在房间内，并只转发给该目标。`targetId` 被绑定进 AES-GCM AAD，Server 不能在不破坏认证标签的情况下静默把一条密文改投给另一个目标。
+
+当前私发是 group key 下的定向投递，不是独立点对点私聊密钥。也就是说，普通 Server 仍看不到明文；但如果恶意 Server 把私发密文复制给其他仍持有当前 room group key 的成员，该成员理论上可以解密。要达到更强的私聊隔离，需要后续引入 pairwise key、sender key 或独立会话密钥。
 
 Host 发给单个 Client 的 group key envelope：
 
@@ -91,7 +96,7 @@ Host 发给单个 Client 的 group key envelope：
 }
 ```
 
-Server 转发前会用 WebSocket 会话状态覆盖 `roomId`、`senderId`、`senderName` 和 `senderKind`，避免发送方伪造这些明文 metadata。AAD 不作为 JSON 字段传输，而是在 Host/Client 本地按固定格式重新构造。
+Server 转发前会用 WebSocket 会话状态覆盖 `roomId`、`senderId`、`senderName` 和 `senderKind`，避免发送方伪造这些明文 metadata。私发时 Server 使用 `targetId` 做成员存在性校验和定向转发。AAD 不作为 JSON 字段传输，而是在 Host/Client 本地按固定格式重新构造。
 
 ## Server 可见与不可见内容
 
@@ -99,6 +104,7 @@ Server 可见：
 
 - room id；
 - sender id、sender name、sender kind；
+- 私发 relay envelope 的目标 member id；
 - group key envelope 的目标 client id；
 - envelope 算法名、KDF 名、nonce、tag；
 - ciphertext 长度、消息数量和转发时序；
@@ -119,9 +125,7 @@ Server 不应可见：
 
 已实现：
 
-- 图片大小限制：10 MB。
-- 文本文件大小限制：50 MB。
-- 语音大小限制：100 MB。
+- 单个发送附件默认大小限制：100 MB，可用 `SECURECHAT_ATTACHMENT_MAX_BYTES` 覆盖。
 - 发送端和接收端都会检查扩展名白名单。
 - 图片文件头校验：PNG、JPEG、BMP。
 - 语音文件头校验：WAV。

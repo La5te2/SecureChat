@@ -20,6 +20,7 @@ app.Lifetime.ApplicationStopping.Register(NativeChat.Shutdown);
 app.UseDefaultFiles();
 app.UseStaticFiles();
 
+// Serve attachment files that the native core has already received and registered.
 app.MapGet("/media/{id}", (string id, MediaRegistry registry) =>
 {
     if (!registry.TryGet(id, out var item) || !File.Exists(item.Path))
@@ -30,6 +31,7 @@ app.MapGet("/media/{id}", (string id, MediaRegistry registry) =>
     return Results.File(item.Path, item.ContentType, enableRangeProcessing: true);
 });
 
+// Browser clients receive native status, message, and attachment events over SSE.
 app.MapGet("/events", async (HttpContext context, ChatEventBus bus) =>
 {
     context.Response.Headers.Append("Cache-Control", "no-cache");
@@ -45,6 +47,7 @@ app.MapGet("/events", async (HttpContext context, ChatEventBus bus) =>
     }
 });
 
+// Host creates a room on an already running Server; the Server itself is not a room member.
 app.MapPost("/api/host", (HostRequest request, ChatEventBus bus) =>
 {
     var ok = NativeChat.HostStart(request.ServerUrl, request.RoomId, request.Username, request.Password);
@@ -54,6 +57,7 @@ app.MapPost("/api/host", (HostRequest request, ChatEventBus bus) =>
     return Results.Ok(new { ok = true });
 });
 
+// Client joins an existing room through the relay Server.
 app.MapPost("/api/join", (JoinRequest request, ChatEventBus bus) =>
 {
     var ok = NativeChat.JoinStart(request.Url, request.RoomId, request.Username, request.Password);
@@ -70,13 +74,15 @@ app.MapPost("/api/stop", (ChatEventBus bus) =>
     return Results.Ok(new { ok = true });
 });
 
+// Send room text by default, or private text when Target contains a member name/id.
 app.MapPost("/api/send", (SendRequest request) =>
 {
     if (string.IsNullOrWhiteSpace(request.Text)) return Results.BadRequest(new { ok = false });
-    var ok = NativeChat.SendLine(request.Text.Trim());
+    var ok = NativeChat.SendLine(request.Text.Trim(), request.Target ?? "");
     return ok == 0 ? Results.BadRequest(new { ok = false }) : Results.Ok(new { ok = true });
 });
 
+// Store browser uploads locally first, then let the native layer encrypt and relay them.
 app.MapPost("/api/upload", async (HttpRequest request) =>
 {
     if (!request.HasFormContentType) return Results.BadRequest(new { ok = false });
@@ -96,7 +102,8 @@ app.MapPost("/api/upload", async (HttpRequest request) =>
         await file.CopyToAsync(stream);
     }
 
-    var ok = NativeChat.SendFile(kind, path);
+    var target = form["target"].ToString();
+    var ok = NativeChat.SendFile(kind, path, target);
     return ok == 0 ? Results.BadRequest(new { ok = false }) : Results.Ok(new { ok = true });
 });
 
@@ -108,4 +115,4 @@ internal sealed record HostRequest(
     string Username,
     string Password);
 internal sealed record JoinRequest(string Url, string RoomId, string Username, string Password);
-internal sealed record SendRequest(string Text);
+internal sealed record SendRequest(string Text, string? Target);

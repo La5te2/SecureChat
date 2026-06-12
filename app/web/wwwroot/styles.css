@@ -246,7 +246,7 @@ dd {
 
 .composer {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 96px 190px 78px;
+  grid-template-columns: minmax(0, 1fr) 128px 96px 190px 78px;
 }
 
 .buttonRow {
