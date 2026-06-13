@@ -2,6 +2,8 @@
 
 本文档记录 Windows 和 Linux 下的手动构建、脚本构建和启动命令。命令默认在项目根目录执行。
 
+如果只想知道怎么启动 Server、Host、Client，请优先看 `docs/startup-guide.md`。那里按 Windows/Linux 和 WS/WSS/mTLS 分开写了完整步骤。
+
 Windows 项目根目录示例：
 
 ```bat
@@ -33,40 +35,34 @@ cmake --preset x64-release -DCMAKE_TOOLCHAIN_FILE="%VCPKG_ROOT%\scripts\buildsys
 cmake --build out\build\x64-release --config Release
 ```
 
-启动 WSS Server：
+### Windows CLI 启动顺序
 
-```bat
-set SECURECHAT_SIGNALING_TLS=1
-set SECURECHAT_TLS_CERT_FILE=certs\fullchain.pem
-set SECURECHAT_TLS_KEY_FILE=certs\privkey.pem
-out\build\x64-release\server.exe 25566
-```
+下面只给最小本机 WS 测试命令。完整 PKI、WSS、WinUI 和局域网步骤见 `docs/startup-guide.md`。
 
-启动 WS Server：
-
-```bat
-set SECURECHAT_SIGNALING_TLS=
-set SECURECHAT_TLS_CERT_FILE=
-set SECURECHAT_TLS_KEY_FILE=
-out\build\x64-release\server.exe 25566
-```
-
-启动 Client：
-
-```bat
-out\build\x64-release\client.exe ws://127.0.0.1:25566 secure-room user1
-```
-
-启动不可信 Server：
+窗口 1：启动 Server。
 
 ```bat
 out\build\x64-release\server.exe 25566
 ```
 
-群主 Host 作为可见成员连接 Server：
+窗口 2：配置 Host 的成员 PKI，然后创建房间。
 
-```bat
-out\build\x64-release\host.exe --server ws://127.0.0.1:25566 secure-room host
+```powershell
+$env:SECURECHAT_PKI_TRUST_STORE="certs\pki\root-ca.pem"
+$env:SECURECHAT_IDENTITY_CERT_FILE="certs\pki\alice-chain.pem"
+$env:SECURECHAT_IDENTITY_KEY_FILE="certs\pki\alice-key.pem"
+$env:SECURECHAT_PKI_REVOCATION_FILE="certs\pki\revoked.txt"
+out\build\x64-release\host.exe --server ws://127.0.0.1:25566 secure-room alice
+```
+
+窗口 3：配置 Client 的成员 PKI，然后加入同一个房间。
+
+```powershell
+$env:SECURECHAT_PKI_TRUST_STORE="certs\pki\root-ca.pem"
+$env:SECURECHAT_IDENTITY_CERT_FILE="certs\pki\bob-chain.pem"
+$env:SECURECHAT_IDENTITY_KEY_FILE="certs\pki\bob-key.pem"
+$env:SECURECHAT_PKI_REVOCATION_FILE="certs\pki\revoked.txt"
+out\build\x64-release\client.exe ws://127.0.0.1:25566 secure-room bob
 ```
 
 ## Windows WinUI Chat
@@ -182,11 +178,28 @@ export SECURECHAT_PKI_REVOCATION_FILE=certs/pki/revoked.txt
 
 mTLS 由 Nginx 处理，SecureChat Server 作为本机 backend 运行。公网只暴露 Nginx 的 `25566`，backend 只监听本机 `25567`。
 
-启动 backend：
+Nginx 需要安装在服务器系统上，不是仓库里的可执行文件。Ubuntu/Debian 示例：
 
 ```bash
-cd /opt/SecureChat
-SECURECHAT_BIND_ADDRESS=127.0.0.1 SECURECHAT_PORT=25567 ./start_server.sh --mode ws
+sudo apt update
+sudo apt install -y nginx openssl
+sudo systemctl enable --now nginx
+```
+
+mTLS 入口至少需要：
+
+- Nginx 服务器 TLS 证书：`/opt/SecureChat/certs/fullchain.pem`、`/opt/SecureChat/certs/privkey.pem`；
+- 用来验证客户端 TLS 证书的 CA：`/opt/SecureChat/certs/pki/root-ca.pem`；
+- 每台 Host/Client 自己持有的客户端 TLS 证书和私钥，例如 `certs/pki/alice-mtls-chain.pem`、`certs/pki/alice-mtls-key.pem`。
+
+不使用 systemd 时，用脚本启动 backend。`start_server.sh` 默认后台运行：
+
+```bash
+sudo -u securechat -H bash -lc 'cd /opt/SecureChat && \
+  SECURECHAT_BIND_ADDRESS=127.0.0.1 \
+  SECURECHAT_PORT=25567 \
+  SECURECHAT_SERVER_PID_FILE=server-mtls-backend.pid \
+  ./start_server.sh --mode ws'
 ```
 
 安装 Nginx 配置：
@@ -195,6 +208,14 @@ SECURECHAT_BIND_ADDRESS=127.0.0.1 SECURECHAT_PORT=25567 ./start_server.sh --mode
 sudo cp /opt/SecureChat/deploy/securechat-nginx-mtls.conf /etc/nginx/conf.d/securechat-mtls.conf
 sudo nginx -t
 sudo systemctl reload nginx
+```
+
+如果系统不用 systemd 管理 Nginx，也可以：
+
+```bash
+sudo nginx -t
+sudo nginx
+sudo nginx -s reload
 ```
 
 使用 systemd backend 模板：
@@ -208,8 +229,8 @@ sudo systemctl enable --now securechat-server-mtls-backend.service
 Host/Client 连接外部入口：
 
 ```bash
-export SECURECHAT_MTLS_CLIENT_CERT_FILE=certs/pki/alice-chain.pem
-export SECURECHAT_MTLS_CLIENT_KEY_FILE=certs/pki/alice-key.pem
+export SECURECHAT_MTLS_CLIENT_CERT_FILE=certs/pki/alice-mtls-chain.pem
+export SECURECHAT_MTLS_CLIENT_KEY_FILE=certs/pki/alice-mtls-key.pem
 ```
 
 如果入口服务器证书不是系统信任 CA 签发，再设置：
@@ -242,19 +263,37 @@ cmake --preset x64-linux-release
 cmake --build out/build/x64-linux-release --config Release
 ```
 
-启动不可信 Server：
+### Linux CLI 启动顺序
+
+下面只给最小本机 WS 测试命令。完整 PKI、WSS、脚本和 mTLS 步骤见 `docs/startup-guide.md`。
+
+终端 1：启动 Server。
 
 ```bash
 ./out/build/x64-linux-release/server 25566
 ```
 
-群主 Host 作为可见成员连接 Server：
+终端 2：配置 Host 的成员 PKI，然后创建房间。
 
 ```bash
-./out/build/x64-linux-release/host --server ws://127.0.0.1:25566 secure-room host
+export SECURECHAT_PKI_TRUST_STORE=certs/pki/root-ca.pem
+export SECURECHAT_IDENTITY_CERT_FILE=certs/pki/alice-chain.pem
+export SECURECHAT_IDENTITY_KEY_FILE=certs/pki/alice-key.pem
+export SECURECHAT_PKI_REVOCATION_FILE=certs/pki/revoked.txt
+./out/build/x64-linux-release/host --server ws://127.0.0.1:25566 secure-room alice
 ```
 
-启动 WSS Server：
+终端 3：配置 Client 的成员 PKI，然后加入同一个房间。
+
+```bash
+export SECURECHAT_PKI_TRUST_STORE=certs/pki/root-ca.pem
+export SECURECHAT_IDENTITY_CERT_FILE=certs/pki/bob-chain.pem
+export SECURECHAT_IDENTITY_KEY_FILE=certs/pki/bob-key.pem
+export SECURECHAT_PKI_REVOCATION_FILE=certs/pki/revoked.txt
+./out/build/x64-linux-release/client ws://127.0.0.1:25566 secure-room bob
+```
+
+WSS Server：
 
 ```bash
 export SECURECHAT_SIGNALING_TLS=1
@@ -263,29 +302,14 @@ export SECURECHAT_TLS_KEY_FILE=certs/privkey.pem
 ./out/build/x64-linux-release/server 25566
 ```
 
-启动 WS Server：
-
-```bash
-unset SECURECHAT_SIGNALING_TLS
-unset SECURECHAT_TLS_CERT_FILE
-unset SECURECHAT_TLS_KEY_FILE
-./out/build/x64-linux-release/server 25566
-```
-
-启动 Client：
-
-```bash
-./out/build/x64-linux-release/client ws://124.70.71.65:25566 secure-room user1
-```
-
-daemon 启动 Server：
+脚本启动 Server。Server 默认后台运行：
 
 ```bash
 chmod +x start_server.sh stop_server.sh start_host.sh stop_host.sh start_client.sh stop_client.sh
 ./start_server.sh --mode wss
 ```
 
-daemon 以 WS 启动 Server：
+脚本以 WS 启动 Server：
 
 ```bash
 ./start_server.sh --mode ws
@@ -304,7 +328,7 @@ daemon 以 WS 启动 Server：
 ./stop_server.sh
 ```
 
-Host 和 Client 默认前台运行，作为可见成员连接 Server：
+脚本启动 Host 和 Client。Host/Client 默认前台运行，启动前仍要配置成员 PKI：
 
 ```bash
 ./start_host.sh --server wss://chat.la5te2.online:25566

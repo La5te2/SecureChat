@@ -68,8 +68,8 @@ mTLS 用于连接准入，不能替代应用层 PKI 身份签名。Server 仍只
 Host/Client 通过以下变量在 TLS 握手中出示客户端证书：
 
 ```bash
-export SECURECHAT_MTLS_CLIENT_CERT_FILE=certs/pki/alice-chain.pem
-export SECURECHAT_MTLS_CLIENT_KEY_FILE=certs/pki/alice-key.pem
+export SECURECHAT_MTLS_CLIENT_CERT_FILE=certs/pki/alice-mtls-chain.pem
+export SECURECHAT_MTLS_CLIENT_KEY_FILE=certs/pki/alice-mtls-key.pem
 ```
 
 如果 mTLS 入口服务器证书不是系统信任 CA 签发，再配置 `SECURECHAT_TLS_CA_FILE`。

@@ -75,6 +75,87 @@ Host/Client -- mTLS WSS --> Nginx :25566 -- local WS --> SecureChat Server 127.0
 
 这种模式下，Nginx 在 TLS 握手阶段要求客户端证书，并用 `ssl_client_certificate` 指向的 CA 验证证书链。SecureChat Server 只监听本机地址，继续负责房间注册、成员状态和 encrypted relay，不参与 TLS 客户端证书语义。
 
+### 安装 Nginx
+
+Nginx 是系统组件，需要先安装到服务器上。它不是本仓库自带的可执行文件。
+
+Ubuntu/Debian 示例：
+
+```bash
+sudo apt update
+sudo apt install -y nginx openssl
+sudo systemctl enable --now nginx
+```
+
+RHEL/CentOS/openEuler 示例：
+
+```bash
+sudo dnf install -y nginx openssl
+sudo systemctl enable --now nginx
+```
+
+安装后确认：
+
+```bash
+nginx -v
+systemctl status nginx --no-pager
+```
+
+### 准备三类证书
+
+mTLS 部署会同时出现三类证书，作用不同：
+
+| 类型 | 放在哪里 | 谁使用 | 作用 |
+| --- | --- | --- | --- |
+| 服务器 TLS 证书 | `/opt/SecureChat/certs/fullchain.pem`、`/opt/SecureChat/certs/privkey.pem` | Nginx | 证明 `wss://chat.la5te2.online:25566` 是正确服务器，并加密外部 TLS 通道。 |
+| mTLS 客户端 TLS 证书 | 例如 `certs/pki/alice-mtls-chain.pem`、`certs/pki/alice-mtls-key.pem` | Host/Client 在 TLS 握手时出示，Nginx 验证 | 限制只有持有客户端 TLS 证书的进程能连入口。 |
+| 应用层成员 PKI 证书 | `SECURECHAT_IDENTITY_CERT_FILE`、`SECURECHAT_IDENTITY_KEY_FILE` | SecureChat Host/Client 本地验签 | 绑定成员身份、临时 X25519 public key、GKA contribution 和 group state。 |
+
+服务器 TLS 证书可以用 Let's Encrypt/Certbot 获取，步骤见 `docs/certificate_methods.md`。如果已有云厂商或其他 CA 签发的 PEM 证书，也可以直接放到上述路径。
+
+下面是本地实验用的 mTLS 客户端证书生成示例。它复用 `docs/pki-identity.md` 中的测试 Root CA；真实部署建议给 mTLS 和应用层成员身份使用不同用途的证书。
+
+```bash
+cd /opt/SecureChat
+mkdir -p certs/pki
+
+# 如果还没有测试 Root CA，先按 docs/pki-identity.md 生成 root-ca.pem 和 root-ca-key.pem。
+openssl genpkey -algorithm ED25519 -out certs/pki/alice-mtls-key.pem
+openssl req -new -key certs/pki/alice-mtls-key.pem \
+  -out certs/pki/alice-mtls.csr \
+  -subj "/CN=alice-mtls"
+
+cat > certs/pki/mtls-client.ext <<'EOF'
+basicConstraints=critical,CA:FALSE
+keyUsage=critical,digitalSignature
+extendedKeyUsage=clientAuth
+subjectKeyIdentifier=hash
+authorityKeyIdentifier=keyid,issuer
+EOF
+
+openssl x509 -req \
+  -in certs/pki/alice-mtls.csr \
+  -CA certs/pki/root-ca.pem \
+  -CAkey certs/pki/root-ca-key.pem \
+  -CAcreateserial \
+  -out certs/pki/alice-mtls-chain.pem \
+  -days 365 \
+  -extfile certs/pki/mtls-client.ext
+```
+
+Nginx 使用 `ssl_client_certificate /opt/SecureChat/certs/pki/root-ca.pem;` 来验证这些客户端 TLS 证书。Host/Client 使用：
+
+```bash
+export SECURECHAT_MTLS_CLIENT_CERT_FILE=certs/pki/alice-mtls-chain.pem
+export SECURECHAT_MTLS_CLIENT_KEY_FILE=certs/pki/alice-mtls-key.pem
+```
+
+如果 Nginx 的服务器 TLS 证书不是系统默认信任 CA 签发的，再额外设置：
+
+```bash
+export SECURECHAT_TLS_CA_FILE=certs/pki/root-ca.pem
+```
+
 复制模板：
 
 ```bash
@@ -84,19 +165,47 @@ sudo nginx -t
 sudo systemctl reload nginx
 ```
 
-启动本机 backend：
+### 不使用 systemd 启动 backend
+
+如果不想安装 SecureChat 的 systemd service，可以直接用项目脚本启动 backend。`start_server.sh` 默认会把 Server 放到后台运行；这里把 backend 绑定到 `127.0.0.1:25567`，公网只能通过 Nginx 的 `25566` 进入。
+
+```bash
+sudo -u securechat -H bash -lc 'cd /opt/SecureChat && \
+  SECURECHAT_BIND_ADDRESS=127.0.0.1 \
+  SECURECHAT_PORT=25567 \
+  SECURECHAT_SERVER_PID_FILE=server-mtls-backend.pid \
+  ./start_server.sh --mode ws'
+```
+
+停止 backend：
+
+```bash
+sudo -u securechat -H bash -lc 'cd /opt/SecureChat && \
+  SECURECHAT_PORT=25567 \
+  SECURECHAT_SERVER_PID_FILE=server-mtls-backend.pid \
+  ./stop_server.sh'
+```
+
+如果系统没有 systemd，Nginx 也可以直接用自身命令管理：
+
+```bash
+sudo nginx -t
+sudo nginx
+sudo nginx -s reload
+sudo nginx -s quit
+```
+
+如果系统有 systemd，只是不想给 SecureChat backend 配 service，仍可以用 `sudo systemctl reload nginx` 管理 Nginx。
+
+### 使用 systemd 启动 backend
+
+使用 systemd 时复制 backend 模板：
 
 ```bash
 sudo cp /opt/SecureChat/deploy/securechat-server-mtls-backend.service /etc/systemd/system/securechat-server-mtls-backend.service
 sudo systemctl edit --full securechat-server-mtls-backend.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now securechat-server-mtls-backend.service
-```
-
-手动启动等价命令：
-
-```bash
-sudo -u securechat -H bash -lc 'cd /opt/SecureChat && SECURECHAT_BIND_ADDRESS=127.0.0.1 SECURECHAT_PORT=25567 ./start_server.sh --mode ws'
 ```
 
 验证监听面：
@@ -116,8 +225,8 @@ ss -lntp | grep -E ':(25566|25567)'
 Host/Client 连接 mTLS 入口前需要提供客户端证书：
 
 ```bash
-export SECURECHAT_MTLS_CLIENT_CERT_FILE=certs/pki/alice-chain.pem
-export SECURECHAT_MTLS_CLIENT_KEY_FILE=certs/pki/alice-key.pem
+export SECURECHAT_MTLS_CLIENT_CERT_FILE=certs/pki/alice-mtls-chain.pem
+export SECURECHAT_MTLS_CLIENT_KEY_FILE=certs/pki/alice-mtls-key.pem
 ./start_client.sh --server wss://chat.la5te2.online:25566
 ```
 

@@ -111,8 +111,8 @@ mTLS 服务端验证由 Nginx 反向代理完成。Host/Client 需要在 TLS 握
 示例：
 
 ```bash
-export SECURECHAT_MTLS_CLIENT_CERT_FILE=certs/pki/alice-chain.pem
-export SECURECHAT_MTLS_CLIENT_KEY_FILE=certs/pki/alice-key.pem
+export SECURECHAT_MTLS_CLIENT_CERT_FILE=certs/pki/alice-mtls-chain.pem
+export SECURECHAT_MTLS_CLIENT_KEY_FILE=certs/pki/alice-mtls-key.pem
 ```
 
 如果 WSS/mTLS 入口服务器证书由私有 CA 或自签名证书签发，再额外设置 `SECURECHAT_TLS_CA_FILE`。使用 Let's Encrypt 等系统已信任 CA 时通常不需要设置。

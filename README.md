@@ -380,11 +380,25 @@ SecureChat Server backend 启动：
 SECURECHAT_BIND_ADDRESS=127.0.0.1 SECURECHAT_PORT=25567 ./start_server.sh --mode ws
 ```
 
+Nginx 需要安装在服务器上，不随本仓库自动携带。Ubuntu/Debian 示例：
+
+```bash
+sudo apt update
+sudo apt install -y nginx openssl
+sudo systemctl enable --now nginx
+```
+
+mTLS 需要三类证书：
+
+- 服务器 TLS 证书：Nginx 使用，例如 `/opt/SecureChat/certs/fullchain.pem` 和 `/opt/SecureChat/certs/privkey.pem`；公网域名推荐用 Let's Encrypt/Certbot，方法见 `docs/certificate_methods.md`。
+- mTLS 客户端 TLS 证书：Host/Client 连接 Nginx 时出示，例如 `certs/pki/alice-mtls-chain.pem` 和 `certs/pki/alice-mtls-key.pem`；Nginx 用 `ssl_client_certificate` 指向的 CA 验证它。
+- 应用层成员 PKI 证书：SecureChat Host/Client 用它签名和验签 `join_room`、GKA contribution 和 group state，变量是 `SECURECHAT_PKI_TRUST_STORE`、`SECURECHAT_IDENTITY_CERT_FILE`、`SECURECHAT_IDENTITY_KEY_FILE`。
+
 Host/Client 连接 mTLS 入口前配置客户端证书：
 
 ```bash
-export SECURECHAT_MTLS_CLIENT_CERT_FILE=certs/pki/member-chain.pem
-export SECURECHAT_MTLS_CLIENT_KEY_FILE=certs/pki/member-key.pem
+export SECURECHAT_MTLS_CLIENT_CERT_FILE=certs/pki/alice-mtls-chain.pem
+export SECURECHAT_MTLS_CLIENT_KEY_FILE=certs/pki/alice-mtls-key.pem
 ```
 
 如果 mTLS 入口服务器证书是私有 CA 或自签名证书，再额外设置 `SECURECHAT_TLS_CA_FILE`；使用 Let's Encrypt 等系统已信任 CA 时通常不需要。
@@ -491,7 +505,7 @@ $VCPKG_ROOT/vcpkg install libdatachannel openssl nlohmann-json --triplet x64-lin
 只构建 C++：
 
 ```bash
-cd /SecureChat
+cd ~/SecureChat
 chmod +x build.sh
 ./build.sh
 ```
@@ -508,56 +522,44 @@ out/build/x64-linux-release/libnative.so
 构建 Web UI：
 
 ```bash
-cd /SecureChat
+cd ~/SecureChat
 chmod +x build_web.sh
 ./build_web.sh
 ```
 
-## Host 和 Join
+## 启动手册
 
-Web UI 端口 `5188` 只是浏览器界面端口，不是聊天室端口。
-
-聊天室信令端口示例为：
+Windows 和 Linux 的 Server、Host、Client、WinUI 和 Web UI 启动流程已经单独整理在：
 
 ```text
-25566
+docs/startup-guide.md
 ```
 
-启动不可信 Server：
+最小顺序永远是：
+
+1. 启动 Server，监听 `25566`。
+2. 在 Host 进程配置成员 PKI，然后创建房间。
+3. 在 Client 进程配置成员 PKI，然后加入同一个房间。
+
+Server 不是群成员，不需要房间密码，也不配置成员 PKI。Host 和 Client 都是群成员，必须配置成员 PKI，并在启动后输入相同的房间密码。
+
+Windows 本机 WS 示例：
+
+```powershell
+out\build\x64-release\server.exe 25566
+out\build\x64-release\host.exe --server ws://127.0.0.1:25566 secure-room alice
+out\build\x64-release\client.exe ws://127.0.0.1:25566 secure-room bob
+```
+
+Linux 本机 WS 示例：
 
 ```bash
 ./out/build/x64-linux-release/server 25566
+./out/build/x64-linux-release/host --server ws://127.0.0.1:25566 secure-room alice
+./out/build/x64-linux-release/client ws://127.0.0.1:25566 secure-room bob
 ```
 
-群主 Host 作为可见成员连接 Server：
-
-```bash
-./out/build/x64-linux-release/host --server ws://127.0.0.1:25566 secure-room host
-```
-
-其他机器加入：
-
-```text
-ws://HOST_IP:25566
-```
-
-华为云示例：
-
-```text
-ws://124.70.71.65:25566
-```
-
-上面的 `ws://` 是 insecure mode，配置简单但信令明文。公网安全连接应改用 WSS，例如：
-
-```text
-wss://your-domain.example:25566
-```
-
-Linux CLI 加入：
-
-```bash
-./out/build/x64-linux-release/client ws://124.70.71.65:25566 secure-room user1
-```
+上面两组命令为了展示参数写在一起。实际运行时应打开三个终端：Server 一个，Host 一个，Client 一个。Host/Client 终端还要先设置 `SECURECHAT_PKI_TRUST_STORE`、`SECURECHAT_IDENTITY_CERT_FILE`、`SECURECHAT_IDENTITY_KEY_FILE`。WinUI 和 Web UI 的输入框填写步骤也在 `docs/startup-guide.md`。
 
 ## 公网云服务器部署
 
@@ -588,9 +590,9 @@ Test-NetConnection 124.70.71.65 -Port 25566
 
 聊天文本和附件的应用数据都走 TCP `25566` 上的 WebSocket encrypted relay，不需要 STUN 或 UDP 候选端口。
 
-## 运行 Server、Host 和 Client
+## 运行 Server、Host 和 Client 的规则
 
-`server` 是公网常驻的不可信协调者，不是群成员，不会显示在成员列表中；Host 和 Client 都是需要输入房间密码的可见参与者。
+`server` 是常驻的不可信协调者，不是群成员，不会显示在成员列表中；Host 和 Client 都是需要输入房间密码的可见参与者。
 
 同一个 Server 实例可以承载多个不同 `roomId`，但同一个 Server 实例内 `roomId` 不能重复；不同 Server 或不同端口上的房间名可以重复。一台机器可以启动多个 Server，只要监听端口不同。
 
@@ -598,40 +600,15 @@ Host 创建 roomId 后成为第一个群成员和房间生命周期管理者。C
 
 当前房间不做持久化：Host 关闭 WinUI、结束 Host 进程、Ctrl+C 或点击 stop session 都会关闭房间，Server 会通知 Clients 退出该 room，但 Server 进程本身继续监听。Client 主动离开、断线或被 Host 驱逐后，Host 会移除其 public key 并发起新的 GKA epoch；禁言不改变成员资格，因此不触发重密钥。
 
-公网 Server 默认用 daemon 脚本后台运行：
+Linux 脚本规则：
 
-```bash
-cd /SecureChat
-chmod +x start_server.sh stop_server.sh start_host.sh stop_host.sh start_client.sh stop_client.sh
-./start_server.sh --mode wss
-```
+- `start_server.sh` 默认后台运行；
+- `start_host.sh` 默认前台运行；
+- `start_client.sh` 默认前台运行；
+- Host/Client 只有显式加 `--daemon` 才后台运行；
+- Host/Client 前台模式会隐藏提示输入房间密码。
 
-`--mode wss` 默认使用：
-
-```text
-certs/fullchain.pem
-certs/privkey.pem
-```
-
-本地或无证书环境可以显式使用 WS：
-
-```bash
-./start_server.sh --mode ws
-```
-
-群主 Host 默认前台运行，作为可见成员连接 Server：
-
-```bash
-./start_host.sh --server wss://chat.la5te2.online:25566
-```
-
-其他成员用 Client 加入：
-
-```bash
-./start_client.sh --server wss://chat.la5te2.online:25566
-```
-
-`start_host.sh` 和 `start_client.sh` 会由底层 CLI 隐藏提示房间密码；前台模式可继续从终端发送消息和文件命令。
+Windows 没有对应的 start/stop 脚本，直接运行 `server.exe`、`host.exe`、`client.exe`，或者启动 WinUI。详细命令见 `docs/startup-guide.md`。
 
 文本消息和附件命令 `/image`、`/file`、`/voice` 都通过 Server relay 转发密文；附件 metadata 和二进制 chunk 会在发送端加密，接收端解密后写入本地附件缓存。聊天数据通路是 WebSocket encrypted relay。
 
@@ -714,8 +691,8 @@ WinUI 对附件预览采用当前房间内的身份状态策略：`Unknown` 表�
 因此建议总是从项目根目录启动：
 
 ```bash
-cd /SecureChat
-./out/build/x64-linux-release/host --server ws://127.0.0.1:25566 secure-room host
+cd ~/SecureChat
+./out/build/x64-linux-release/host --server ws://127.0.0.1:25566 secure-room alice
 ```
 
 ## 常见问题
@@ -757,7 +734,7 @@ ss -lntp | grep ':25566'
 可先重启 Server，并重新启动 Host：
 
 ```bash
-cd /SecureChat
+cd ~/SecureChat
 ./stop_server.sh
 ./start_server.sh --mode wss
 ./start_host.sh --server wss://chat.la5te2.online:25566

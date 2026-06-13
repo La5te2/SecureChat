@@ -168,6 +168,16 @@ cd /opt/SecureChat
 SECURECHAT_BIND_ADDRESS=127.0.0.1 SECURECHAT_PORT=25567 ./start_server.sh --mode ws
 ```
 
+如果服务器还没有 Nginx，先安装：
+
+```bash
+sudo apt update
+sudo apt install -y nginx openssl
+sudo systemctl enable --now nginx
+```
+
+mTLS 客户端证书可按 `docs/deployment-hardening.md` 生成；下面示例使用 `alice-mtls-chain.pem` 和 `alice-mtls-key.pem`，避免和应用层成员 PKI 的 `alice-chain.pem` 混淆。
+
 安装 Nginx mTLS 配置：
 
 ```bash
@@ -207,8 +217,8 @@ openssl s_client -connect chat.la5te2.online:25566 -servername chat.la5te2.onlin
 openssl s_client \
   -connect chat.la5te2.online:25566 \
   -servername chat.la5te2.online \
-  -cert certs/pki/alice-chain.pem \
-  -key certs/pki/alice-key.pem
+  -cert certs/pki/alice-mtls-chain.pem \
+  -key certs/pki/alice-mtls-key.pem
 ```
 
 如果入口服务器证书由私有 CA 或自签名证书签发，再加 `-CAfile certs/pki/root-ca.pem`。
@@ -222,8 +232,8 @@ openssl s_client \
 SecureChat Host/Client 连接 mTLS 入口：
 
 ```bash
-export SECURECHAT_MTLS_CLIENT_CERT_FILE=certs/pki/alice-chain.pem
-export SECURECHAT_MTLS_CLIENT_KEY_FILE=certs/pki/alice-key.pem
+export SECURECHAT_MTLS_CLIENT_CERT_FILE=certs/pki/alice-mtls-chain.pem
+export SECURECHAT_MTLS_CLIENT_KEY_FILE=certs/pki/alice-mtls-key.pem
 ./start_client.sh --server wss://chat.la5te2.online:25566
 ```
 
