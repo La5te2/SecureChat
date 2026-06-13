@@ -13,11 +13,11 @@ SecureChat 是一个双向通信实验项目，包含共享 C++ 核心、Windows
 - `build.sh`：Linux 上（云服务器）只构建 C++。
 - `build_web.sh`：Linux 上（非云服务器）构建 C++ 和 Web UI。
 
-说明：当前仍依赖 libdatachannel，是因为项目使用它的 WebSocket/WebSocketServer 实现；Host/Client 不再建立 WebRTC PeerConnection/DataChannel。
+说明：项目依赖 libdatachannel 的 WebSocket/WebSocketServer 实现；聊天数据通路是 WebSocket encrypted relay。
 
 ## 安全说明
 
-SecureChat 当前更适合作为课程/论文实验系统，而不是已经完成加固的公网生产服务。
+SecureChat 当前定位为课程/论文实验系统；公网运行时应按本节安全边界和部署约束使用。
 
 公网 Server 常开时，主要暴露面是：
 
@@ -28,7 +28,7 @@ SecureChat 当前更适合作为课程/论文实验系统，而不是已经完�
 - 信令支持 `ws://` insecure mode 和 `wss://` secure mode。`ws://` 配置简单、便于本地或无证书场景使用，但传输不加密；真实公网部署应使用 `wss://`。
 - 文本消息和附件 metadata/chunk 已走应用层 AES-256-GCM encrypted relay：Server 只转发 opaque envelope，不能解密应用内容。
 - Host/Client 使用 GKA v2：Client 加入时提交临时 X25519 public key，Host 生成 room group key，并为每个成员封装分发；文本和附件使用该 group key 做 AES-256-GCM。
-- 成员加入或离开时，Host 会轮换新的 room group key 并重新分发给当前成员。当前仍未实现长期身份密钥/指纹校验，因此恶意或被攻破的 Server 仍可能尝试公钥替换攻击；公网应使用 `wss://` 降低信令篡改风险。
+- 成员加入或离开时，Host 会轮换新的 room group key 并重新分发给当前成员。GKA v2 的成员公钥由信令消息携带；如果信令被篡改，恶意或被攻破的 Server 可能尝试公钥替换攻击。
 - 房间密码能阻止普通误入，但不能替代 TLS、限速、防火墙和强认证。
 - 能限制安全组来源 IP 时，不建议长期使用 `0.0.0.0/0`。
 - 不建议把 Web UI 端口 `5188` 直接暴露到公网。
@@ -42,6 +42,155 @@ SecureChat 当前更适合作为课程/论文实验系统，而不是已经完�
 ```text
 docs/signaling-security.md
 docs/relay-attachment-security.md
+```
+
+## GKA v2 原理与安全边界
+
+当前 GKA v2 是 Host 协调的群组密钥分发，不是完整的多方 Diffie-Hellman。Host 生成房间级对称密钥 `K_G`，Client 生成自己的 X25519 公私钥对并只上报公钥；Host 使用每个 Client 的公钥封装 `K_G`，Server 只负责转发 opaque `group_key` envelope。
+
+需要注意：系统不会转发任何成员私钥。私钥始终留在本地进程中，被安全转发的是 Host 生成的 room group key。
+
+### X25519 是什么
+
+X25519 是基于 Curve25519 的椭圆曲线 Diffie-Hellman 密钥交换函数。它的作用是：双方各自持有私钥，交换公钥后，在不发送私钥的情况下计算出同一个共享秘密 `S`。这个共享秘密通常不会直接当作 AES 密钥使用，而是先经过 HKDF 派生成固定长度、带上下文绑定的密钥。
+
+X25519 只解决“被动窃听者算不出共享秘密”的问题，不解决“这个公钥到底属于谁”的认证问题。因此在当前代码中，如果信令层公钥被替换，X25519 本身不会检测出该攻击。
+
+数学流程如下。设 X25519 基点为 `G`：
+
+```text
+Client:
+  c_priv = random()
+  c_pub  = c_priv * G
+
+Host 为该 Client 生成一次性封装密钥：
+  e_priv = random()
+  e_pub  = e_priv * G
+
+Host:
+  S = X25519(e_priv, c_pub)
+
+Client:
+  S = X25519(c_priv, e_pub)
+
+因为 DH 性质：
+  X25519(e_priv, c_priv * G) = X25519(c_priv, e_priv * G)
+```
+
+双方用同一个共享秘密派生包装密钥：
+
+```text
+K_W = HKDF-SHA256(
+  input_key_material = S,
+  salt = "securechat-gka-v2:" || roomId,
+  info = "group-key|" || clientId,
+  length = 32
+)
+```
+
+Host 用 `K_W` 加密 `K_G`：
+
+```text
+group_key_envelope = AES-256-GCM-Encrypt(
+  key = K_W,
+  plaintext = K_G,
+  aad = aadForGroupKey(roomId, clientId)
+)
+```
+
+Client 收到 `group_key_envelope` 后用自己的 `c_priv` 和 envelope 中的 `ephemeralPublicKey` 重新派生 `K_W`，再解密得到 `K_G`。之后文本和附件都使用 `K_G` 做应用层 AES-256-GCM encrypted relay。
+
+代码入口：
+
+- `include/secure_relay.hpp`：`MemberKeyPair`、`generateMemberKeyPair()`、`encryptGroupKeyForMember()`、`decryptGroupKeyForMember()`。
+- `src/client_session_core.cpp`：Client 在 `join_room` 中提交 `publicKey`，并在收到 `group_key` 后解封装。
+- `src/host_session_core.cpp`：Host 生成/轮换 `mGroupKey`，收到新 Client 后调用 `encryptGroupKeyForMember()` 单独封装。
+- `src/signaling_server.cpp`：Server 校验字段、转发 `publicKey` 和 `group_key` envelope，但不生成、不解密、不理解 group key。
+- `src/secure_relay.cpp`：X25519 ECDH、HKDF-SHA256、AES-256-GCM 封装和 relay 加解密实现。
+
+关键实现片段：
+
+```cpp
+// 生成 X25519 成员密钥对。publicKey 通过信令发送，privateKey 留在本地。
+MemberKeyPair generateMemberKeyPair() {
+    PkeyCtxPtr ctx(EVP_PKEY_CTX_new_id(EVP_PKEY_X25519, nullptr), EVP_PKEY_CTX_free);
+    EVP_PKEY* raw = nullptr;
+    if (!ctx || EVP_PKEY_keygen_init(ctx.get()) != 1 || EVP_PKEY_keygen(ctx.get(), &raw) != 1) {
+        throw std::runtime_error("X25519 key generation failed");
+    }
+    ...
+}
+```
+
+```cpp
+// 用本地私钥和对端公钥计算 X25519 共享秘密 S。
+std::vector<unsigned char> deriveX25519Secret(
+    const std::vector<unsigned char>& privateKey,
+    const std::vector<unsigned char>& peerPublicKey) {
+    auto local = rawX25519PrivateKey(privateKey);
+    auto peer = rawX25519PublicKey(peerPublicKey);
+    PkeyCtxPtr ctx(EVP_PKEY_CTX_new(local.get(), nullptr), EVP_PKEY_CTX_free);
+    EVP_PKEY_derive_init(ctx.get());
+    EVP_PKEY_derive_set_peer(ctx.get(), peer.get());
+
+    std::size_t len = 0;
+    EVP_PKEY_derive(ctx.get(), nullptr, &len);
+    std::vector<unsigned char> secret(len);
+    EVP_PKEY_derive(ctx.get(), secret.data(), &len);
+    return secret;
+}
+```
+
+```cpp
+// Host 为单个 Client 封装 room group key。
+json encryptGroupKeyForMember(
+    const std::vector<unsigned char>& groupKey,
+    const std::string& roomId,
+    const std::string& targetId,
+    const std::string& targetPublicKey) {
+    const auto recipientPublic = base64Decode(targetPublicKey);
+    auto ephemeral = generateMemberKeyPair();
+    const auto secret = deriveX25519Secret(ephemeral.privateKey, recipientPublic);
+    const auto wrapKey = hkdfSha256(secret, "securechat-gka-v2:" + roomId, "group-key|" + targetId);
+
+    return encryptWithAesGcm(plaintext, wrapKey, aadForGroupKey(roomId, targetId), {
+        {"type", GroupKeyType},
+        {"ephemeralPublicKey", ephemeral.publicKey}
+    });
+}
+```
+
+```cpp
+// Client 用自己的私钥和 Host 的 ephemeralPublicKey 解封装 group key。
+std::vector<unsigned char> decryptGroupKeyForMember(
+    const json& envelope,
+    const std::string& roomId,
+    const std::string& clientId,
+    const std::vector<unsigned char>& privateKey) {
+    const auto ephemeralPublic = base64Decode(envelope.value("ephemeralPublicKey", ""));
+    const auto secret = deriveX25519Secret(privateKey, ephemeralPublic);
+    const auto wrapKey = hkdfSha256(secret, "securechat-gka-v2:" + roomId, "group-key|" + clientId);
+    const auto plaintext = decryptWithAesGcm(envelope, wrapKey, aadForGroupKey(roomId, clientId));
+    return {plaintext.begin(), plaintext.end()};
+}
+```
+
+安全边界：
+
+- 如果没有中间人攻击且 Host 可信，则不可信 Server 和网络旁路看不到聊天/附件明文。
+- 其他合法群成员会持有同一个 `K_G`，因此群聊内容对群成员本身不保密。恶意成员可以保存、截图或转发自己收到的明文。
+- 当前私发是定向投递：Server 只把密文转发给目标成员，但密文仍使用 room group key，而不是独立点对点私聊密钥。因此它不是密码学意义上的成员专属私聊。
+- 当前 GKA v2 的成员公钥由信令消息携带；恶意 Server 或网络中间人如果能篡改信令，可能实施公钥替换攻击。
+
+典型中间人攻击是公钥替换：
+
+```text
+1. Client 生成 c_priv/c_pub，并通过 join_room 上报 c_pub。
+2. 恶意 Server/MITM 把 c_pub 替换为自己的 m_pub 后发给 Host。
+3. Host 误以为 m_pub 属于 Client，于是用 m_pub 封装 room group key。
+4. MITM 用 m_priv 解开 group key。
+5. MITM 再用真正的 c_pub 重新封装 group key 发给 Client。
+6. Client 正常进入房间，但 MITM 也已经获得 group key。
 ```
 
 ## Windows 构建
@@ -225,11 +374,11 @@ Windows 测试公网 TCP：
 Test-NetConnection 124.70.71.65 -Port 25566
 ```
 
-聊天文本和附件的应用数据都走 TCP `25566` 上的 WebSocket encrypted relay；当前代码不再建立 WebRTC/DataChannel，也不需要 STUN 或 UDP 候选端口。
+聊天文本和附件的应用数据都走 TCP `25566` 上的 WebSocket encrypted relay，不需要 STUN 或 UDP 候选端口。
 
 ## 运行 Server、Host 和 Client
 
-阶段 3 起推荐把不可信转发者和群成员拆开：`server` 是公网常驻的不可信协调者，不是群成员，不会显示在成员列表中；Host 和 Client 都是需要输入房间密码的可见参与者。
+`server` 是公网常驻的不可信协调者，不是群成员，不会显示在成员列表中；Host 和 Client 都是需要输入房间密码的可见参与者。
 
 同一个 Server 实例可以承载多个不同 `roomId`，但同一个 Server 实例内 `roomId` 不能重复；不同 Server 或不同端口上的房间名可以重复。一台机器可以启动多个 Server，只要监听端口不同。
 
@@ -270,9 +419,9 @@ certs/privkey.pem
 
 `start_host.sh` 和 `start_client.sh` 会由底层 CLI 隐藏提示房间密码；前台模式可继续从终端发送消息和文件命令。
 
-当前阶段文本消息和附件命令 `/image`、`/file`、`/voice` 都通过 Server relay 转发密文；附件 metadata 和二进制 chunk 会在发送端加密，接收端解密后写入本地附件缓存。代码层不再建立 WebRTC/DataChannel。
+文本消息和附件命令 `/image`、`/file`、`/voice` 都通过 Server relay 转发密文；附件 metadata 和二进制 chunk 会在发送端加密，接收端解密后写入本地附件缓存。聊天数据通路是 WebSocket encrypted relay。
 
-私发可使用 `/to <成员名或成员id> <消息>`，附件也可以写成 `/to <成员名或成员id> /image <path>`、`/to <成员名或成员id> /file <path>` 或 `/to <成员名或成员id> /voice <path>`。WinUI/Web 的发送栏也提供 `To: room` 输入框，留空表示群发，填写成员名或 id 表示私发。当前私发是 group key 下的定向投递：Server 只把密文转发给目标成员，但目标消息仍使用当前 room group key，而不是独立的点对点私聊密钥。
+私发可使用 `/to <成员名或成员id> <消息>`，附件也可以写成 `/to <成员名或成员id> /image <path>`、`/to <成员名或成员id> /file <path>` 或 `/to <成员名或成员id> /voice <path>`。WinUI/Web 的发送栏也提供 `To: member` 输入框，留空表示群发，填写成员名或 id 表示私发。当前私发是 group key 下的定向投递：Server 只把密文转发给目标成员，但目标消息仍使用当前 room group key，而不是独立的点对点私聊密钥。
 
 如果 Host 或 Client 确实要后台运行，必须显式加 `--daemon`，并从 stdin 或环境变量提供房间密码：
 
@@ -333,7 +482,7 @@ export SECURECHAT_LOGS_MAX_BYTES=1073741824
 
 接收端会清理最旧的受管理附件缓存文件，但只清理 `logs/images`、`logs/voice`、`logs/files`。文件扩展名和文件头校验只能降低误传/伪装风险，不等于杀毒。
 
-附件当前已经实现应用层 E2EE relay：文件名、mime、metadata 和 binary chunk 都在 Host/Client 本地加密，Server 只转发 ciphertext。安全边界是：网络路径和不可信 Server 不应看到附件明文；接收成员本机会解密并缓存附件，因此成员设备、用户手动打开文件、图片/音频解码器和本地文件系统仍是信任边界。当前没有杀毒扫描、沙箱打开、复杂文档格式隔离或恶意文件内容检测。
+附件当前已经实现应用层 E2EE relay：文件名、mime、metadata 和 binary chunk 都在 Host/Client 本地加密，Server 只转发 ciphertext。安全边界是：网络路径和不可信 Server 不应看到附件明文；接收成员本机会解密并缓存附件，因此成员设备、用户手动打开文件、图片/音频解码器和本地文件系统仍是信任边界。附件安全边界不覆盖杀毒扫描、沙箱打开、复杂文档格式隔离或恶意文件内容检测。
 
 因此建议总是从项目根目录启动：
 
