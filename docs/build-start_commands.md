@@ -97,7 +97,7 @@ app\chat\bin\x64\Release\net10.0-windows10.0.19041.0\win-x64\SecureChat.exe
 WinUI Host/Client 连接 WSS Server：
 
 1. 先独立启动 Server，并在 Server 进程上配置 WSS 证书。
-2. 启动 WinUI；GKA v2 会在 Host/Client 加入房间时自动分发 room group key，不需要设置共享 E2EE 口令。
+2. 启动 WinUI；GKA v3 会在 Host/Client 加入房间时自动协商 room group key，不需要设置共享 E2EE 口令。
 3. 在 Host 或 Join 页的 Server URL 中填写：
 
 ```text
@@ -200,9 +200,9 @@ sudo systemctl reload nginx
 使用 systemd backend 模板：
 
 ```bash
-sudo cp /opt/SecureChat/deploy/securechat-server-mtls-backend.service /etc/systemd/system/securechat-server.service
+sudo cp /opt/SecureChat/deploy/securechat-server-mtls-backend.service /etc/systemd/system/securechat-server-mtls-backend.service
 sudo systemctl daemon-reload
-sudo systemctl enable --now securechat-server.service
+sudo systemctl enable --now securechat-server-mtls-backend.service
 ```
 
 Host/Client 连接外部入口：
@@ -408,7 +408,7 @@ Web Host 不再配置证书路径；WSS 证书属于独立 Server 进程。
 - Linux 没有 WinUI Chat 构建路径；`app/chat` 是 Windows WinUI。
 - Windows Web 和 Linux Web 都依赖 C++ native 输出，所以 Web 构建前必须先完成对应平台的 C++ 构建。
 - `ws://` 是 insecure mode，配置简单但信令明文；公网安全连接应使用 `wss://` secure mode。
-- 文本和附件 E2EE 使用 GKA v2 自动分发 room group key；Host/Client/Web/WinUI 不再需要设置共享 E2EE 口令。
+- 文本和附件 E2EE 使用 GKA v3 自动协商 room group key；Host/Client/Web/WinUI 不再需要设置共享 E2EE 口令。
 - 接收附件会写入 `logs/images`、`logs/voice`、`logs/files`。默认缓存总量上限为 512 MB，可用 `SECURECHAT_LOGS_MAX_BYTES` 覆盖，例如 `export SECURECHAT_LOGS_MAX_BYTES=1073741824`。
 - `./stop_server.sh`、`./stop_host.sh`、`./stop_client.sh` 会清理各自脚本进程内的 SecureChat 运行时环境变量。普通 stop 脚本不能修改父 shell 中已经 `export` 的变量；如果确实要清理当前 SSH 窗口，可执行对应的 `source ./stop_*.sh` 或手动 `unset`。
 - 公网 Server 部署加固、非 root 用户、可选 systemd 模板、SIGTERM 验证、日志清理和安全组来源 IP 收敛步骤见 `docs/deployment-hardening.md`。

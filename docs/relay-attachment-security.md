@@ -1,6 +1,6 @@
 # SecureChat Relay 数据通路与附件安全
 
-本文档对应 `todolist.md` 的阶段 3 和阶段 4，用于说明当前真实拓扑、GKA v2 数据通路，以及附件安全边界。
+本文档对应 `todolist.md` 的阶段 3、阶段 4 和阶段 12，用于说明当前真实拓扑、GKA v3 数据通路，以及附件安全边界。
 
 ## 阶段 3：角色模型
 
@@ -8,13 +8,13 @@
 
 ```text
 Server：只提供监听、房间注册、成员连接状态、密文 relay；不创建群密钥，不参与密钥协商语义，不是群成员
-Host：创建 roomId，是第一个群成员/群管理者；发起并协调 Group Key Agreement；使用协商出的对称 group key 加解密消息和附件
-Client：加入 room，提交成员 public key，接收 Host 封装的 group key；使用同一个 group key 加解密消息和附件
+Host：创建 roomId，是第一个群成员和房间生命周期管理者；发起 GKA epoch，汇总签名贡献集合；使用协商出的对称 group key 加解密群聊消息和附件，私发时使用 pairwise 内层密钥
+Client：加入 room，提交成员 public key，参与 GKA epoch；使用 group key 加解密群聊消息和附件，私发时用目标成员已验证 public key 派生 pairwise key
 ```
 
 `Server` 的职责是公网可达、房间注册、成员状态维护，以及 opaque encrypted relay 转发。`Host` 和 `Client` 才是可见聊天成员。这样论文中的安全边界更清楚：攻破或托管 `Server` 不应得到应用层文本、附件明文或 room group key。
 
-同一个 Server 实例可以承载多个不同 `roomId`，但同一个 Server 实例内 `roomId` 不能重复；不同 Server 或不同端口上的房间名可以重复。一台主机可以开多个 Server，只要监听端口不同。
+同一个 Server 实例可以承载多个不同 room token，但同一个 Server 实例内 token 不能重复；不同 Server 或不同端口上的房间名可以重复。一台主机可以开多个 Server，只要监听端口不同。Host/Client 本地保留真实 roomId，Server 注册和路由只看到由 roomId 和房间密码派生出的 opaque room token。
 
 ## 当前数据拓扑
 
@@ -24,7 +24,7 @@ Client：加入 room，提交成员 public key，接收 Host 封装的 group key
 Host member  <->  Server opaque encrypted_relay  <->  Client member(s)
 ```
 
-Server 会校验 WebSocket 会话所属 room 和 sender identity，然后转发 envelope；Server 不解密 ciphertext。Host/Client 使用当前 room group key 解密应用消息。
+Server 会校验 WebSocket 会话所属 room token 和 sender connection id，然后转发 envelope；Server 不解密 ciphertext。Host/Client 使用当前 room group key 解密群聊应用消息；私发在外层 group key relay 内还需要目标成员 pairwise private key。
 
 已完成的数据通路分离：
 
@@ -34,24 +34,28 @@ Server 会校验 WebSocket 会话所属 room 和 sender identity，然后转发 
 - Host/Client 不再建立 WebRTC PeerConnection/DataChannel。
 - Server 不再接受或转发 `offer`、`answer`、`ice`。
 
-## GKA v2
+## GKA v3
 
-当前 GKA v2 是 Host 协调的 group key 分发模型：
+当前 GKA v3 是 Host 发起的贡献式 group key 协商模型：
 
 1. Client 本地生成临时 X25519 key pair。
 2. Client 在 `join_room` 中提交 public key 和成员身份签名。
-3. Server 校验房间密码和成员状态，只把 public key 作为成员元数据转交给 Host。
-4. Host 生成 32-byte room group key。
-5. Host 为每个 Client public key 生成临时 X25519 key pair，通过 X25519 + HKDF-SHA256 派生 wrapping key。
-6. Host 用 AES-256-GCM 把 room group key 封装成 `group_key` envelope，并附加 Host 身份签名，经 Server 转发给目标 Client。
-7. Client 先验证 Host 身份签名，再用自己的 X25519 private key 解开 `group_key` envelope，得到当前 room group key。
-8. 文本和附件都用 room group key 做 AES-256-GCM。
+3. Server 校验 room token 和成员状态，只把 public key 作为成员元数据转交给 Host。
+4. Host 发起新的 `gka_request` epoch。
+5. 每个当前成员生成 32-byte contribution secret，并用成员身份私钥签名。
+6. Client 把签名 contribution 用 Host 的 X25519 public key 加密成 `gka_contribution`，经 Server 转发给 Host。
+7. Host 汇总完整 contribution set，派生当前 `K_G`，并把完整 group state 用每个 Client public key 单独封装成 `group_key` envelope。
+8. Client 先验证 Host 身份签名，再用自己的 X25519 private key 解开 group state，逐个验证成员 contribution 签名，然后本地派生当前 room group key。
+9. 群聊文本和附件都用 room group key 做 AES-256-GCM；私发再叠加 pairwise 内层 AES-256-GCM。
 
 成员变化时：
 
-- 新成员加入：Host 记录该成员 public key，轮换新的 room group key，并发给当前所有 Client。
-- 成员离开：Host 删除该成员 public key，轮换新的 room group key，并发给剩余 Client。
+- 新成员加入：Host 记录该成员 public key，发起新的 GKA epoch，并把新 group state 发给当前所有 Client。
+- 成员离开：Host 删除该成员 public key，发起新的 GKA epoch，并只发给剩余 Client。
+- 成员被 Host `/evict` 或 `/ban`：Host 删除该成员 public key，发起新的 GKA epoch，并把该成员证书指纹加入当前房间内存封禁集。
+- 成员被 Host `/silence`：只禁止其发送文本和附件，不改变成员资格，因此不轮换 room group key。
 - 历史消息对曾持有旧 key 的成员无法撤回；轮换只保护后续消息。
+- 恶意成员如果拒绝提交 GKA contribution，会造成可用性问题；当前 Host 在 10 秒 GKA 超时后自动驱逐未贡献成员，并用剩余成员重新发起 epoch。
 
 ## Envelope
 
@@ -60,35 +64,35 @@ Server 会校验 WebSocket 会话所属 room 和 sender identity，然后转发 
 ```json
 {
   "type": "encrypted_relay",
-  "version": 2,
-  "roomId": "secure-room",
+  "version": 3,
+  "roomId": "opaque-room-token",
   "senderId": "client-id-or-host",
-  "senderName": "display-name",
-  "senderKind": "host-or-client",
-  "targetId": "",
   "alg": "AES-256-GCM",
-  "kdf": "GKA-X25519-HKDF-SHA256",
+  "kdf": "GKA-Contrib-v3-HKDF-SHA256",
   "nonce": "base64",
   "ciphertext": "base64",
   "tag": "base64"
 }
 ```
 
-`targetId` 为空表示群发；填写 `host` 或某个 clientId 时，Server 会校验目标成员是否仍在房间内，并只转发给该目标。`targetId` 被绑定进 AES-GCM AAD，Server 不能在不破坏认证标签的情况下静默把一条密文改投给另一个目标。
+应用层 senderName、senderKind 和 targetId 都在解密后的 Message payload 内。群发 payload 中 targetId 为空；私发 payload 中 targetId 为 `host` 或某个 clientId。Server 不读取 targetId，也不按私发目标定向转发 `encrypted_relay`。
 
-当前私发是 group key 下的定向投递，不是独立点对点私聊密钥。也就是说，普通 Server 仍看不到明文；但如果恶意 Server 把私发密文复制给其他仍持有当前 room group key 的成员，该成员理论上可以解密。要达到更强的私聊隔离，需要后续引入 pairwise key、sender key 或独立会话密钥。
+私发使用双层保护。外层仍是 room group key 的 `encrypted_relay`，用于统一走 Server broadcast relay；内层是 `pairwise_private`，由发送者临时 X25519 private key 和目标成员已验证 public key 派生 pairwise key 后加密原始文本或附件消息。Host/Client 先检查解密 payload 中的 `relayTargetId`，目标不是自己时丢弃；即使恶意 Server 把外层 envelope 复制给其他成员，其他成员也缺少内层 pairwise 私钥材料，不能解开私发正文或附件 chunk。
 
-Host 发给单个 Client 的 group key envelope：
+Server 仍可见 room token、sender connection id、ciphertext 长度和转发时序。这些元数据不会暴露消息内容，但会暴露活跃时间和大致附件大小。
+
+Host 发给单个 Client 的 group-state envelope：
 
 ```json
 {
   "type": "group_key",
-  "version": 2,
-  "roomId": "secure-room",
+  "version": 3,
+  "epoch": 1,
+  "roomId": "opaque-room-token",
   "targetId": "client-id",
   "senderId": "host",
   "alg": "AES-256-GCM",
-  "kdf": "X25519-HKDF-SHA256",
+  "kdf": "X25519-HKDF-SHA256+GKA-Contrib-v3",
   "ephemeralPublicKey": "base64",
   "nonce": "base64",
   "ciphertext": "base64",
@@ -103,7 +107,9 @@ Host 发给单个 Client 的 group key envelope：
 }
 ```
 
-`identity` 是 `join_room` 和 `group_key` 的必需字段。Server 转发 `group_key` 前会用 WebSocket 会话状态覆盖 `roomId`、`senderId` 和 `targetId`，避免发送方伪造这些明文 metadata。转发 `encrypted_relay` 时，Server 会覆盖 `senderId`、`senderName` 和 `senderKind`。私发时 Server 使用 `targetId` 做成员存在性校验和定向转发。AAD 不作为 JSON 字段传输，而是在 Host/Client 本地按固定格式重新构造。
+`identity` 是 `join_room`、GKA contribution 和 `group_key` 的必需字段。Server 转发 `group_key` 前会用 WebSocket 会话状态覆盖 `roomId`、`senderId` 和 `targetId`，避免发送方伪造这些明文 metadata。转发 `encrypted_relay` 时，Server 只覆盖 `roomId` 和 `senderId`；senderName、senderKind、targetId 都留在加密 payload 内。如果发送方是被 Host 禁言的 Client，Server 在 relay 前拒绝该 envelope。AAD 不作为 JSON 字段传输，而是在 Host/Client 本地按固定格式重新构造。
+
+`room_members.memberInfos` 会携带 Host/Client 入房时提交的 `publicKey` 和 signed `identity`。接收端不信任 Server 对成员公钥的陈述，而是重新验证 identity 签名后才把 member id/name 映射到 pairwise public key。GKA group state 中的 contribution identity 也会被复验。Host 的加密 `member_identity` 控制消息同样不能静默覆盖已有的已验证公钥或证书指纹。
 
 Client 加入时的 `join_room` 也可以携带同形状的 `identity` 对象。Server 只校验字段结构和大小；Host/Client 本地完成证书链、吊销列表、签名算法和签名内容验证。
 
@@ -111,9 +117,8 @@ Client 加入时的 `join_room` 也可以携带同形状的 `identity` 对象。
 
 Server 可见：
 
-- room id；
-- sender id、sender name、sender kind；
-- 私发 relay envelope 的目标 member id；
+- opaque room token；
+- sender connection id；
 - group key envelope 的目标 client id；
 - envelope 算法名、KDF 名、nonce、tag；
 - ciphertext 长度、消息数量和转发时序；
@@ -122,6 +127,7 @@ Server 可见：
 Server 不应可见：
 
 - room group key；
+- GKA contribution secret；
 - 聊天文本；
 - 原始附件文件名；
 - 附件 mime；

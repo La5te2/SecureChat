@@ -1,19 +1,24 @@
+// Application-layer PKI declarations. Host/Client use these APIs to bind
+// identity certificates to GKA public keys and group-key envelopes.
 #pragma once
 
 #include "common.hpp"
 
+#include <cstdint>
 #include <memory>
 #include <string>
 
 namespace chat::identity_pki {
 
+// Result returned after a member certificate chain and identity signature pass
+// verification. UI uses the fingerprint for display/copy, not as a secret.
 struct VerifiedIdentity {
     std::string subject;
     std::string fingerprint;
 };
 
-// Holds the local identity certificate, signing key, trust store, and optional
-// revocation list used to authenticate GKA public keys.
+// Application-layer PKI context. This authenticates the temporary X25519 keys
+// used by GKA; it is separate from TLS/mTLS transport certificates.
 class IdentityContext {
 public:
     IdentityContext();
@@ -36,6 +41,25 @@ public:
         const std::string& roomId,
         const std::string& username,
         const std::string& publicKey,
+        const json& identity) const;
+
+    // Signs one member contribution for a contributory GKA epoch.
+    json signGkaContribution(
+        const std::string& roomId,
+        std::uint64_t epoch,
+        const std::string& memberId,
+        const std::string& username,
+        const std::string& publicKey,
+        const std::string& contribution) const;
+
+    // Verifies that a contribution was signed by the claimed member identity.
+    VerifiedIdentity verifyGkaContribution(
+        const std::string& roomId,
+        std::uint64_t epoch,
+        const std::string& memberId,
+        const std::string& username,
+        const std::string& publicKey,
+        const std::string& contribution,
         const json& identity) const;
 
     // Adds Host identity and signature to a group_key envelope.

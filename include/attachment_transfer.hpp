@@ -1,3 +1,5 @@
+// Attachment transport declarations: local file validation, safe receive paths,
+// binary chunk metadata, and receive-side cache state.
 #pragma once
 
 #include "common.hpp"

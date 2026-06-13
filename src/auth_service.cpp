@@ -1,9 +1,12 @@
+// Process-local user account implementation for SignalingServer membership ids.
 #include "auth_service.hpp"
 
 #include <functional>
 #include <stdexcept>
 
 UserAccount AuthService::registerOrLogin(const std::string& username, const std::string& password) {
+    // This helper gives Server a stable userId for routing. It is intentionally
+    // in-memory; restarting the Server clears these accounts and rooms.
     validateUsername(username);
     validatePassword(password);
 
@@ -24,6 +27,8 @@ UserAccount AuthService::registerOrLogin(const std::string& username, const std:
 }
 
 void AuthService::validateUsername(const std::string& username) {
+    // Validate by Unicode codepoint count rather than byte count so Chinese
+    // display names do not get rejected just because UTF-8 uses multiple bytes.
     const auto codepoints = decodeUtf8(username);
     if (codepoints.empty() || codepoints.size() > 32) {
         throw std::runtime_error("username must be 1-32 characters");
@@ -41,6 +46,8 @@ void AuthService::validateUsername(const std::string& username) {
 }
 
 std::vector<char32_t> AuthService::decodeUtf8(const std::string& text) {
+    // Minimal UTF-8 decoder used only for username validation. It rejects
+    // malformed byte sequences instead of relying on platform code pages.
     std::vector<char32_t> result;
     for (std::size_t i = 0; i < text.size();) {
         const unsigned char first = static_cast<unsigned char>(text[i]);
@@ -90,15 +97,20 @@ bool AuthService::isChineseCodepoint(char32_t ch) {
 }
 
 void AuthService::validatePassword(const std::string& password) {
+    // Room password strength is handled by deployment policy and UI guidance;
+    // this low minimum only prevents accidental empty or one-character values.
     if (password.size() < 4) {
         throw std::runtime_error("password must be at least 4 characters");
     }
 }
 
 std::size_t AuthService::hashPassword(const std::string& username, const std::string& password) {
+    // Process-local helper for AuthService account reuse. Room password matching
+    // uses RoomRegistry's SHA-256 digest and constant-time comparison.
     return std::hash<std::string>{}("chat-auth-v1:" + username + ":" + password);
 }
 
 std::string AuthService::makeUserId(const std::string& username) {
+    // Server exposes this id for room membership and private-message targeting.
     return "user_" + username;
 }

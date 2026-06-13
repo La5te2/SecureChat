@@ -1,3 +1,5 @@
+// Command-line Server entry point. It starts SignalingServer and keeps it alive
+// until a termination signal is received.
 #include "console_utils.hpp"
 #include "signaling_server.hpp"
 
@@ -14,6 +16,7 @@ namespace {
 std::atomic_bool gStopRequested = false;
 
 void handleStopSignal(int) {
+    // Signal handlers must stay simple; set an atomic flag and let main loop stop.
     gStopRequested.store(true);
 }
 
@@ -25,6 +28,8 @@ void printUsage() {
 }
 
 int main(int argc, char** argv) {
+    // Server CLI owns only process lifetime. SignalingServer handles listener,
+    // rooms, membership, and relay after construction.
     configureConsoleUtf8();
     const auto args = commandLineArgsUtf8(argc, argv);
     if (args.size() != 2) {
@@ -48,6 +53,7 @@ int main(int argc, char** argv) {
             std::this_thread::sleep_for(std::chrono::milliseconds(300));
         }
 
+        // Notify connected members before stopping the WebSocket listener.
         signaling.closeAllRooms("server stopped");
         signaling.stop();
         std::cout << "Server stopped." << std::endl;

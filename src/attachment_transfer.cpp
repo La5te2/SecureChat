@@ -1,3 +1,5 @@
+// Attachment transport implementation. It validates local files, sanitizes
+// incoming names, chunks payloads, and stores received attachment caches.
 #include "attachment_transfer.hpp"
 
 #include <openssl/evp.h>
@@ -279,6 +281,8 @@ void validateSignatureOrThrow(const std::vector<unsigned char>& bytes, Kind kind
 } // namespace
 
 std::filesystem::path pathFromUtf8(const std::string& path) {
+    // Convert protocol/API UTF-8 into a filesystem path without using the active
+    // Windows ANSI code page.
     return std::filesystem::u8path(path);
 }
 
@@ -288,6 +292,8 @@ std::string fileNameFromPath(const std::string& path) {
 }
 
 std::string safeTransferName(const std::string& name, const std::string& fallback) {
+    // Incoming attachment names are display metadata, not trusted paths. Strip
+    // separators and reserved names before choosing a cache filename.
     const auto trimmed = trimCopy(name);
     const auto candidate = trimmed.empty() ? fallback : fileNameFromPath(trimmed);
     std::string safe;
@@ -315,6 +321,7 @@ std::string safeTransferName(const std::string& name, const std::string& fallbac
 }
 
 std::string receiveDirectory(Kind kind) {
+    // Keep received files separated by kind to simplify UI lookup and cleanup.
     const auto leaf = kind == Kind::Image ? "images" : (kind == Kind::Voice ? "voice" : "files");
     const auto root = receiveRootDirectory();
     ensurePrivateDirectory(root);
@@ -344,6 +351,7 @@ std::size_t maxTransferBytes(Kind kind) {
 }
 
 std::size_t expectedSizeFromMeta(const Message& msg, Kind kind) {
+    // Metadata size drives receive-cache pruning and chunk completion checks.
     if (!msg.payload.is_object() || !msg.payload.contains("size")) {
         throw std::runtime_error("attachment meta size is missing");
     }
@@ -382,6 +390,7 @@ std::string transferIdFromMessage(const Message& msg) {
 }
 
 std::string makeTransferId() {
+    // Transfer ids only need to be unique within this process/session.
     const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
     const auto counter = ++gTransferCounter;
     std::ostringstream out;

@@ -1,3 +1,5 @@
+// In-memory account helper used by SignalingServer to assign stable user ids.
+// This is process-local state, not a persistent user database.
 #pragma once
 
 #include <cstddef>

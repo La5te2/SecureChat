@@ -1,3 +1,5 @@
+// Command-line Host entry point. It connects to an existing Server and creates
+// one room as the first chat member.
 #include "console_utils.hpp"
 #include "host_session_core.hpp"
 
@@ -16,10 +18,12 @@ namespace {
 std::atomic_bool gStopRequested = false;
 
 void handleStopSignal(int) {
+    // Signal handlers must stay simple; set an atomic flag and let main loop stop.
     gStopRequested.store(true);
 }
 
 ChatCallbacks consoleCallbacks() {
+    // CLI frontend just prints native events. GUI/Web frontends install different callbacks.
     ChatCallbacks callbacks;
     callbacks.onLog = [](const std::string& message) { std::cout << "[log] " << message << std::endl; };
     callbacks.onError = [](const std::string& message) { std::cerr << "[error] " << message << std::endl; };
@@ -79,6 +83,7 @@ std::string roomPasswordFromEnvOrPrompt() {
 }
 
 bool hasDaemonFlag(const std::vector<std::string>& args) {
+    // Host defaults to foreground mode; daemon mode is explicit.
     for (std::size_t i = 1; i < args.size(); ++i) {
         if (args[i] == "--daemon") return true;
     }
@@ -86,6 +91,7 @@ bool hasDaemonFlag(const std::vector<std::string>& args) {
 }
 
 std::vector<std::string> positionalArgs(const std::vector<std::string>& args) {
+    // Remove --daemon and --server <url> so the remaining arguments are room/name.
     std::vector<std::string> positional;
     positional.reserve(args.size());
     for (std::size_t i = 0; i < args.size(); ++i) {
@@ -100,6 +106,7 @@ std::vector<std::string> positionalArgs(const std::vector<std::string>& args) {
 }
 
 std::string serverUrlFromArgs(const std::vector<std::string>& args) {
+    // Host must connect to an already running Server. The old combined mode is gone.
     for (std::size_t i = 1; i + 1 < args.size(); ++i) {
         if (args[i] == "--server") return args[i + 1];
     }
@@ -114,6 +121,7 @@ bool hasServerFlagWithoutValue(const std::vector<std::string>& args) {
 }
 
 void waitForDaemonStop(const std::shared_ptr<HostSessionCore>& session) {
+    // Daemon mode has no stdin loop; it waits until a signal or session shutdown.
     std::signal(SIGINT, handleStopSignal);
     std::signal(SIGTERM, handleStopSignal);
 
@@ -128,6 +136,8 @@ void runExternalServerSession(
     const std::string& roomId,
     const std::string& wsUrl,
     bool daemonMode) {
+    // Common loop for foreground and daemon Host. The session object owns all
+    // WebSocket, PKI, group-key, and relay state.
     session->setCallbacks(consoleCallbacks());
     session->start();
 
@@ -148,6 +158,8 @@ void runExternalServerSession(
 }
 
 int main(int argc, char** argv) {
+    // CLI main only wires arguments, password input, callbacks, and the session loop.
+    // Protocol work lives inside HostSessionCore.
     configureConsoleUtf8();
     const auto rawArgs = commandLineArgsUtf8(argc, argv);
     const auto daemonMode = hasDaemonFlag(rawArgs);

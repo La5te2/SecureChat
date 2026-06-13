@@ -1,3 +1,5 @@
+// Cross-platform console helpers for UTF-8 input, hidden password prompts,
+// signal wakeups, and Windows command-line conversion.
 #pragma once
 
 #include <string>

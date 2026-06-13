@@ -27,9 +27,11 @@ SecureChat 当前定位为课程/论文实验系统；公网运行时应按本�
 
 - 信令支持 `ws://` insecure mode 和 `wss://` secure mode。`ws://` 配置简单、便于本地或无证书场景使用，但传输不加密；真实公网部署应使用 `wss://`。
 - 文本消息和附件 metadata/chunk 已走应用层 AES-256-GCM encrypted relay：Server 只转发 opaque envelope，不能解密应用内容。
-- Host/Client 使用 GKA v2：Client 加入时提交临时 X25519 public key，Host 生成 room group key，并为每个成员封装分发；文本和附件使用该 group key 做 AES-256-GCM。
-- 成员加入或离开时，Host 会轮换新的 room group key 并重新分发给当前成员。
-- PKI 身份认证是 Host/Client 必需配置：Client 用成员身份私钥签名 `join_room`，把成员证书绑定到临时 X25519 public key；Host 签名 `group_key` envelope，Client 验证 Host 证书和签名后才解封装 group key。
+- Host/Client 使用贡献式 GKA v3：每个成员为当前 epoch 生成并签名随机贡献，Host 只负责发起 epoch、汇总贡献集合和关闭房间；最终 room group key 由成员本地从贡献集合导出。
+- 成员加入或离开时，Host 会发起新的 GKA epoch；离开成员不再收到后续贡献集合，因此不能导出新的 room group key。
+- 私发文本和私发附件使用双层加密：外层仍走 room group key 保护 relay envelope，但 Server 不再按目标定向投递，而是广播外层密文；内层使用发送者临时 X25519 和目标成员已验证 public key 派生 pairwise key。没有目标成员私钥的 Server、Host 或其他 Client 不能解内层私发内容。
+- PKI 身份认证是 Host/Client 必需配置：成员身份私钥会签名 `join_room` 绑定、GKA 贡献和 Host 的 `group_key`/group-state envelope；接收端验证证书链、吊销状态和签名后才接受成员公钥、贡献集合和新 group key。
+- Host 可使用 `/silence`、`/unsilence`、`/evict` 或 `/ban` 管理当前房间成员。禁言只阻止目标 Client 发送 encrypted relay；驱逐会踢出成员，并在当前房间生命周期内封禁其已验证成员证书指纹。
 - 可选 mTLS 部署已提供：Nginx 在公网入口要求 TLS 客户端证书，SecureChat Server 作为本机 WebSocket backend 运行。模板见 `deploy/securechat-nginx-mtls.conf` 和 `deploy/securechat-server-mtls-backend.service`。
 - 房间密码能阻止普通误入，但不能替代 TLS、限速、防火墙和强认证。
 - 能限制安全组来源 IP 时，不建议长期使用 `0.0.0.0/0`。
@@ -63,14 +65,16 @@ docs/cpp-csharp-guide.md
 5. 确认成员列表显示 `name / id`，身份框为绿色；点击身份框应复制完整证书指纹。
 6. 测试群发文本、`To: member` 私发文本、图片、WAV 语音和普通文件附件。
 7. 测试附件预览策略：未知成员附件默认只显示“附件已接收”；手动标记为 Trusted 后，再按图片/音频自动预览开关预览。
-8. 让成员离开或断线，观察成员状态、Host 侧 group key 轮换和后续消息可读性。
+8. Host 输入 `/silence <成员名或id>` 后让目标发送文本或附件，应只收到“member is silenced”提示；`/unsilence <成员名或id>` 后恢复发送。
+9. Host 输入 `/evict <成员名或id>` 或 `/ban <成员名或id>`，目标 Client 被断开；同一成员证书在当前房间内再次加入会被拒绝。
+10. 让成员离开或断线，观察成员状态、Host 侧 GKA epoch 更新和后续消息可读性。
 
 预期结果：
 
 - 房间只能由 Host 创建，Client 只能加入已有房间。
 - Server 只保存房间注册、成员连接状态和密文 relay 状态，不显示聊天明文、附件名明文或附件 metadata 明文。
 - Host/Client 缺少完整 PKI 配置时启动失败。
-- 私发消息只对目标成员和发送者可解密，其他成员只能收到不可解密密文或不显示内容。
+- 私发消息通过广播外层 relay 送达房间成员；非目标成员解开外层后会因 `relayTargetId` 不匹配丢弃，且缺少内层 pairwise key，不能读取私发正文或附件 chunk。
 
 ### 2. 公网 WSS 测试
 
@@ -107,13 +111,13 @@ ss -lntp | grep -E ':25566|:25567'
 1. 不设置 `SECURECHAT_PKI_TRUST_STORE`、`SECURECHAT_IDENTITY_CERT_FILE` 或 `SECURECHAT_IDENTITY_KEY_FILE`，Host/Client 应直接启动失败。
 2. 用错误 Root CA、过期证书、非 `digitalSignature` 用途证书或吊销指纹测试加入流程。
 3. 篡改 `join_room.publicKey`、`identity.signature` 或 `identity.nonce`，Host 应拒绝该 Client。
-4. 篡改 `group_key.ciphertext`、`ephemeralPublicKey`、`tag` 或 Host identity，Client 应拒绝 group key。
-5. 在普通 `ws://` 本地测试中抓包，确认中继信令可见但聊天内容、附件 metadata 和 group key 不以明文出现。
+4. 篡改 `gka_contribution.ciphertext`、`group_key.ciphertext`、`ephemeralPublicKey`、`tag` 或 Host identity，Host/Client 应拒绝对应贡献或 group state。
+5. 在普通 `ws://` 本地测试中抓包，确认中继信令可见但聊天内容、附件 metadata、GKA contribution secret 和 group key 不以明文出现。
 
 预期结果：
 
 - 应用层 PKI 绑定成员长期签名身份和临时 X25519 公钥，防止 Server 或中间人静默替换成员公钥。
-- GKA v2 的 room group key 只通过目标成员的 X25519 密钥封装分发，Server 只能转发 envelope。
+- GKA v3 的 room group key 由成员签名贡献集合导出；Server 只能转发加密 contribution 和 group-state envelope，不能计算 `K_G`。
 
 ### 5. 敌手挑战和部署面测试
 
@@ -137,11 +141,38 @@ watch -n 1 "ss -ant state syn-recv | wc -l"
 
 预期结果：Linux TCP 栈、云安全组、Nginx 和系统 backlog 承担半连接防护；SecureChat 应用层主要处理 WebSocket 建立之后的超时、连接数和坏消息限制。
 
-## GKA v2 原理与安全边界
+## GKA v3 原理与安全边界
 
-当前 GKA v2 是 Host 协调的群组密钥分发，不是完整的多方 Diffie-Hellman。Host 生成房间级对称密钥 `K_G`，Client 生成自己的 X25519 公私钥对并只上报公钥；Host 使用每个 Client 的公钥封装 `K_G`，Server 只负责转发 opaque `group_key` envelope。
+当前 GKA v3 是 Host 发起的贡献式群组密钥协商。Host 仍负责创建房间、关闭房间和发起 epoch，但不再单独生成 `K_G`。每个成员为当前 epoch 生成一个 32 字节随机贡献 `r_i`，用自己的长期身份签名密钥签名：
 
-需要注意：系统不会转发任何成员私钥。私钥始终留在本地进程中，被安全转发的是 Host 生成的 room group key。
+```text
+sig_i = Sign(sk_i, roomId || epoch || memberId_i || username_i || X25519_pub_i || r_i || nonce_i)
+```
+
+Host 收集当前成员的签名贡献集合 `C = {c_1, c_2, ..., c_n}` 后，把完整集合放入 group state，并用每个目标成员的临时 X25519 public key 单独加密。Client 解开 group state 后逐个验证贡献签名，再本地导出群密钥：
+
+```text
+K_G = HKDF-SHA256(
+  input_key_material = Canonical(C),
+  salt = "securechat-gka-v3:" || roomToken || "|" || epoch,
+  info = "room-group-key|" || sorted(memberId_1, ..., memberId_n),
+  length = 32
+)
+```
+
+需要注意：系统不会转发任何成员私钥。成员私钥始终留在本地进程中；Server 只能看到 room token、连接 id、密文长度和时序，不能看到 contribution secret，也不能计算 `K_G`。
+
+私发不直接使用 `K_G` 作为唯一保护。发送者为每条私发生成一次性 X25519 密钥对，和目标成员已验证 public key 计算共享秘密：
+
+```text
+S_AB = X25519(e_priv_A, X_pub_B)
+K_AB = HKDF-SHA256(S_AB,
+                   salt = "securechat-pairwise-v1:" || roomId || A || B,
+                   info = "private-message|" || fp_A || fp_B || e_pub_A)
+C = AES-256-GCM.Enc(K_AB, nonce, plaintext, AAD_pairwise)
+```
+
+外层 `encrypted_relay` 仍使用 `K_G`，用于统一走 Server relay；应用层 senderName、senderKind 和 private targetId 都在外层密文 payload 内。私发的内层 `pairwise_private` 才是真正保护私发正文或附件 chunk 的成员专属密钥。
 
 ### X25519 是什么
 
@@ -156,7 +187,7 @@ Client:
   c_priv = random()
   c_pub  = c_priv * G
 
-Host 为该 Client 生成一次性封装密钥：
+Host 为该 Client 生成一次性 group-state 封装密钥：
   e_priv = random()
   e_pub  = e_priv * G
 
@@ -175,30 +206,30 @@ Client:
 ```text
 K_W = HKDF-SHA256(
   input_key_material = S,
-  salt = "securechat-gka-v2:" || roomId,
-  info = "group-key|" || clientId,
+  salt = "securechat-gka-state-v3:" || roomToken,
+  info = "group-state|" || clientId || "|" || epoch,
   length = 32
 )
 ```
 
-Host 用 `K_W` 加密 `K_G`：
+Host 用 `K_W` 加密 group state：
 
 ```text
 group_key_envelope = AES-256-GCM-Encrypt(
   key = K_W,
-  plaintext = K_G,
-  aad = aadForGroupKey(roomId, clientId)
+  plaintext = { epoch, signed_contributions[] },
+  aad = aadForGroupKey(roomToken, clientId, epoch)
 )
 ```
 
-Client 收到 `group_key_envelope` 后用自己的 `c_priv` 和 envelope 中的 `ephemeralPublicKey` 重新派生 `K_W`，再解密得到 `K_G`。之后文本和附件都使用 `K_G` 做应用层 AES-256-GCM encrypted relay。
+Client 收到 `group_key_envelope` 后用自己的 `c_priv` 和 envelope 中的 `ephemeralPublicKey` 重新派生 `K_W`，再解密得到 group state。Client 验证每个成员贡献签名后，用 `deriveGroupKeyFromContributions()` 导出 `K_G`。之后文本和附件都使用 `K_G` 做应用层 AES-256-GCM encrypted relay。
 
 代码入口：
 
-- `include/secure_relay.hpp`：`MemberKeyPair`、`generateMemberKeyPair()`、`encryptGroupKeyForMember()`、`decryptGroupKeyForMember()`。
-- `src/client_session_core.cpp`：Client 在 `join_room` 中提交 `publicKey`，并在收到 `group_key` 后解封装。
-- `src/host_session_core.cpp`：Host 生成/轮换 `mGroupKey`，收到新 Client 后调用 `encryptGroupKeyForMember()` 单独封装。
-- `src/signaling_server.cpp`：Server 校验字段、转发 `publicKey` 和 `group_key` envelope，但不生成、不解密、不理解 group key。
+- `include/secure_relay.hpp`：`generateGroupContribution()`、`deriveGroupKeyFromContributions()`、`encryptGkaContributionForHost()`、`encryptGroupStateForMember()`。
+- `src/client_session_core.cpp`：Client 收到 `gka_request` 后提交签名贡献，收到 `group_key` 后验证 group state 并导出 `K_G`。
+- `src/host_session_core.cpp`：Host 发起 GKA epoch，汇总签名贡献集合，并把 group state 单独封装给每个 Client。
+- `src/signaling_server.cpp`：Server 校验字段、转发 `gka_request`、`gka_contribution` 和 `group_key` envelope，但不生成、不解密、不理解 group key。
 - `src/secure_relay.cpp`：X25519 ECDH、HKDF-SHA256、AES-256-GCM 封装和 relay 加解密实现。
 
 关键实现片段：
@@ -235,57 +266,69 @@ std::vector<unsigned char> deriveX25519Secret(
 ```
 
 ```cpp
-// Host 为单个 Client 封装 room group key。
-json encryptGroupKeyForMember(
-    const std::vector<unsigned char>& groupKey,
+// 每个成员为 epoch 生成一个签名贡献并加密发给 Host。
+void ClientSessionCore::sendGkaContribution(std::uint64_t epoch) {
+    const auto contribution = chat::secure_relay::generateGroupContribution();
+    json item = {
+        {"memberId", mClientId},
+        {"username", mUsername},
+        {"publicKey", mMemberKeys.publicKey},
+        {"contribution", contribution}
+    };
+    item["identity"] = mIdentity.signGkaContribution(
+        mRoomId, epoch, mClientId, mUsername, mMemberKeys.publicKey, contribution);
+    auto envelope = chat::secure_relay::encryptGkaContributionForHost(
+        item, mRoomToken, mClientId, hostPublicKey, epoch);
+    mWs->send(envelope.dump());
+}
+```
+
+```cpp
+// Host 把完整贡献集合封装给单个 Client；Client 解开后自行导出 K_G。
+json encryptGroupStateForMember(
+    const json& groupState,
     const std::string& roomId,
     const std::string& targetId,
-    const std::string& targetPublicKey) {
+    const std::string& targetPublicKey,
+    std::uint64_t epoch) {
     const auto recipientPublic = base64Decode(targetPublicKey);
     auto ephemeral = generateMemberKeyPair();
     const auto secret = deriveX25519Secret(ephemeral.privateKey, recipientPublic);
-    const auto wrapKey = hkdfSha256(secret, "securechat-gka-v2:" + roomId, "group-key|" + targetId);
-
-    return encryptWithAesGcm(plaintext, wrapKey, aadForGroupKey(roomId, targetId), {
+    const auto wrapKey = hkdfSha256(
+        secret,
+        "securechat-gka-state-v3:" + roomId,
+        "group-state|" + targetId + "|" + std::to_string(epoch));
+    return encryptWithAesGcm(groupState.dump(), wrapKey, aadForGroupKey(roomId, targetId, epoch), {
         {"type", GroupKeyType},
+        {"version", 3},
+        {"epoch", epoch},
         {"ephemeralPublicKey", ephemeral.publicKey}
     });
 }
 ```
 
-```cpp
-// Client 用自己的私钥和 Host 的 ephemeralPublicKey 解封装 group key。
-std::vector<unsigned char> decryptGroupKeyForMember(
-    const json& envelope,
-    const std::string& roomId,
-    const std::string& clientId,
-    const std::vector<unsigned char>& privateKey) {
-    const auto ephemeralPublic = base64Decode(envelope.value("ephemeralPublicKey", ""));
-    const auto secret = deriveX25519Secret(privateKey, ephemeralPublic);
-    const auto wrapKey = hkdfSha256(secret, "securechat-gka-v2:" + roomId, "group-key|" + clientId);
-    const auto plaintext = decryptWithAesGcm(envelope, wrapKey, aadForGroupKey(roomId, clientId));
-    return {plaintext.begin(), plaintext.end()};
-}
-```
-
 安全边界：
 
-- 如果没有中间人攻击且 Host 可信，则不可信 Server 和网络旁路看不到聊天/附件明文。
-- 恶意 Server 不能在不破坏成员身份签名的情况下静默替换 Client 的临时 X25519 public key，也不能在不破坏 Host 签名的情况下替换 `group_key` envelope。
+- 如果成员证书和本地私钥未泄露，则不可信 Server 和网络旁路看不到聊天/附件明文，也看不到 GKA contribution secret。
+- 恶意 Server 不能在不破坏成员身份签名的情况下静默替换 Client 的临时 X25519 public key、成员 GKA 贡献或 Host 签名的 `group_key`/group-state envelope。
 - 其他合法群成员会持有同一个 `K_G`，因此群聊内容对群成员本身不保密。恶意成员可以保存、截图或转发自己收到的明文。
-- 当前私发是定向投递：Server 只把密文转发给目标成员，但密文仍使用 room group key，而不是独立点对点私聊密钥。因此它不是密码学意义上的成员专属私聊。
+- Host 仍是群成员和房间生命周期管理者，因此可以读取群聊内容、驱逐成员或关闭房间；但当前 `K_G` 不再由 Host 单方随机生成，而是由签名贡献集合导出。
+- 恶意成员可以拒绝提交 GKA contribution，这属于可用性攻击；Host 会在 10 秒 GKA 超时后自动驱逐仍未提交贡献的成员，并只用剩余成员重新发起 epoch。
+- 私发是广播外层 relay 加内层 pairwise 加密：Host/Client 会在解密外层后检查 `relayTargetId`。内层 pairwise key 由发送者临时 X25519 private key 和目标成员已验证 public key 派生，不从 room group key 派生，因此其他成员即使持有当前 `K_G` 也不能解开私发正文或私发附件 chunk。
+- Server 仍可见 metadata，包括 room token、连接 id、ciphertext 长度和时序。这会泄露活跃时间和大致内容大小；WSS/mTLS、默认少日志和部署最小暴露只能降低风险，不能隐藏这些模式。
+- 接收端维护 relay nonce/tag replay cache；Client 还检查递增的 group key epoch，拒绝重放或过期 `group_key`。这能阻止常见 Server 重放旧 envelope，但不能阻止 Server 直接断连或丢弃新消息。
 典型中间人攻击是公钥替换：
 
 ```text
 1. Client 生成 c_priv/c_pub，并通过 join_room 上报 c_pub。
 2. 恶意 Server/MITM 把 c_pub 替换为自己的 m_pub 后发给 Host。
-3. Host 误以为 m_pub 属于 Client，于是用 m_pub 封装 room group key。
-4. MITM 用 m_priv 解开 group key。
-5. MITM 再用真正的 c_pub 重新封装 group key 发给 Client。
-6. Client 正常进入房间，但 MITM 也已经获得 group key。
+3. Host 误以为 m_pub 属于 Client，于是把 group state 或贡献请求发给攻击者控制的密钥。
+4. MITM 尝试解开 group state 或伪造成员贡献。
+5. MITM 再用真正的 c_pub 转发给 Client。
+6. Client 正常进入房间，但 MITM 也试图进入密钥协商链路。
 ```
 
-当前实现强制 PKI 身份认证，因此上面的攻击不能静默完成：`join_room.identity` 的签名覆盖原始 `publicKey`，Host 会在验证时发现替换；`group_key.identity` 的签名覆盖 envelope 关键字段，Client 会在解封装前发现篡改。
+当前实现强制 PKI 身份认证，因此上面的攻击不能静默完成：`join_room.identity` 和 GKA contribution 签名覆盖原始 `publicKey`，Host 会在验证时发现替换；`group_key.identity` 的签名覆盖 group-state envelope 关键字段，Client 会在解封装前发现篡改。
 
 ## PKI 身份认证
 
@@ -314,10 +357,12 @@ export SECURECHAT_PKI_REVOCATION_FILE=certs/pki/revoked.txt
 运行时：
 
 - Client 在 `join_room` 中签名 `roomId`、`username`、临时 X25519 `publicKey` 和 `nonce`。
-- Host 验证 Client 身份后才记录 public key、轮换 group key，并为成员封装 group key。
-- Host 在 `group_key` envelope 中签名 room、target、ephemeralPublicKey、ciphertext、tag 和 nonce。
-- Client 验证 Host 身份后才解封装 room group key。
-- Host 会把已验证成员的证书 SHA-256 指纹通过加密 `member_identity` 控制消息发给房间成员；WinUI 成员列表用绿色身份框表示已验证成员，点击 `name / id` 框会复制完整证书指纹。
+- 成员在 GKA epoch 中签名 `roomId`、`epoch`、`memberId`、`username`、临时 X25519 `publicKey` 和 contribution secret。
+- Host 验证 Client 身份后才记录 public key、发起 GKA epoch，并把完整贡献集合封装给当前成员。
+- Host 在 `group_key`/group-state envelope 中签名 room、version、epoch、target、ephemeralPublicKey、ciphertext、tag 和 nonce。
+- Client 验证 Host 身份、解封装 group state、逐个验证贡献签名后才导出 room group key。
+- Server 的 `room_members.memberInfos` 会携带 Client 入房时提交的 signed identity；其他 Client 复验后才把成员 id/name 映射到 pairwise public key。
+- Host 会把已验证成员的证书 SHA-256 指纹和 signed identity 通过加密 `member_identity` 控制消息发给房间成员；接收端会拒绝同一 member id 上的公钥或指纹冲突。WinUI 成员列表用绿色身份框表示已验证成员，点击 `name / id` 框会复制完整证书指纹。
 
 详细字段见 `docs/pki-identity.md`。
 
@@ -356,7 +401,9 @@ systemd backend 模板：
 deploy/securechat-server-mtls-backend.service
 ```
 
-mTLS 只限制“谁能建立到 Server 的 TLS 连接”。应用层消息机密性仍由 GKA v2 和 AES-256-GCM 提供，成员身份与临时 X25519 key 的绑定仍由 PKI 身份认证提供。
+`deploy/` 文件是 Linux 部署模板，不是双击运行程序。普通 systemd 部署时，把 `deploy/securechat-server.service` 复制到 `/etc/systemd/system/securechat-server.service`，检查 `User`、`WorkingDirectory`、`ExecStart` 和证书路径后执行 `sudo systemctl daemon-reload` 与 `sudo systemctl enable --now securechat-server.service`。Nginx+mTLS 部署时，把 Nginx 模板复制到 `/etc/nginx/conf.d/securechat-mtls.conf`，把 backend service 模板复制到 `/etc/systemd/system/securechat-server-mtls-backend.service`，检查证书路径和后端端口后启动 Nginx 与 backend。完整步骤见 `docs/deployment-hardening.md`。
+
+mTLS 只限制“谁能建立到 Server 的 TLS 连接”，当前不是强制部署模式；本地或局域网测试可以继续使用 `ws://`。应用层消息机密性仍由 GKA v3 和 AES-256-GCM 提供，成员身份、GKA 贡献和临时 X25519 key 的绑定仍由强制 PKI 身份认证提供。
 
 ## Windows 构建
 
@@ -547,7 +594,9 @@ Test-NetConnection 124.70.71.65 -Port 25566
 
 同一个 Server 实例可以承载多个不同 `roomId`，但同一个 Server 实例内 `roomId` 不能重复；不同 Server 或不同端口上的房间名可以重复。一台机器可以启动多个 Server，只要监听端口不同。
 
-Host 创建 roomId 后成为第一个群成员和群管理者。Client 加入时把临时 X25519 public key 发给 Server，Server 只转交给 Host；Host 生成/轮换 room group key，并把 group key 用每个 Client 的 public key 单独封装后交给 Server 转发。Server 不生成群密钥，不解密 group key envelope，也不参与密钥协商语义。
+Host 创建 roomId 后成为第一个群成员和房间生命周期管理者。Client 加入时把临时 X25519 public key 发给 Server，Server 只转交给 Host；Host 发起 GKA epoch，当前成员提交签名随机贡献，Host 汇总后把 group state 用每个 Client 的 public key 单独封装后交给 Server 转发。Server 不生成群密钥，不解密 group state envelope，也不参与密钥协商语义。
+
+当前房间不做持久化：Host 关闭 WinUI、结束 Host 进程、Ctrl+C 或点击 stop session 都会关闭房间，Server 会通知 Clients 退出该 room，但 Server 进程本身继续监听。Client 主动离开、断线或被 Host 驱逐后，Host 会移除其 public key 并发起新的 GKA epoch；禁言不改变成员资格，因此不触发重密钥。
 
 公网 Server 默认用 daemon 脚本后台运行：
 
@@ -586,7 +635,18 @@ certs/privkey.pem
 
 文本消息和附件命令 `/image`、`/file`、`/voice` 都通过 Server relay 转发密文；附件 metadata 和二进制 chunk 会在发送端加密，接收端解密后写入本地附件缓存。聊天数据通路是 WebSocket encrypted relay。
 
-私发可使用 `/to <成员名或成员id> <消息>`，附件也可以写成 `/to <成员名或成员id> /image <path>`、`/to <成员名或成员id> /file <path>` 或 `/to <成员名或成员id> /voice <path>`。WinUI/Web 的发送栏也提供 `To: member` 输入框，留空表示群发，填写成员名或 id 表示私发。当前私发是 group key 下的定向投递：Server 只把密文转发给目标成员，但目标消息仍使用当前 room group key，而不是独立的点对点私聊密钥。
+私发可使用 `/to <成员名或成员id> <消息>`，附件也可以写成 `/to <成员名或成员id> /image <path>`、`/to <成员名或成员id> /file <path>` 或 `/to <成员名或成员id> /voice <path>`。WinUI/Web 的发送栏也提供 `To: member` 输入框，留空表示群发，填写成员名或 id 表示私发。私发采用外层 room encrypted relay 广播加内层 pairwise encryption；如果目标成员的 PKI 绑定 public key 尚未通过 `room_members.memberInfos`、GKA group state 或 `member_identity` 验证，发送会失败，不会降级为普通 room group key 私发。
+
+Host 管理命令也从普通输入框发送，但不会进入聊天历史：
+
+```text
+/silence <成员名或成员id>
+/unsilence <成员名或成员id>
+/evict <成员名或成员id>
+/ban <成员名或成员id>
+```
+
+`silence` 是当前房间内的发送限制，目标仍在线并可继续参与后续 GKA epoch；`evict` 和 `ban` 会驱逐目标，并把该成员已验证证书指纹加入当前房间内存封禁集。封禁不写入磁盘，Host 进程或房间结束后失效。
 
 如果 Host 或 Client 确实要后台运行，必须显式加 `--daemon`，并从 stdin 或环境变量提供房间密码：
 

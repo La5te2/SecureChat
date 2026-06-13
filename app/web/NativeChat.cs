@@ -1,11 +1,17 @@
+// Web UI bridge to native.dll. It converts native chat callbacks into browser
+// events and exposes received attachments through local, short-lived media URLs.
 using System.Runtime.InteropServices;
 using System.Text.Json;
 
 namespace SecureChat.Web;
 
+// Browser receives these compact events through Server-Sent Events.
 internal sealed record ChatEvent(string Kind, string Message, string? Url = null, string? Name = null, string? Sender = null);
+// Maps an in-process media id to a decrypted attachment cache file.
 internal sealed record RegisteredMedia(string Path, string ContentType, string Name);
 
+// Keeps received attachment files behind generated ids instead of exposing raw
+// filesystem paths to the browser.
 internal sealed class MediaRegistry
 {
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, RegisteredMedia> media = new();
@@ -85,6 +91,8 @@ internal sealed class ChatEventBus
 
 internal static partial class NativeChat
 {
+    // Static because native.dll exposes a process-wide callback, not one callback
+    // per browser tab. The event bus fans out to all connected Web UI clients.
     private static ChatEventBus? eventBus;
     private static MediaRegistry? mediaRegistry;
     private static readonly ChatEventCallback Callback = OnNativeEvent;
@@ -100,11 +108,13 @@ internal static partial class NativeChat
 
     internal static int HostStart(string serverUrl, string roomId, string username, string password)
     {
+        // Web UI passes raw form fields to the same native Host path used by WinUI.
         return chat_host_start(serverUrl, roomId, username, password);
     }
 
     internal static int JoinStart(string url, string roomId, string username, string password)
     {
+        // All PKI, GKA, and relay checks happen inside the native ClientSessionCore.
         return chat_join_start(url, roomId, username, password);
     }
 
@@ -144,6 +154,7 @@ internal static partial class NativeChat
 
     internal static void Shutdown()
     {
+        // Clear managed callback first so native shutdown cannot call into a disposed Web host.
         chat_set_event_callback(null, IntPtr.Zero);
         chat_shutdown();
     }
@@ -173,6 +184,8 @@ internal static partial class NativeChat
     {
         try
         {
+            // Metadata messages are JSON. If parsing fails, the attachment still
+            // works; the UI simply displays it without a sender label.
             using var document = JsonDocument.Parse(message);
             var root = document.RootElement;
             var type = root.TryGetProperty("type", out var typeValue) ? typeValue.GetString() ?? "" : "";

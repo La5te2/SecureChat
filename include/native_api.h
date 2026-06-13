@@ -1,6 +1,10 @@
+// C ABI exported by native.dll. C# frontends call these functions through
+// P/Invoke without depending on C++ class layouts or name mangling.
 #pragma once
 
 #ifdef _WIN32
+// Windows exports native.dll symbols and uses stdcall so P/Invoke signatures
+// match the generated function names and stack cleanup rules.
 #define CHAT_API __declspec(dllexport)
 #define CHAT_CALL __stdcall
 #else
@@ -12,6 +16,8 @@
 extern "C" {
 #endif
 
+// Event callback contract: native code owns the char* memory only for the call.
+// Managed callers must copy strings before returning.
 typedef void(CHAT_CALL* chat_event_callback)(const char* kind, const char* message, void* user_data);
 
 // Registers the process-wide callback used by WinUI/Web wrappers to receive native events.

@@ -238,7 +238,7 @@ export SECURECHAT_MTLS_CLIENT_KEY_FILE=certs/pki/alice-key.pem
 
 ## 手动实验 4：PKI public key 替换验证
 
-目的：证明强制 PKI 下，篡改 `join_room.publicKey` 会被 Host 拒绝。
+目的：证明强制 PKI 下，篡改 `join_room.publicKey` 会被 Host 拒绝；篡改成员列表或 `member_identity` 中的 pairwise public key 会被 Client 拒绝。
 
 ### 步骤
 
@@ -250,13 +250,17 @@ export SECURECHAT_MTLS_CLIENT_KEY_FILE=certs/pki/alice-key.pem
    export SECURECHAT_IDENTITY_KEY_FILE=certs/pki/alice-key.pem
    ```
 3. 用受控代理或修改版测试 Server 把 `new_client.publicKey` 替换成另一个 X25519 public key，但保留原 `identity`。
-4. 观察 Host 和 Client 输出。
+4. 用受控测试 Server 把 `room_members.memberInfos[].publicKey` 替换成另一个 X25519 public key，但保留原 `identity`。
+5. 用受控测试 Host 或代理把加密 `member_identity` 解开后重新封装为冲突 public key，或发送一个同 member id 但不同证书指纹的测试控制消息。
+6. 观察 Host 和 Client 输出。
 
 ### 预期现象
 
 - Host 输出 `Client identity rejected` 或 `join_room identity signature verification failed`；
 - Server 收到 `reject_client` 并断开目标 Client；
 - Client 无法收到可用 room group key。
+- Client 对被替换的 `room_members` 或 `member_identity` 输出 member identity rejected，不把该 public key 写入 pairwise 目标缓存。
+- 同一个 member id 的 public key 或证书指纹发生冲突时，Client 拒绝覆盖已有已验证映射。
 
 ## 手动实验 5：Server 读取明文失败
 
@@ -293,6 +297,54 @@ grep -R "secret-message-123\|secret-plan.txt" server.log logs || true
 - Server 日志不包含聊天文本；
 - Server 日志不包含原始附件文件名；
 - 接收成员本地缓存中可以看到解密后的附件，因为成员设备是信任边界。
+
+## 手动实验 6A：房间治理和错误投递
+
+目的：验证 Host 禁言、驱逐、当前房间证书封禁，以及恶意 Server 错误投递、重放时的诚实端行为。
+
+### Host 管理步骤
+
+1. 启动一个 Host 和至少一个 Client，确认成员列表显示 `name / id`。
+2. Host 输入：
+   ```text
+   /silence <成员名或id>
+   ```
+3. 被禁言 Client 尝试发送文本、`/image`、`/file` 或 `/voice`。
+4. Host 输入：
+   ```text
+   /unsilence <成员名或id>
+   ```
+5. Client 再次发送文本。
+6. Host 输入：
+   ```text
+   /evict <成员名或id>
+   ```
+7. 使用同一成员证书尝试重新加入当前房间。
+8. 使用修改版 Client 或调试断点让某个 Client 收到 `gka_request` 后不发送 `gka_contribution`，等待 10 秒。
+
+### Host 管理预期现象
+
+- 禁言期间 Client 收到 `member is silenced`，文本和附件都不会被其他成员收到；
+- 解除禁言后 Client 可以继续发送；
+- 驱逐后 Client WebSocket 被关闭，Host 发起新的 GKA epoch；
+- 同一证书在当前房间生命周期内重新加入时，Host 输出 banned certificate 或 reject 相关提示，不分发 group key。
+- 拒绝提交 GKA contribution 的 Client 超时后被 Host 自动驱逐；Host 输出 `GKA contribution timeout`，并只用剩余成员重新发起 epoch。
+
+### 错误投递步骤
+
+1. 使用受控测试 Server 或代理，把一条私发 `encrypted_relay` 额外投递给非目标 Client。
+2. 使用受控测试 Server 或代理，对正确目标重放同一条 `encrypted_relay`。
+3. 使用受控测试 Server 或代理，重放旧的 `group_key` envelope。
+4. 使用受控测试 Server 或代理，给 Host 发送一个不存在的 `client_left`。
+5. 使用受控测试 Server 或代理，给 Client 发送一个非入房阶段普通 `error`。
+
+### 错误投递预期现象
+
+- 非目标 Client 输出 dropped 相关提示，不显示私信正文；即使攻击端跳过外层 `relayTargetId` 检查，也不能解开内层 pairwise 密文；
+- 正确目标对重复 `encrypted_relay` 输出 `Dropped replayed encrypted relay`，不重复展示消息或附件；
+- Client 对旧 `group_key` 输出 stale/replayed 相关错误，不回滚到旧 room group key；
+- Host 输出 `Ignored unknown client_left`，成员列表不变，不触发新的 group key rotation。
+- Client 对普通 relay 错误只显示错误提示，不主动退出；入房失败和 `host disconnected` 仍是终止事件。
 
 ## 手动实验 6：附件安全
 

@@ -1,3 +1,5 @@
+// WinUI-to-native bridge. These declarations expose C functions from native.dll
+// so C# UI code can reuse the C++ session, PKI, relay, and attachment logic.
 using System;
 using System.Runtime.InteropServices;
 

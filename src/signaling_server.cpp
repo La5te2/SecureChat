@@ -1,4 +1,8 @@
+// Signaling server implementation. It validates public signaling JSON, manages
+// room membership, and forwards encrypted relay/group-key envelopes.
 #include "signaling_server.hpp"
+
+#include "secure_relay.hpp"
 
 #include <chrono>
 #include <cstdlib>
@@ -69,6 +73,9 @@ std::string stringField(const json& data, const char* key, std::size_t maxLength
 }
 
 void identityField(const json& data, bool required) {
+    // Server checks only the shape and size of application identity data. The
+    // certificate chain, revocation list, and signature are verified by Host or
+    // Client after the Server forwards this opaque field.
     auto it = data.find("identity");
     if (it == data.end()) {
         if (required) throw std::runtime_error("missing identity");
@@ -92,12 +99,14 @@ void requireFieldsForType(const json& data, const std::string& type) {
     // Signaling is public network input. Keep a per-type schema so unknown
     // fields cannot become accidental protocol extensions or spoofing channels.
     if (type == "create_room") {
-        if (!hasOnlyFields(data, {"type", "roomId", "username", "password"})) {
+        if (!hasOnlyFields(data, {"type", "roomId", "username", "password", "publicKey", "identity"})) {
             throw std::runtime_error("create_room has unknown field");
         }
         stringField(data, "roomId", 64, true);
         stringField(data, "username", 64, true);
         stringField(data, "password", maxPasswordBytes, true);
+        stringField(data, "publicKey", maxPublicKeyBytes, true);
+        identityField(data, true);
     }
     else if (type == "join_room") {
         if (!hasOnlyFields(data, {"type", "roomId", "username", "password", "publicKey", "identity"})) {
@@ -113,6 +122,7 @@ void requireFieldsForType(const json& data, const std::string& type) {
         if (!hasOnlyFields(data, {
                 "type",
                 "version",
+                "epoch",
                 "roomId",
                 "targetId",
                 "senderId",
@@ -128,6 +138,10 @@ void requireFieldsForType(const json& data, const std::string& type) {
         if (!data.contains("version") || !data["version"].is_number_integer()) {
             throw std::runtime_error("group_key version must be an integer");
         }
+        if (!data.contains("epoch") || !data["epoch"].is_number_integer() ||
+            (!data["epoch"].is_number_unsigned() && data["epoch"].get<long long>() < 0)) {
+            throw std::runtime_error("group_key epoch must be a non-negative integer");
+        }
         stringField(data, "roomId", 64, true);
         stringField(data, "targetId", 64, true);
         stringField(data, "senderId", 64, true);
@@ -135,9 +149,50 @@ void requireFieldsForType(const json& data, const std::string& type) {
         stringField(data, "kdf", 64, true);
         stringField(data, "ephemeralPublicKey", maxPublicKeyBytes, true);
         stringField(data, "nonce", 64, true);
-        stringField(data, "ciphertext", 256, true);
+        stringField(data, "ciphertext", maxRelayFieldBytes, true);
         stringField(data, "tag", 64, true);
         identityField(data, true);
+    }
+    else if (type == chat::secure_relay::GkaRequestType) {
+        if (!hasOnlyFields(data, {"type", "roomId", "epoch"})) {
+            throw std::runtime_error("gka_request has unknown field");
+        }
+        stringField(data, "roomId", 64, true);
+        if (!data.contains("epoch") || !data["epoch"].is_number_integer() ||
+            (!data["epoch"].is_number_unsigned() && data["epoch"].get<long long>() < 0)) {
+            throw std::runtime_error("gka_request epoch must be a non-negative integer");
+        }
+    }
+    else if (type == chat::secure_relay::GkaContributionType) {
+        if (!hasOnlyFields(data, {
+                "type",
+                "version",
+                "epoch",
+                "roomId",
+                "senderId",
+                "alg",
+                "kdf",
+                "ephemeralPublicKey",
+                "nonce",
+                "ciphertext",
+                "tag"})) {
+            throw std::runtime_error("gka_contribution has unknown field");
+        }
+        if (!data.contains("version") || !data["version"].is_number_integer()) {
+            throw std::runtime_error("gka_contribution version must be an integer");
+        }
+        if (!data.contains("epoch") || !data["epoch"].is_number_integer() ||
+            (!data["epoch"].is_number_unsigned() && data["epoch"].get<long long>() < 0)) {
+            throw std::runtime_error("gka_contribution epoch must be a non-negative integer");
+        }
+        stringField(data, "roomId", 64, true);
+        stringField(data, "senderId", 64, true);
+        stringField(data, "alg", 32, true);
+        stringField(data, "kdf", 64, true);
+        stringField(data, "ephemeralPublicKey", maxPublicKeyBytes, true);
+        stringField(data, "nonce", 64, true);
+        stringField(data, "ciphertext", maxRelayFieldBytes, true);
+        stringField(data, "tag", 64, true);
     }
     else if (type == "reject_client") {
         if (!hasOnlyFields(data, {"type", "roomId", "targetId", "reason"})) {
@@ -147,15 +202,19 @@ void requireFieldsForType(const json& data, const std::string& type) {
         stringField(data, "targetId", 64, true);
         stringField(data, "reason", 256, true);
     }
+    else if (type == "silence_client" || type == "unsilence_client") {
+        if (!hasOnlyFields(data, {"type", "roomId", "targetId"})) {
+            throw std::runtime_error(type + " has unknown field");
+        }
+        stringField(data, "roomId", 64, true);
+        stringField(data, "targetId", 64, true);
+    }
     else if (type == "encrypted_relay") {
         if (!hasOnlyFields(data, {
                 "type",
                 "version",
                 "roomId",
                 "senderId",
-                "senderName",
-                "senderKind",
-                "targetId",
                 "alg",
                 "kdf",
                 "nonce",
@@ -168,9 +227,6 @@ void requireFieldsForType(const json& data, const std::string& type) {
         }
         stringField(data, "roomId", 64, true);
         stringField(data, "senderId", 64, true);
-        stringField(data, "senderName", 64, true);
-        stringField(data, "senderKind", 32, true);
-        stringField(data, "targetId", 64, true);
         stringField(data, "alg", 32, true);
         stringField(data, "kdf", 64, true);
         stringField(data, "nonce", 64, true);
@@ -274,7 +330,7 @@ void SignalingServer::addClient(std::shared_ptr<rtc::WebSocket> ws) {
             serverFull = true;
         }
         else {
-            mClients[key] = ClientState{"", "", "", "", "", "", ws};
+            mClients[key] = ClientState{"", "", "", "", "", json{}, "", ws};
         }
     }
     if (serverFull) {
@@ -317,6 +373,18 @@ void SignalingServer::handleMessage(rtc::WebSocket* key, const std::string& payl
         else if (type == "reject_client") {
             handleRejectClient(key, data);
         }
+        else if (type == "silence_client") {
+            handleClientSilence(key, data, true);
+        }
+        else if (type == "unsilence_client") {
+            handleClientSilence(key, data, false);
+        }
+        else if (type == chat::secure_relay::GkaRequestType) {
+            relayGkaRequest(key, data);
+        }
+        else if (type == chat::secure_relay::GkaContributionType) {
+            relayGkaContribution(key, data);
+        }
         else if (type == "encrypted_relay") {
             relayEncrypted(key, data);
         }
@@ -336,9 +404,12 @@ void SignalingServer::handleMessage(rtc::WebSocket* key, const std::string& payl
 }
 
 void SignalingServer::handleCreateRoom(rtc::WebSocket* key, const json& data) {
+    // Room creation is a registration operation: Server records one unique room
+    // id and the Host socket. It does not create a group key or become a member.
     const std::string roomId = data.value("roomId", "");
     const std::string username = data.value("username", "host");
     const std::string password = data.value("password", "");
+    const std::string publicKey = data.value("publicKey", "");
     if (roomId.empty()) {
         sendToClient(key, {{"type", "error"}, {"message", "missing roomId"}});
         return;
@@ -347,7 +418,7 @@ void SignalingServer::handleCreateRoom(rtc::WebSocket* key, const json& data) {
         sendToClient(key, {{"type", "error"}, {"message", "missing room password"}});
         return;
     }
-    if (!validName(roomId, 64) || !validName(username, 64)) {
+    if (!validName(roomId, 64) || !validName(username, 64) || publicKey.empty()) {
         sendToClient(key, {{"type", "error"}, {"message", "invalid room or username"}});
         return;
     }
@@ -365,6 +436,8 @@ void SignalingServer::handleCreateRoom(rtc::WebSocket* key, const json& data) {
             roomAlreadyExists = true;
         }
         else {
+            // The local AuthService/RoomRegistry give stable ids and password
+            // checks for this process. They are not a chat plaintext database.
             account = mAuth.registerOrLogin(username, "local-account");
             mRegistry.createRoom(roomId, account, password);
             ws = client->ws;
@@ -375,6 +448,8 @@ void SignalingServer::handleCreateRoom(rtc::WebSocket* key, const json& data) {
             client->clientId = "host";
             client->userId = account.userId;
             client->username = account.username;
+            client->publicKey = publicKey;
+            client->identity = data["identity"];
         }
     }
 
@@ -390,12 +465,16 @@ void SignalingServer::handleCreateRoom(rtc::WebSocket* key, const json& data) {
         {"type", "room_created"},
         {"roomId", roomId},
         {"userId", account.userId},
-        {"username", account.username}
+        {"username", account.username},
+        {"publicKey", publicKey}
     });
     broadcastRoomMembers(roomId);
 }
 
 void SignalingServer::handleJoinRoom(rtc::WebSocket* key, const json& data) {
+    // A Client publishes a temporary X25519 public key and application identity.
+    // Server stores the public key for routing, then forwards it to Host. Host
+    // decides whether the PKI signature really binds this key to the member.
     const std::string roomId = data.value("roomId", "");
     const std::string username = data.value("username", "");
     const std::string password = data.value("password", "");
@@ -403,6 +482,9 @@ void SignalingServer::handleJoinRoom(rtc::WebSocket* key, const json& data) {
     std::shared_ptr<rtc::WebSocket> clientWs;
     std::shared_ptr<rtc::WebSocket> hostWs;
     std::string clientId;
+    std::string hostUsername;
+    std::string hostPublicKey;
+    json hostIdentity;
     UserAccount account;
 
     if (!validName(roomId, 64) || !validName(username, 64) || publicKey.empty()) {
@@ -432,11 +514,21 @@ void SignalingServer::handleJoinRoom(rtc::WebSocket* key, const json& data) {
                 clientId = "__room_full__";
             }
             else {
+                // clientId is the Server-assigned stable routing id for this
+                // room. It is exposed to members so private relay can target it.
                 account = mAuth.registerOrLogin(username, "local-account");
                 mRegistry.joinClient(roomId, account);
                 clientId = account.userId;
                 clientWs = client->ws;
                 hostWs = room.host;
+                for (const auto& [_, state] : mClients) {
+                    if (state.ws == hostWs && state.role == "host") {
+                        hostUsername = state.username;
+                        hostPublicKey = state.publicKey;
+                        hostIdentity = state.identity;
+                        break;
+                    }
+                }
                 room.clients[clientId] = clientWs;
 
                 client->roomId = roomId;
@@ -444,6 +536,7 @@ void SignalingServer::handleJoinRoom(rtc::WebSocket* key, const json& data) {
                 client->userId = account.userId;
                 client->username = account.username;
                 client->publicKey = publicKey;
+                client->identity = data["identity"];
                 client->role = "client";
             }
         }
@@ -476,9 +569,14 @@ void SignalingServer::handleJoinRoom(rtc::WebSocket* key, const json& data) {
         {"clientId", clientId},
         {"userId", account.userId},
         {"username", account.username},
-        {"publicKey", publicKey}
+        {"publicKey", publicKey},
+        {"hostUsername", hostUsername},
+        {"hostPublicKey", hostPublicKey}
     };
     if (data.contains("identity")) joined["identity"] = data["identity"];
+    if (hostIdentity.is_object()) joined["hostIdentity"] = hostIdentity;
+    // Echo the Client's own identity back so the Client sees the exact fields
+    // accepted by Server schema validation.
     safeSend(clientWs, joined);
 
     json newClient = {
@@ -489,11 +587,15 @@ void SignalingServer::handleJoinRoom(rtc::WebSocket* key, const json& data) {
         {"publicKey", publicKey}
     };
     if (data.contains("identity")) newClient["identity"] = data["identity"];
+    // Host receives the identity object and public key, verifies the PKI binding,
+    // then either sends group_key or rejects the Client.
     safeSend(hostWs, newClient);
     broadcastRoomMembers(roomId);
 }
 
 void SignalingServer::handleRejectClient(rtc::WebSocket* key, const json& data) {
+    // Only Host may reject a Client. This keeps Server from inventing identity
+    // failures while still letting Host enforce application-layer PKI.
     std::shared_ptr<rtc::WebSocket> senderWs;
     std::shared_ptr<rtc::WebSocket> targetWs;
     std::string roomId;
@@ -523,9 +625,9 @@ void SignalingServer::handleRejectClient(rtc::WebSocket* key, const json& data) 
                 else {
                     targetWs = target->second;
                     room->clients.erase(target);
+                    room->silencedClients.erase(targetId);
                     for (auto it = mClients.begin(); it != mClients.end(); ++it) {
                         if (it->second.ws == targetWs) {
-                            mRegistry.markOffline(roomId, it->second.userId);
                             mClients.erase(it);
                             break;
                         }
@@ -552,7 +654,149 @@ void SignalingServer::handleRejectClient(rtc::WebSocket* key, const json& data) 
     std::cout << "[signal] host rejected " << targetId << " from " << roomId << ": " << reason << std::endl;
 }
 
+void SignalingServer::handleClientSilence(rtc::WebSocket* key, const json& data, bool silenced) {
+    // Silence is room-local send control requested by Host. It does not decrypt
+    // chat data and does not remove the member; it only blocks future encrypted
+    // relay sends from that Client connection.
+    std::shared_ptr<rtc::WebSocket> senderWs;
+    std::shared_ptr<rtc::WebSocket> targetWs;
+    std::string roomId;
+    std::string targetId;
+    std::string errorMessage;
+
+    {
+        std::lock_guard<std::mutex> lock(mMutex);
+        auto sender = findClient(key);
+        senderWs = sender ? sender->ws : nullptr;
+        if (!sender || sender->role != "host" || sender->roomId.empty() || sender->roomId != data.value("roomId", "")) {
+            errorMessage = "invalid silence sender";
+        }
+        else {
+            auto room = findRoom(sender->roomId, sender);
+            roomId = sender->roomId;
+            targetId = data.value("targetId", "");
+            if (!room) {
+                errorMessage = "room not found";
+            }
+            else {
+                auto target = room->clients.find(targetId);
+                if (target == room->clients.end() || !target->second) {
+                    errorMessage = "target client not found";
+                }
+                else {
+                    targetWs = target->second;
+                    if (silenced) {
+                        room->silencedClients.insert(targetId);
+                    }
+                    else {
+                        room->silencedClients.erase(targetId);
+                    }
+                }
+            }
+        }
+    }
+
+    if (!errorMessage.empty()) {
+        safeSend(senderWs, {{"type", "error"}, {"message", errorMessage}});
+        return;
+    }
+
+    const std::string state = silenced ? "silenced" : "unsilenced";
+    const std::string message = silenced ? "member silenced" : "member unsilenced";
+    safeSend(targetWs, {{"type", "moderation"}, {"state", state}, {"message", message}});
+    std::cout << "[signal] host " << (silenced ? "silenced " : "unsilenced ")
+              << targetId << " in " << roomId << std::endl;
+}
+
+void SignalingServer::relayGkaRequest(rtc::WebSocket* key, const json& data) {
+    // GKA request contains only an epoch number. Server may see the epoch, but
+    // it does not receive contribution secrets or derived group keys.
+    std::shared_ptr<rtc::WebSocket> senderWs;
+    std::vector<std::shared_ptr<rtc::WebSocket>> recipients;
+    json envelope = data;
+    std::string roomId;
+    std::string errorMessage;
+
+    {
+        std::lock_guard<std::mutex> lock(mMutex);
+        auto sender = findClient(key);
+        senderWs = sender ? sender->ws : nullptr;
+        if (!sender || sender->role != "host" || sender->roomId.empty() || sender->roomId != data.value("roomId", "")) {
+            errorMessage = "invalid GKA request sender";
+        }
+        else {
+            auto room = findRoom(sender->roomId, sender);
+            if (!room) {
+                errorMessage = "room not found";
+            }
+            else {
+                roomId = sender->roomId;
+                envelope["roomId"] = roomId;
+                envelope["senderId"] = chat::protocol::HostActorId;
+                for (const auto& [_, ws] : room->clients) {
+                    if (ws) recipients.push_back(ws);
+                }
+            }
+        }
+    }
+
+    if (!errorMessage.empty()) {
+        safeSend(senderWs, {{"type", "error"}, {"message", errorMessage}});
+        return;
+    }
+
+    for (const auto& recipient : recipients) safeSend(recipient, envelope);
+    std::cout << "[signal] GKA request room " << roomId
+              << " epoch=" << envelope.value("epoch", 0ULL)
+              << " recipients=" << recipients.size() << std::endl;
+}
+
+void SignalingServer::relayGkaContribution(rtc::WebSocket* key, const json& data) {
+    // Contributions are encrypted to Host. Server routes by the sender connection
+    // and forwards one opaque envelope to Host.
+    std::shared_ptr<rtc::WebSocket> senderWs;
+    std::shared_ptr<rtc::WebSocket> hostWs;
+    json envelope = data;
+    std::string roomId;
+    std::string senderId;
+    std::string errorMessage;
+
+    {
+        std::lock_guard<std::mutex> lock(mMutex);
+        auto sender = findClient(key);
+        senderWs = sender ? sender->ws : nullptr;
+        if (!sender || sender->role != "client" || sender->roomId.empty() || sender->roomId != data.value("roomId", "")) {
+            errorMessage = "invalid GKA contribution sender";
+        }
+        else {
+            auto room = findRoom(sender->roomId, sender);
+            if (!room || !room->host) {
+                errorMessage = "room not found";
+            }
+            else {
+                roomId = sender->roomId;
+                senderId = sender->clientId;
+                hostWs = room->host;
+                envelope["roomId"] = roomId;
+                envelope["senderId"] = senderId;
+            }
+        }
+    }
+
+    if (!errorMessage.empty()) {
+        safeSend(senderWs, {{"type", "error"}, {"message", errorMessage}});
+        return;
+    }
+
+    safeSend(hostWs, envelope);
+    std::cout << "[signal] GKA contribution " << senderId
+              << " -> host room " << roomId
+              << " epoch=" << envelope.value("epoch", 0ULL) << std::endl;
+}
+
 void SignalingServer::relayGroupKey(rtc::WebSocket* key, const json& data) {
+    // group_key envelopes are Host-to-one-Client only. Server rewrites routing
+    // metadata from connection state and forwards the opaque envelope unchanged.
     std::shared_ptr<rtc::WebSocket> senderWs;
     std::shared_ptr<rtc::WebSocket> targetWs;
     json envelope = data;
@@ -581,6 +825,9 @@ void SignalingServer::relayGroupKey(rtc::WebSocket* key, const json& data) {
                 else {
                     roomId = sender->roomId;
                     targetWs = target->second;
+                    // Bind clear routing fields to the actual Host connection.
+                    // Client later authenticates these fields through Host's
+                    // PKI signature and the AES-GCM AAD in secure_relay.
                     envelope["roomId"] = roomId;
                     envelope["senderId"] = chat::protocol::HostActorId;
                     envelope["targetId"] = targetId;
@@ -600,13 +847,13 @@ void SignalingServer::relayGroupKey(rtc::WebSocket* key, const json& data) {
 
 void SignalingServer::relayEncrypted(rtc::WebSocket* key, const json& data) {
     // Relays opaque application ciphertext. The Server validates membership
-    // and routing metadata, but never has the room group key needed to decrypt.
+    // and sender connection state, but never sees application sender names,
+    // private targets, or the room group key needed to decrypt.
     std::shared_ptr<rtc::WebSocket> senderWs;
     std::vector<std::shared_ptr<rtc::WebSocket>> recipients;
     json envelope = data;
     std::string roomId;
     std::string senderId;
-    std::string targetId;
     std::string errorMessage;
 
     {
@@ -624,43 +871,16 @@ void SignalingServer::relayEncrypted(rtc::WebSocket* key, const json& data) {
             else {
                 roomId = sender->roomId;
                 senderId = sender->clientId;
-                targetId = data.value("targetId", "");
-                const std::string senderKind = sender->role == "host"
-                    ? chat::protocol::HostActorKind
-                    : chat::protocol::ClientActorKind;
 
-                // Server remains blind to ciphertext, but it still binds clear
-                // relay metadata to authenticated WebSocket state before forwarding.
-                envelope["roomId"] = roomId;
-                envelope["senderId"] = senderId;
-                envelope["senderName"] = sender->username;
-                envelope["senderKind"] = senderKind;
-                envelope["targetId"] = targetId;
-
-                if (!targetId.empty()) {
-                    // Private relay is delivery-level isolation: Server checks
-                    // that the target is a current member and forwards only to it.
-                    if (targetId == senderId) {
-                        errorMessage = "cannot relay to self";
-                    }
-                    else if (targetId == chat::protocol::HostActorId) {
-                        if (room->host && room->host.get() != key) recipients.push_back(room->host);
-                        else errorMessage = "target member not found";
-                    }
-                    else {
-                        auto target = room->clients.find(targetId);
-                        if (target != room->clients.end() && target->second && target->second.get() != key) {
-                            recipients.push_back(target->second);
-                        }
-                        else {
-                            errorMessage = "target member not found";
-                        }
-                    }
+                if (sender->role == "client" && room->silencedClients.find(senderId) != room->silencedClients.end()) {
+                    errorMessage = "member is silenced";
                 }
                 else {
-                    // Empty targetId preserves the normal room broadcast path:
-                    // every current member except the sender receives the same
-                    // authenticated encrypted envelope.
+                    // Phase 12 metadata minimization: bind only the opaque room
+                    // token and sender connection id. Every encrypted relay is
+                    // broadcast; private targets are filtered after decryption.
+                    envelope["roomId"] = roomId;
+                    envelope["senderId"] = senderId;
                     if (room->host && room->host.get() != key) recipients.push_back(room->host);
                     for (const auto& [_, ws] : room->clients) {
                         if (ws && ws.get() != key) recipients.push_back(ws);
@@ -680,15 +900,17 @@ void SignalingServer::relayEncrypted(rtc::WebSocket* key, const json& data) {
     }
 
     std::cout << "[signal] encrypted relay " << senderId
-              << " -> " << (targetId.empty() ? std::string("room ") + roomId : std::string("member ") + targetId)
+              << " -> room " << roomId
               << " recipients=" << recipients.size() << std::endl;
 }
 
 void SignalingServer::cleanup(rtc::WebSocket* key) {
+    // Cleanup runs for normal close and network errors. It removes only the
+    // disconnected socket's room indexes, then sends notifications outside the
+    // mutex to avoid blocking other clients.
     std::string roomId;
     std::string role;
     std::string clientId;
-    std::string userId;
     std::vector<std::shared_ptr<rtc::WebSocket>> notifyClients;
     std::shared_ptr<rtc::WebSocket> notifyHost;
     bool shouldBroadcastMembers = false;
@@ -701,12 +923,13 @@ void SignalingServer::cleanup(rtc::WebSocket* key) {
         roomId = clientIt->second.roomId;
         role = clientIt->second.role;
         clientId = clientIt->second.clientId;
-        userId = clientIt->second.userId;
 
         auto roomIt = mRooms.find(roomId);
         if (roomIt != mRooms.end()) {
             auto& room = roomIt->second;
             if (role == "host" && room.host.get() == key) {
+                // Current room lifetime policy: Host leaving closes the room.
+                // Persistent rooms would need stored membership and key recovery.
                 for (auto& item : room.clients) notifyClients.push_back(item.second);
                 mRooms.erase(roomIt);
                 mRegistry.closeRoom(roomId);
@@ -715,10 +938,10 @@ void SignalingServer::cleanup(rtc::WebSocket* key) {
                 auto clientIt = room.clients.find(clientId);
                 if (clientIt != room.clients.end() && clientIt->second.get() == key) {
                     room.clients.erase(clientIt);
+                    room.silencedClients.erase(clientId);
                     notifyHost = room.host;
                     shouldBroadcastMembers = true;
                 }
-                mRegistry.markOffline(roomId, userId);
             }
         }
 
@@ -855,11 +1078,16 @@ SignalingServer::RoomSnapshot SignalingServer::roomSnapshotLocked(const std::str
 
         if (client.role == "host") {
             snapshot.members.push_back(client.username + " (Host)");
-            snapshot.memberInfos.push_back({
+            json info = {
                 {"id", chat::protocol::HostActorId},
                 {"username", client.username},
                 {"role", "host"}
-            });
+            };
+            if (!client.publicKey.empty() && client.identity.is_object()) {
+                info["publicKey"] = client.publicKey;
+                info["identity"] = client.identity;
+            }
+            snapshot.memberInfos.push_back(info);
             snapshot.recipients.push_back(client.ws);
         }
     }
@@ -868,11 +1096,19 @@ SignalingServer::RoomSnapshot SignalingServer::roomSnapshotLocked(const std::str
         if (client.roomId != roomId || client.role != "client") continue;
 
         snapshot.members.push_back(client.username);
-        snapshot.memberInfos.push_back({
+        json info = {
             {"id", client.clientId},
             {"username", client.username},
             {"role", "client"}
-        });
+        };
+        // memberInfos is not trusted by receivers. It carries the Client's
+        // original signed identity/publicKey so other Clients can verify the
+        // binding themselves and avoid trusting Host for pairwise key mapping.
+        if (!client.publicKey.empty() && client.identity.is_object()) {
+            info["publicKey"] = client.publicKey;
+            info["identity"] = client.identity;
+        }
+        snapshot.memberInfos.push_back(info);
         snapshot.recipients.push_back(client.ws);
     }
 

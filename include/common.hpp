@@ -1,3 +1,5 @@
+// Shared protocol types and JSON validation helpers used by Server, Host,
+// Client, and the native UI bridge.
 #pragma once
 
 #include <nlohmann/json.hpp>
@@ -12,11 +14,15 @@
 using json = nlohmann::json;
 
 namespace chat::protocol {
+// Actor ids/kinds are relay metadata. Host has a fixed id; Clients receive
+// per-room ids from SignalingServer.
 inline constexpr const char* HostActorId = "host";
 inline constexpr const char* ClientActorKind = "participant";
 inline constexpr const char* HostActorKind = "host";
 inline constexpr const char* ControlledActorKind = "controlled";
 
+// JSON budgets protect every network-facing parser before messages reach
+// Host/Client protocol handlers.
 inline constexpr std::size_t MaxApplicationMessageBytes = 1024 * 1024;
 inline constexpr std::size_t MaxSignalingMessageBytes = 512 * 1024;
 inline constexpr std::size_t MaxJsonPayloadDepth = 16;
@@ -67,6 +73,8 @@ inline json parseJsonObjectWithBudget(
 }
 
 inline bool isAllowedMessageField(const std::string& key) {
+    // Keep application Message schema closed so decrypted payloads cannot grow
+    // accidental extension fields without explicit review.
     return key == "type" ||
         key == "from" ||
         key == "to" ||

@@ -2,7 +2,7 @@
 
 本文档用于设计和记录 SecureChat 的授权安全测试。所有测试都应只在本项目的本地环境、受控实验网络或自己控制的云服务器上进行，不用于攻击第三方系统。
 
-当前系统的安全主线是：Server 作为不可信协调者和密文 relay，Host/Client 使用 GKA v2 分发 room group key，并用 AES-256-GCM 加密文本和附件。下面的挑战用于验证这个模型能保护什么、不能保护什么。
+当前系统的安全主线是：Server 作为不可信协调者和密文 relay，Host/Client 使用贡献式 GKA v3 协商 room group key，并用 AES-256-GCM 加密群聊文本和附件；私发文本和附件在外层 room relay 内再使用 pairwise key。下面的挑战用于验证这个模型能保护什么、不能保护什么。
 
 从安装、构建、启动到基础功能验收的主流程见 `README.md` 的“完整测试流程”；本文档只展开敌手挑战的攻击步骤、预期现象和留证方式。
 
@@ -14,17 +14,17 @@
 - 局域网主动攻击者：可能篡改未受 TLS 保护的信令，尝试 public key 替换、identity 替换或连接干扰。
 - 公网扫描者：可能探测 TCP `25566`，触发无效连接或弱密码尝试。
 - 恶意房间成员：加入后可读取当前 group key 下的群消息和附件。
-- 被攻破的不可信 Server：可观察 room、sender、时序和 ciphertext 大小，但不应获得 room group key 或应用明文。
+- 被攻破的不可信 Server：可观察 room token、sender connection id、时序和 ciphertext 大小，但不应获得 room group key 或应用明文。
 - 恶意附件发送者：可能发送伪装文件、超大文件、特殊文件名或诱导用户手动打开附件。
 
 ### 安全目标映射
 
 - 机密性：文本和附件 metadata/chunk 使用应用层 AES-256-GCM encrypted relay；Server 只转发 ciphertext。
 - 完整性：文本和附件 metadata/chunk 使用 AES-256-GCM AEAD；room/sender metadata 由 Server 绑定到 WebSocket 会话状态。
-- 密钥协商：GKA v2 使用临时 X25519 public key、Host 分发 room group key、成员加入/离开后 key rotation。
+- 密钥协商：GKA v3 使用临时 X25519 public key、成员签名 contribution、Host 发起 epoch、成员加入/离开后 key rotation。
 - 认证与访问控制：房间密码限制加入；WSS 提供 Server 证书校验；可选 mTLS 反向代理限制客户端连接准入；PKI 成员身份认证强制把成员证书签名绑定到 `join_room` public key 和 `group_key` envelope。
 - 附件安全：大小限制、扩展名白名单、图片/语音文件头校验、文件名净化、固定缓存目录、缓存总量限制、不自动执行，WinUI 未知成员附件默认不自动预览。
-- 可用性：连接数和坏消息限制、连接超时、维护线程清理、daemon 脚本、可选 systemd 模板。
+- 可用性：连接数和坏消息限制、连接超时、维护线程清理、GKA contribution 超时自动驱逐、daemon 脚本、可选 systemd 模板。
 - 部署卫生：默认不落盘日志、非 root guard、必要端口说明、安全组来源 IP 收敛步骤。
 - 隐私：GUI/Web 不显示底层 endpoint/log 噪声；Server 仍可见元数据。
 
@@ -34,7 +34,7 @@
 - 恶意或被攻破 Server 仍可尝试 public key 替换攻击，但应被 PKI 签名绑定检测出来。
 - 成员退出后的 key rotation 只保护后续消息，不能撤回该成员曾持有 key 时可读的历史消息。
 - Server 仍可观察 room、sender、连接时间、ciphertext 大小、消息数量和转发时序等元数据。
-- 当前私发是 group key 下的定向投递，不提供独立私聊密钥隔离。
+- 私发已有 pairwise 内层密钥隔离；错误投递应表现为目标检查失败或 pairwise 解密失败，而不是展示明文。
 - 附件校验不是杀毒；没有沙箱、恶意文件扫描、复杂文档格式解析隔离或用户手动打开保护。
 - 接收端本机会留下解密后的附件缓存，成员设备被攻破时 E2EE 无法保护本机明文。
 
@@ -44,7 +44,10 @@
 - 局域网图片、语音、文本文件附件收发。
 - 公网 Server + 群主 Host + Client 加入。
 - Server encrypted relay 下文本和附件收发，确认 Server 日志不含应用明文。
-- 私发文本和私发附件只投递给目标成员。
+- 私发文本和私发附件只投递给目标成员，并且复制给其他成员也无法解开内层 pairwise 密文。
+- 恶意 Server 错投私发时，诚实接收端检查 `relayTargetId` 并丢弃。
+- Host `/silence` 后目标不能继续发送文本或附件，`/unsilence` 后恢复。
+- Host `/evict` 或 `/ban` 后目标被踢出，同一证书在当前房间生命周期内重新加入被拒绝。
 - 错误房间密码拒绝。
 - 重复用户名拒绝。
 - 不支持附件类型拒绝。
@@ -169,7 +172,7 @@
 Client -- join_room(publicKey=C_pub) --> 攻击者/恶意 Server
 攻击者把 C_pub 替换为 A_pub
 Host 收到 new_client(publicKey=A_pub)
-Host 用 A_pub 封装 room group key
+Host 用 A_pub 封装 group state
 攻击者用 A_priv 解开 group key
 ```
 
@@ -220,7 +223,7 @@ Host 验证 `join_room` identity 时会发现签名覆盖的 public key 与被�
 ### 前置条件
 
 - Server 记录收到的 WebSocket JSON envelope。
-- Host/Client 正常完成 GKA v2。
+- Host/Client 正常完成 GKA v3。
 - Server 不持有 Host/Client 的私钥或 room group key。
 
 ### 实验步骤
@@ -288,6 +291,52 @@ Server 不应可见：
 ### 验证证据
 
 - 修改 envelope 后接收端出现认证失败。
+
+## 挑战 5A：恶意 Server 错投私发、重放和伪造离线通知
+
+### 攻击目标
+
+验证恶意 Server 把私发 envelope 投递给错误诚实成员时，接收端不会展示该消息；复制给恶意成员时也无法解开 pairwise 内层密文。验证旧 relay/group_key 重放会被接收端拒绝，同时验证 Host 收到未知 `client_left` 时不会错误触发 group key rotation。
+
+### 前置条件
+
+- 至少一个 Host 和两个 Client 已加入同一 room。
+- 测试环境允许使用修改版 Server 或受控代理改写转发目标。
+- Host/Client 均使用当前实现，且已完成 GKA v3 和 PKI 验证。
+
+### 实验步骤
+
+1. Client A 向 Client B 私发一条文本，记录正常情况下只有 B 显示。
+2. 使用受控测试 Server 把该 `encrypted_relay` envelope 额外发送给 Client C，但不修改 envelope 内的 `targetId`。
+3. 观察 Client C 的 UI 和日志。
+4. 使用受控测试 Server 对 Client B 重放同一条 `encrypted_relay`。
+5. 使用受控测试 Server 对某个 Client 重放旧 `group_key` envelope。
+6. 使用受控测试 Server 给 Host 发送一个不存在 clientId 的 `client_left`。
+7. 使用受控测试 Server 给 Client 发送一个非入房阶段的普通 `error`，例如 target member not found。
+8. 观察 Host 是否移除成员或轮换 group key，并观察 Client 是否主动退出。
+
+### 预期现象
+
+- Client C 解密外层后检查 `relayTargetId`，发现目标不是自己，丢弃并提示 dropped，不展示私信正文。
+- 即使攻击者修改客户端逻辑跳过外层目标检查，也缺少目标成员 pairwise private key，无法通过内层 AES-GCM 认证。
+- Client B 对重复 relay 输出 `Dropped replayed encrypted relay`，不重复展示消息或附件。
+- Client 对旧 `group_key` 输出 stale/replayed 相关错误，不回滚到旧 room group key。
+- Host 对未知 `client_left` 记录忽略，不移除现有成员，不触发新的 group key rotation。
+- Client 对普通 relay 错误只显示提示，不主动 shutdown。
+- 如果 Server 对真实已知成员伪造断线或直接断开连接，Host 仍会移除该成员并轮换 group key；这是可用性和状态层风险，不是内容机密性突破。
+
+### 系统缓解
+
+- `relayTargetId` 来自 encrypted relay envelope 的 AEAD AAD 绑定 metadata，解密后进入 payload 供 Host/Client 检查。
+- `pairwise_private` 内层密钥由发送者临时 X25519 和目标成员已验证 public key 派生，不从 room group key 派生。
+- Host/Client 维护 relay nonce/tag replay cache；Client 额外检查递增 group key epoch。
+- Host 的 `removeClient` 只对已知成员执行移除和重密钥，未知 id 被忽略。
+
+### 验证证据
+
+- Client C 没有显示私信正文的截图或日志。
+- 重放 relay / stale group_key 被拒绝的日志。
+- Host 记录 `Ignored unknown client_left`，且成员列表和 group key rotation 日志无变化。
 - 原始未修改 envelope 在正确房间可正常解密。
 
 ## 挑战 6：房间密码错误和重复用户名
@@ -477,25 +526,31 @@ Server 不应可见：
 ### 前置条件
 
 - 攻击者知道房间密码并作为合法 Client 加入。
-- Host/Client 正常完成 GKA v2。
+- Host/Client 正常完成 GKA v3。
 
 ### 实验步骤
 
 1. 恶意成员加入房间。
 2. 其他成员发送文本和附件。
 3. 恶意成员保存收到的明文和附件。
-4. Host 让该成员离开或断开连接，触发 key rotation。
-5. 剩余成员继续发送后续消息。
+4. Host 使用 `/silence <成员名或id>` 禁止该成员继续发送，观察其发送文本或附件被拒绝。
+5. Host 使用 `/unsilence <成员名或id>` 恢复发送能力。
+6. Host 使用 `/evict <成员名或id>` 或 `/ban <成员名或id>` 驱逐该成员，触发 key rotation。
+7. 使用同一成员证书尝试重新加入当前房间。
+8. 剩余成员继续发送后续消息。
 
 ### 预期现象
 
 - 恶意成员能读取加入期间收到的消息和附件。
+- 被禁言期间不能发送文本或附件，但仍是成员，可以参与 Host 发起的后续 GKA epoch。
+- 被驱逐后 WebSocket 被关闭，同一证书在当前房间生命周期内重新加入被 Host 拒绝。
 - 离开后的 key rotation 只保护后续消息。
 - 已经接收并保存的历史明文无法撤回。
 
 ### 系统缓解
 
 - 成员离开后 Host 轮换 group key。
+- Host 驱逐成员时记录当前房间内存封禁指纹，重新加入时不分发 group key。
 - 后续消息使用新的 room group key。
 
 ### 验证证据

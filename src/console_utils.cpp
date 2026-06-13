@@ -1,3 +1,4 @@
+// Console utility implementation for UTF-8 terminal IO and hidden password input.
 #include "console_utils.hpp"
 
 #include <iostream>

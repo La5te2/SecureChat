@@ -1,6 +1,6 @@
 # SecureChat 环境变量参考
 
-本文档列出当前仍可配置的 `SECURECHAT_*` 环境变量。它们都是可选项；交互使用时优先通过命令参数、隐藏输入和脚本默认值完成，不建议把秘密长期写入 shell 启动文件。
+本文档列出当前仍可配置的 `SECURECHAT_*` 环境变量。不是每个运行角色都需要配置所有变量；Server、Host、Client 和 mTLS 反向代理场景各自使用其中一部分。交互使用时优先通过命令参数、隐藏输入和脚本默认值完成，不建议把秘密长期写入 shell 启动文件。当前 Host/Client 必须配置 PKI 成员身份变量，否则会启动失败。
 
 ## 总览
 
@@ -117,7 +117,7 @@ export SECURECHAT_MTLS_CLIENT_KEY_FILE=certs/pki/alice-key.pem
 
 如果 WSS/mTLS 入口服务器证书由私有 CA 或自签名证书签发，再额外设置 `SECURECHAT_TLS_CA_FILE`。使用 Let's Encrypt 等系统已信任 CA 时通常不需要设置。
 
-mTLS 负责连接准入；PKI 成员身份认证负责把成员身份签名绑定到 GKA v2 的临时 X25519 public key。两者可以使用同一套测试证书，但真实部署中建议按用途签发不同证书。
+mTLS 负责连接准入；PKI 成员身份认证负责把成员身份签名绑定到 GKA v3 的临时 X25519 public key 和成员 contribution。两者可以使用同一套测试证书，但真实部署中建议按用途签发不同证书。
 
 ## PKI 成员身份认证
 

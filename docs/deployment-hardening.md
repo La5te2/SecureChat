@@ -44,12 +44,13 @@ sudo -u securechat -H bash -lc 'cd /opt/SecureChat && ./stop_server.sh && rm -f 
 
 ## 可选 systemd 服务
 
-`deploy/securechat-server.service` 是可选 systemd 模板。systemd 是 Linux 的服务管理器，可以负责开机启动、停止服务、失败自动重启、限制运行用户和部分文件系统权限。它不是 SecureChat 协议的一部分，也不提供通信加密。
+`deploy/securechat-server.service` 是可选 systemd 模板。systemd 是 Linux 的服务管理器，可以负责开机启动、停止服务、失败自动重启、限制运行用户和部分文件系统权限。它不是 SecureChat 协议的一部分，也不提供通信加密。`deploy/` 里的文件是 Linux 配置模板，不是双击运行的程序；使用前要复制到系统配置目录，并按实际路径、用户和证书位置调整。
 
 使用前需要把仓库部署到 `/opt/SecureChat`，并把证书放在 `/opt/SecureChat/certs`：
 
 ```bash
 sudo cp /opt/SecureChat/deploy/securechat-server.service /etc/systemd/system/securechat-server.service
+sudo systemctl edit --full securechat-server.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now securechat-server.service
 sudo systemctl status securechat-server.service
@@ -78,6 +79,7 @@ Host/Client -- mTLS WSS --> Nginx :25566 -- local WS --> SecureChat Server 127.0
 
 ```bash
 sudo cp /opt/SecureChat/deploy/securechat-nginx-mtls.conf /etc/nginx/conf.d/securechat-mtls.conf
+sudo editor /etc/nginx/conf.d/securechat-mtls.conf
 sudo nginx -t
 sudo systemctl reload nginx
 ```
@@ -85,9 +87,10 @@ sudo systemctl reload nginx
 启动本机 backend：
 
 ```bash
-sudo cp /opt/SecureChat/deploy/securechat-server-mtls-backend.service /etc/systemd/system/securechat-server.service
+sudo cp /opt/SecureChat/deploy/securechat-server-mtls-backend.service /etc/systemd/system/securechat-server-mtls-backend.service
+sudo systemctl edit --full securechat-server-mtls-backend.service
 sudo systemctl daemon-reload
-sudo systemctl enable --now securechat-server.service
+sudo systemctl enable --now securechat-server-mtls-backend.service
 ```
 
 手动启动等价命令：
@@ -108,7 +111,7 @@ ss -lntp | grep -E ':(25566|25567)'
 - `25567` 只绑定 `127.0.0.1`；
 - 没有客户端证书时，TLS 握手失败；
 - 带受信任客户端证书时，WebSocket upgrade 成功；
-- 聊天内容仍由应用层 GKA v2/AES-256-GCM 保护，mTLS 不替代成员身份 PKI。
+- 聊天内容仍由应用层 GKA v3/AES-256-GCM 保护，mTLS 不替代成员身份 PKI。
 
 Host/Client 连接 mTLS 入口前需要提供客户端证书：
 

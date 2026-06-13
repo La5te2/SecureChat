@@ -1,3 +1,5 @@
+// Minimal ASP.NET Core host for SecureChat Web UI. It serves static UI files,
+// server-sent events, and small HTTP endpoints that call the native chat core.
 using System.Text.Json;
 using SecureChat.Web;
 
@@ -13,8 +15,11 @@ builder.Services.AddSingleton<MediaRegistry>();
 var app = builder.Build();
 var events = app.Services.GetRequiredService<ChatEventBus>();
 var media = app.Services.GetRequiredService<MediaRegistry>();
+// Register native callbacks before HTTP requests arrive so early status events
+// are delivered to the browser event stream.
 NativeChat.Initialize(events, media);
 
+// Ensure native sessions are stopped when ASP.NET shuts down.
 app.Lifetime.ApplicationStopping.Register(NativeChat.Shutdown);
 
 app.UseDefaultFiles();
@@ -69,6 +74,7 @@ app.MapPost("/api/join", (JoinRequest request, ChatEventBus bus) =>
 
 app.MapPost("/api/stop", (ChatEventBus bus) =>
 {
+    // Stop only the local Host/Client session owned by this Web UI process.
     NativeChat.Stop();
     bus.Publish("status", "Session stopped");
     return Results.Ok(new { ok = true });
@@ -95,6 +101,8 @@ app.MapPost("/api/upload", async (HttpRequest request) =>
     var uploadRoot = Path.Combine(AppContext.BaseDirectory, "uploads");
     Directory.CreateDirectory(uploadRoot);
 
+    // Browser-provided names are display hints only. Use Path.GetFileName and
+    // invalid-character replacement before writing into the upload cache.
     var safeName = string.Join("_", Path.GetFileName(file.FileName).Split(Path.GetInvalidFileNameChars()));
     var path = Path.Combine(uploadRoot, $"{DateTimeOffset.UtcNow:yyyyMMddHHmmssfff}_{safeName}");
     await using (var stream = File.Create(path))
@@ -109,6 +117,7 @@ app.MapPost("/api/upload", async (HttpRequest request) =>
 
 app.Run();
 
+// Request records match the JSON bodies sent by the static Web UI.
 internal sealed record HostRequest(
     string ServerUrl,
     string RoomId,

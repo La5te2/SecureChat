@@ -1,3 +1,5 @@
+// Client session interface used by CLI, WinUI, and Web wrappers.
+// It joins an existing room and sends encrypted relay messages through Server.
 #pragma once
 
 #include "attachment_transfer.hpp"
@@ -11,12 +13,18 @@
 
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
+// Regular room member. It joins an existing room, signs its temporary X25519
+// public key, receives the Host-wrapped room group key, and then sends encrypted
+// relay envelopes through SignalingServer.
 class ClientSessionCore {
 public:
     // Creates a client session bound to one signaling URL and room identity.
@@ -58,6 +66,24 @@ private:
     void handleSignalingMessage(const std::string& s);
     // Sends one encrypted relay message through the untrusted Server.
     bool sendRelayMessage(const Message& msg, const std::string& senderId, const std::string& senderName, const std::string& senderKind, const std::string& targetId);
+    // Wraps a private Message in a pairwise inner encryption layer for targetId.
+    Message wrapPairwiseForTarget(const Message& msg, const std::string& targetId);
+    // Opens a pairwise-private wrapper addressed to this Client.
+    Message decryptPairwiseFromMember(const Message& msg);
+    // Remembers relay nonce/tag pairs so replayed Server frames are ignored.
+    bool rememberRelayEnvelope(const json& envelope);
+    // Verifies and stores one member identity/publicKey mapping for pairwise sends.
+    bool rememberVerifiedMemberIdentity(
+        const std::string& memberId,
+        const std::string& displayName,
+        const std::string& publicKey,
+        const json& identity,
+        const std::string& advertisedFingerprint,
+        const std::string& source);
+    // Sends this Client's signed random contribution for one GKA epoch.
+    void sendGkaContribution(std::uint64_t epoch);
+    // Verifies a decrypted GKA state and installs the derived room group key.
+    bool installGroupState(const json& groupState, std::uint64_t epoch);
     // Sends one local attachment as encrypted metadata followed by encrypted chunks.
     bool sendAttachmentRelay(const std::string& filePath, chat::attachment::Kind kind, const std::string& metaType, const std::string& binaryType, const std::string& mime, const std::string& targetId);
     // Handles one decrypted encrypted_relay application message.
@@ -72,17 +98,25 @@ private:
 private:
     std::string mWsUrl;
     std::string mRoomId;
+    // Opaque routing token derived from roomId + room password. Server sees this
+    // token as roomId; the human-readable room id stays local for UI and PKI.
+    std::string mRoomToken;
     std::string mUsername;
     std::string mPassword;
     std::string mClientId;
     std::mutex mMembersMutex;
     std::unordered_map<std::string, std::string> mMemberNamesById;
+    std::unordered_map<std::string, std::string> mMemberPublicKeysById;
+    std::unordered_map<std::string, std::string> mMemberFingerprintsById;
+    std::unordered_set<std::string> mRecentRelayIds;
+    std::deque<std::string> mRecentRelayOrder;
     ChatCallbacks mCallbacks;
     std::shared_ptr<rtc::WebSocket> mWs;
     rtc::WebSocket::Configuration mWsConfig;
     chat::secure_relay::MemberKeyPair mMemberKeys;
     chat::identity_pki::IdentityContext mIdentity;
     std::vector<unsigned char> mGroupKey;
+    std::uint64_t mGroupKeyEpoch = 0;
     std::atomic_bool mShutdownRequested = false;
     std::atomic_bool mStopped = false;
     // Core attachment receive state, keyed by sender actor id.

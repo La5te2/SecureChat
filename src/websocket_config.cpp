@@ -1,3 +1,4 @@
+// WebSocket TLS option implementation for WSS and mTLS client certificates.
 #include "websocket_config.hpp"
 
 #include <cstdlib>
@@ -7,12 +8,15 @@
 namespace chat::websocket_config {
 namespace {
 std::string envValue(const char* name) {
+    // Environment variables keep TLS choices out of command-line arguments.
     const char* value = std::getenv(name);
     return value == nullptr ? std::string() : std::string(value);
 }
 }
 
 void applyClientTlsFromEnvironment(rtc::WebSocket::Configuration& config) {
+    // Host/Client call this before opening WSS. Empty variables keep libdatachannel
+    // defaults; partial mTLS configuration is rejected below.
     const auto caFile = envValue("SECURECHAT_TLS_CA_FILE");
     const auto certFile = envValue("SECURECHAT_MTLS_CLIENT_CERT_FILE");
     const auto keyFile = envValue("SECURECHAT_MTLS_CLIENT_KEY_FILE");
@@ -39,6 +43,7 @@ void applyClientTlsFromEnvironment(rtc::WebSocket::Configuration& config) {
 }
 
 bool hasClientCertificate(const rtc::WebSocket::Configuration& config) {
+    // Used by status/logging paths to report whether mTLS client auth is configured.
     return config.certificatePemFile.has_value() && config.keyPemFile.has_value();
 }
 

@@ -1,8 +1,8 @@
 # SecureChat PKI 成员身份认证
 
-本文档说明当前已经实现的阶段 9：用成员身份签名证书绑定 GKA v2 中的临时 X25519 public key，降低恶意 Server 或主动中间人替换公钥的风险。
+本文档说明当前已经实现的阶段 9：用成员身份签名证书绑定 GKA v3 中的临时 X25519 public key 和成员 contribution，降低恶意 Server 或主动中间人替换公钥、伪造贡献或篡改 group state 的风险。
 
-这里的 PKI 证书不是 WSS 服务器证书。WSS 服务器证书用于证明 `wss://chat.la5te2.online:25566` 连接到正确的 Server；成员身份证书用于证明某个 Host/Client 的 `join_room` 或 `group_key` envelope 由持有身份私钥的成员签名。
+这里的 PKI 证书不是 WSS 服务器证书。WSS 服务器证书用于证明 `wss://chat.la5te2.online:25566` 连接到正确的 Server；成员身份证书用于证明某个 Host/Client 的 `join_room`、GKA contribution 或 `group_key`/group-state envelope 由持有身份私钥的成员签名。
 
 ## 启用方式
 
@@ -36,7 +36,7 @@ Host 和 Client 都使用同一组变量名。实际部署时，每个成员机�
 - ECDSA P-256 等 OpenSSL 支持的 EC 签名密钥，签名摘要为 SHA-256；
 - RSA 或 RSA-PSS，签名摘要为 SHA-256。
 
-成员证书的 Key Usage 如果存在，必须允许 `digitalSignature`。代码不会用 X25519 做身份认证；X25519 只用于 ECDH 和 group key 封装，身份认证由证书里的签名公钥完成。
+成员证书的 Key Usage 如果存在，必须允许 `digitalSignature`。代码不会用 X25519 做身份认证；X25519 只用于 ECDH、GKA contribution/state 封装和 pairwise 私发，身份认证由证书里的签名公钥完成。
 
 ## 最小证书生成示例
 
@@ -129,32 +129,48 @@ Host 收到 `new_client` 后会：
 4. 验证 `signatureAlg` 与证书公钥类型一致；
 5. 验证签名确实覆盖当前 `roomId`、`username` 和临时 X25519 public key。
 
-验证失败时，Host 发送 `reject_client`，Server 会移除该 Client 并关闭其 WebSocket。验证通过后，Host 才记录该 public key、轮换 room group key，并为该成员封装 group key。
+验证失败时，Host 发送 `reject_client`，Server 会移除该 Client 并关闭其 WebSocket。验证通过后，Host 还会检查该证书指纹是否已经被当前房间的 `/evict` 或 `/ban` 命令封禁；若已封禁，Host 拒绝该 Client，不记录 public key，也不允许其参与 GKA epoch。未被封禁时，Host 才记录该 public key，并在成员变化时发起新的 GKA epoch。
 
-## group_key 绑定
+## GKA contribution 和 group_key 绑定
 
-Host 给 Client 分发 group key 时，先按 GKA v2 生成 `group_key` envelope，再用 Host 身份私钥签名。签名覆盖：
+每个成员提交 GKA contribution 时，会用自己的身份私钥签名。签名覆盖：
+
+```text
+securechat-pki-v1
+gka_contribution
+roomId:<len>:<roomId>
+epoch:<len>:<gka-epoch>
+memberId:<len>:<member-id>
+username:<len>:<username>
+publicKey:<len>:<temporary-x25519-public-key>
+contribution:<len>:<base64-contribution-secret>
+nonce:<len>:<identity-nonce>
+```
+
+Host 给 Client 分发 group state 时，会生成 `group_key` envelope，再用 Host 身份私钥签名。签名覆盖：
 
 ```text
 securechat-pki-v1
 group_key
+version:<len>:<envelope-version>
 roomId:<len>:<roomId>
+epoch:<len>:<group-key-epoch>
 targetId:<len>:<clientId>
 senderId:<len>:host
 alg:<len>:AES-256-GCM
-kdf:<len>:X25519-HKDF-SHA256
+kdf:<len>:X25519-HKDF-SHA256+GKA-Contrib-v3
 ephemeralPublicKey:<len>:<host-ephemeral-x25519-public-key>
 nonce:<len>:<aes-gcm-nonce>
-ciphertext:<len>:<wrapped-group-key>
+ciphertext:<len>:<wrapped-group-state>
 tag:<len>:<aes-gcm-tag>
 identityNonce:<len>:<identity-nonce>
 ```
 
-Client 在解封装 group key 之前，会先验证 Host 证书链、吊销状态、签名算法和签名。如果验证失败，Client 不会执行 X25519 解封装，也不会接受该 room group key。
+Client 在解封装 group state 之前，会先验证 Host 证书链、吊销状态、签名算法和签名。如果验证失败，Client 不会执行 X25519 解封装，也不会接受该 room group key。解开 group state 后，Client 还会验证每个成员的 GKA contribution 签名，再本地导出 `K_G`。
 
 ## 验证结果进入 UI
 
-Host 验证 Client 身份后，会记录该成员证书的 SHA-256 指纹和 subject。随后 Host 通过加密 `member_identity` 控制消息向房间内成员广播已验证成员：
+Host 验证 Client 身份后，会记录该成员证书的 SHA-256 指纹和 subject。Server 的 `room_members.memberInfos` 会携带 Client 入房时提交的 `publicKey` 和 signed `identity`，其他 Client 会自行验证签名后才把该 member id/name 作为 pairwise 私发目标。随后 Host 也会通过加密 `member_identity` 控制消息向房间内成员广播已验证成员：
 
 ```json
 {
@@ -164,13 +180,23 @@ Host 验证 Client 身份后，会记录该成员证书的 SHA-256 指纹和 sub
     "displayName": "alice",
     "fingerprint": "sha256-hex",
     "subject": "/CN=alice",
+    "publicKey": "base64-x25519-public-key",
+    "identity": {
+      "version": 1,
+      "certChainPem": "-----BEGIN CERTIFICATE-----...",
+      "nonce": "base64",
+      "signatureAlg": "Ed25519",
+      "signature": "base64"
+    },
     "state": "verified",
     "verifiedBy": "host"
   }
 }
 ```
 
-该控制消息本身仍走应用层 encrypted relay。接收端只接受 relay metadata 显示发送者是 Host 的 `member_identity`，并在 WinUI 成员列表中标记为 `Verified`。Verified/Trusted 成员使用绿色 `name / id` 身份框，Unknown/Blocked 使用红色身份框；点击身份框会复制完整证书指纹。用户可以把 `Verified` 成员临时标记为 `Trusted` 以允许自动预览附件，也可以标记为 `Blocked` 禁止自动预览。
+该控制消息本身仍走应用层 encrypted relay。接收端只接受 relay metadata 显示发送者是 Host 的 `member_identity`，并会重新验证其中的 signed identity；如果同一个 member id 已经有已验证 public key 或证书指纹，后续冲突会被拒绝，不会静默覆盖。WinUI 成员列表中 Verified/Trusted 成员使用绿色 `name / id` 身份框，Unknown/Blocked 使用红色身份框；点击身份框会复制完整证书指纹。用户可以把 `Verified` 成员临时标记为 `Trusted` 以允许自动预览附件，也可以标记为 `Blocked` 禁止自动预览。
+
+私发使用该已验证 member id/name 到 X25519 public key 的映射。发送端找不到目标成员的已验证 public key 时，私发会失败并提示错误，不会降级为仅 room group key 加密。
 
 ## 吊销列表
 
@@ -182,14 +208,16 @@ Host 验证 Client 身份后，会记录该成员证书的 SHA-256 指纹和 sub
 7c32aa...
 ```
 
-当前实现会检查 identity 证书链中的每张证书。如果叶子证书或中间证书的 SHA-256 指纹出现在吊销列表中，该 identity 会被拒绝。成员被拒绝或离开后，Host 的既有成员变化逻辑会轮换 room group key。
+当前实现会检查 identity 证书链中的每张证书。如果叶子证书或中间证书的 SHA-256 指纹出现在吊销列表中，该 identity 会被拒绝。成员被拒绝或离开后，Host 的既有成员变化逻辑会发起新的 GKA epoch。
+
+`/evict` 和 `/ban` 使用的是另一层当前房间内存封禁：Host 把目标成员已经验证通过的叶子证书指纹记录到当前房间状态中，防止同一证书在该房间生命周期内重新加入。它不写入 `SECURECHAT_PKI_REVOCATION_FILE`，也不会跨 Host 进程或跨房间保留。需要跨房间、跨重启的拒绝时，应把证书指纹写入受信任吊销列表。
 
 ## 代码位置
 
 - `include/identity_pki.hpp`：PKI 身份上下文接口。
 - `src/identity_pki.cpp`：证书链验证、吊销检查、签名与验签。
-- `src/client_session_core.cpp`：Client 在 `join_room` 中签名身份，并在收到 `group_key` 后验证 Host 身份。
-- `src/host_session_core.cpp`：Host 验证 Client 身份，签名 `group_key`，并拒绝验证失败的 Client。
+- `src/client_session_core.cpp`：Client 在 `join_room` 和 GKA contribution 中签名身份，收到 `group_key` 后验证 Host 身份、验证 contribution set，并复验 `room_members.memberInfos` / `member_identity` 中的成员 public key。
+- `src/host_session_core.cpp`：Host 验证 Client 身份，验证 GKA contribution，签名 `group_key`/group-state envelope，广播 verified member identity，并拒绝验证失败的 Client。
 - `src/signaling_server.cpp`：Server 只校验 `identity` 字段结构和大小，转发 opaque identity object；不验证证书，不参与密钥协商语义。
 
 ## 与 WSS 的关系
@@ -198,19 +226,19 @@ WSS、mTLS 和 PKI 解决的问题不同：
 
 - WSS 保护 Host/Client 到 Server 的传输通道，防止网络路径上的被动监听和主动篡改；
 - mTLS 在反向代理入口要求客户端 TLS 证书，用于限制谁能建立到 Server 的连接；
-- PKI 成员身份认证把成员证书签名绑定到 GKA v2 的临时 X25519 public key 和 Host 的 `group_key` envelope；
-- 即使使用 PKI，Server 仍能看到 roomId、成员状态、消息大小和转发时序等元数据；
+- PKI 成员身份认证把成员证书签名绑定到 GKA v3 的临时 X25519 public key、成员 contribution 和 Host 的 `group_key`/group-state envelope；
+- 即使使用 PKI，Server 仍能看到 room token、连接 id、成员状态、消息大小和转发时序等元数据；
 - 即使使用 WSS，恶意 Server 仍可能尝试替换成员 public key，但 Host/Client 的 PKI 签名验证会拒绝不一致的 identity。
 
 ## Server 不验证哪一种证书
 
-本文档中的 PKI 证书指的是应用层成员身份证书，也就是 `join_room.identity.certChainPem` 和 `group_key.identity.certChainPem` 携带的证书链。Server 对这些证书只做 JSON 字段存在性、字段名、类型和大小检查，然后转发给 Host/Client。Server 不验证：
+本文档中的 PKI 证书指的是应用层成员身份证书，也就是 `join_room.identity.certChainPem`、GKA contribution identity 和 `group_key.identity.certChainPem` 携带的证书链。Server 对这些证书只做 JSON 字段存在性、字段名、类型和大小检查，然后转发给 Host/Client。Server 不验证：
 
 - 证书链是否由受信任 Root CA 签发；
 - 证书是否过期；
 - 证书 Key Usage 是否允许 `digitalSignature`；
 - 证书是否出现在本地吊销列表；
-- `join_room` 或 `group_key` 的 identity 签名是否正确。
+- `join_room`、GKA contribution 或 `group_key` 的 identity 签名是否正确。
 
 这些验证都发生在 Host/Client 本地。这样设计的原因是 Server 是不可信 relay，不能成为成员身份语义的信任根。mTLS 使用的客户端 TLS 证书是另一层连接准入证书，由 Nginx 等反向代理在 TLS 握手阶段验证，不是这里的应用层成员身份证书。
 

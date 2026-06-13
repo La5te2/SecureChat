@@ -1,3 +1,5 @@
+// Application-layer PKI implementation. It loads certificates and private keys,
+// verifies chains/revocation, and signs/verifies GKA identity bindings.
 #include "identity_pki.hpp"
 
 #include <openssl/asn1.h>
@@ -100,6 +102,8 @@ std::string hexEncode(const unsigned char* data, std::size_t size) {
 }
 
 std::string normalizeHex(std::string value) {
+    // Revocation entries may contain separators; keep only hex digits and fold
+    // to uppercase so comparisons match OpenSSL fingerprint output.
     std::string out;
     out.reserve(value.size());
     for (const auto ch : value) {
@@ -112,6 +116,8 @@ std::string normalizeHex(std::string value) {
 }
 
 void appendCanonicalField(std::string& out, const std::string& name, const std::string& value) {
+    // Length-prefixing avoids ambiguous signed strings when values contain
+    // separators or newline characters.
     out += name;
     out += ":";
     out += std::to_string(value.size());
@@ -135,12 +141,35 @@ std::string canonicalJoinMessage(
     return out;
 }
 
+std::string canonicalGkaContributionMessage(
+    const std::string& roomId,
+    std::uint64_t epoch,
+    const std::string& memberId,
+    const std::string& username,
+    const std::string& publicKey,
+    const std::string& contribution,
+    const std::string& nonce) {
+    // A contribution is meaningful only for one room epoch and one member key.
+    // Length prefixes prevent ambiguous signed strings.
+    std::string out = "securechat-pki-v1\ngka_contribution\n";
+    appendCanonicalField(out, "roomId", roomId);
+    appendCanonicalField(out, "epoch", std::to_string(epoch));
+    appendCanonicalField(out, "memberId", memberId);
+    appendCanonicalField(out, "username", username);
+    appendCanonicalField(out, "publicKey", publicKey);
+    appendCanonicalField(out, "contribution", contribution);
+    appendCanonicalField(out, "nonce", nonce);
+    return out;
+}
+
 std::string canonicalGroupKeyMessage(const json& envelope, const std::string& identityNonce) {
     // Bind the Host identity to the exact group_key envelope the Client will
     // unwrap. If a Server changes routing or ciphertext fields, verification
     // fails before the X25519/AES-GCM unwrapping step.
     std::string out = "securechat-pki-v1\ngroup_key\n";
+    appendCanonicalField(out, "version", std::to_string(envelope.value("version", 0)));
     appendCanonicalField(out, "roomId", envelope.value("roomId", ""));
+    appendCanonicalField(out, "epoch", std::to_string(envelope.value("epoch", 0ULL)));
     appendCanonicalField(out, "targetId", envelope.value("targetId", ""));
     appendCanonicalField(out, "senderId", envelope.value("senderId", ""));
     appendCanonicalField(out, "alg", envelope.value("alg", ""));
@@ -154,10 +183,12 @@ std::string canonicalGroupKeyMessage(const json& envelope, const std::string& id
 }
 
 BioPtr bioFromString(const std::string& value) {
+    // OpenSSL PEM readers operate on BIO streams; this wraps an in-memory string.
     return BioPtr(BIO_new_mem_buf(value.data(), static_cast<int>(value.size())), BIO_free);
 }
 
 int pemPasswordCallback(char* buffer, int size, int, void* userData) {
+    // OpenSSL calls this when an encrypted private key needs its password.
     if (!userData) return 0;
     const auto* password = static_cast<const std::string*>(userData);
     if (password->empty()) return 0;
@@ -167,6 +198,8 @@ int pemPasswordCallback(char* buffer, int size, int, void* userData) {
 }
 
 std::vector<X509Ptr> parseCertificateChain(const std::string& pem) {
+    // The first certificate is treated as the member leaf certificate; following
+    // certificates are untrusted intermediates for X509_verify_cert.
     auto bio = bioFromString(pem);
     if (!bio) throw std::runtime_error("certificate chain allocation failed");
 
@@ -218,6 +251,7 @@ std::string certificateFingerprint(X509* cert) {
 }
 
 std::set<std::string> loadRevokedFingerprints(const std::string& path) {
+    // Simple project-local revocation list: one SHA-256 fingerprint per line.
     std::set<std::string> revoked;
     if (path.empty()) return revoked;
 
@@ -234,6 +268,7 @@ std::set<std::string> loadRevokedFingerprints(const std::string& path) {
 }
 
 void requireDigitalSignatureUsage(X509* cert) {
+    // Identity certificates must be allowed to sign protocol bindings.
     ASN1_BIT_STRING* usage = static_cast<ASN1_BIT_STRING*>(
         X509_get_ext_d2i(cert, NID_key_usage, nullptr, nullptr));
     if (!usage) return;
@@ -294,6 +329,8 @@ void verifyCertificateChain(
 }
 
 void requireKeyMatchesCertificate(EVP_PKEY* privateKey, X509* cert) {
+    // Local startup check: the configured private key must correspond to the
+    // configured identity certificate.
     EvpPkeyPtr publicKey(X509_get_pubkey(cert), EVP_PKEY_free);
     if (!publicKey) throw std::runtime_error("identity certificate public key missing");
     if (EVP_PKEY_eq(privateKey, publicKey.get()) != 1) {
@@ -302,6 +339,8 @@ void requireKeyMatchesCertificate(EVP_PKEY* privateKey, X509* cert) {
 }
 
 std::string signatureAlgorithm(EVP_PKEY* key) {
+    // Keep the advertised algorithm explicit so a mismatched or downgraded
+    // signature format is rejected during verification.
     const int id = EVP_PKEY_base_id(key);
     if (id == EVP_PKEY_ED25519) return "Ed25519";
     if (id == EVP_PKEY_EC) return "ECDSA-SHA256";
@@ -480,6 +519,50 @@ VerifiedIdentity IdentityContext::verifyJoinRoom(
 
     if (!verifyBytes(publicSigningKey.get(), canonicalJoinMessage(roomId, username, publicKey, nonce), signature)) {
         throw std::runtime_error("join_room identity signature verification failed");
+    }
+    return {
+        certificateSubject(certs.front().get()),
+        certificateFingerprint(certs.front().get())
+    };
+}
+
+json IdentityContext::signGkaContribution(
+    const std::string& roomId,
+    std::uint64_t epoch,
+    const std::string& memberId,
+    const std::string& username,
+    const std::string& publicKey,
+    const std::string& contribution) const {
+    if (!mData) throw std::runtime_error("PKI identity is not configured");
+    const auto nonce = randomNonce();
+    return makeIdentityObject(
+        mData->privateKey.get(),
+        mData->certChainPem,
+        canonicalGkaContributionMessage(roomId, epoch, memberId, username, publicKey, contribution, nonce),
+        nonce);
+}
+
+VerifiedIdentity IdentityContext::verifyGkaContribution(
+    const std::string& roomId,
+    std::uint64_t epoch,
+    const std::string& memberId,
+    const std::string& username,
+    const std::string& publicKey,
+    const std::string& contribution,
+    const json& identity) const {
+    if (!mData) throw std::runtime_error("PKI identity is not configured");
+    const auto nonce = requiredIdentityString(identity, "nonce");
+    const auto signature = base64Decode(requiredIdentityString(identity, "signature"));
+    const auto certs = verifiedIdentityCerts(mData->trustStore.get(), mData->revokedFingerprints, identity);
+    EvpPkeyPtr publicSigningKey(X509_get_pubkey(certs.front().get()), EVP_PKEY_free);
+    if (!publicSigningKey) throw std::runtime_error("identity certificate public key missing");
+    requireSignatureAlgorithmMatches(publicSigningKey.get(), identity);
+
+    if (!verifyBytes(
+            publicSigningKey.get(),
+            canonicalGkaContributionMessage(roomId, epoch, memberId, username, publicKey, contribution, nonce),
+            signature)) {
+        throw std::runtime_error("GKA contribution signature verification failed");
     }
     return {
         certificateSubject(certs.front().get()),

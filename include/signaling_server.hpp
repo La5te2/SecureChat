@@ -1,3 +1,5 @@
+// SignalingServer declaration. The Server listens for WebSocket clients,
+// registers rooms, tracks members, and relays opaque encrypted envelopes.
 #pragma once
 
 #include "auth_service.hpp"
@@ -14,8 +16,12 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
+// Owns the network listener, room registry, membership state, and opaque relay.
+// It deliberately does not decrypt chat data and does not interpret application
+// member certificates; Host/Client verify PKI identities locally.
 class SignalingServer {
 public:
     // Starts the WebSocket signaling server and opaque encrypted relay.
@@ -34,8 +40,13 @@ public:
 
 private:
     struct Room {
+        // A room is anchored by one Host socket. When this socket leaves, the
+        // current design closes the room and notifies all Clients.
         std::shared_ptr<rtc::WebSocket> host;
         std::unordered_map<std::string, std::shared_ptr<rtc::WebSocket>> clients;
+        // Room-local send restrictions requested by Host. Silenced clients stay
+        // connected and can receive rekey traffic, but Server rejects their relay sends.
+        std::unordered_set<std::string> silencedClients;
     };
 
     struct RoomSnapshot {
@@ -45,11 +56,16 @@ private:
     };
 
     struct ClientState {
+        // Server-side connection metadata. clientId is used for routing; actorId
+        // inside encrypted chat payloads is authenticated by secure_relay.
         std::string roomId;
         std::string clientId;
         std::string userId;
         std::string username;
         std::string publicKey;
+        // Opaque PKI identity object from join_room. Server stores it only so
+        // other Clients can independently verify the member key it broadcasts.
+        json identity;
         std::string role;
         std::shared_ptr<rtc::WebSocket> ws;
         std::size_t badMessageCount = 0;
@@ -65,6 +81,12 @@ private:
     void handleJoinRoom(rtc::WebSocket* key, const json& data);
     // Lets Host remove a Client that failed local identity verification.
     void handleRejectClient(rtc::WebSocket* key, const json& data);
+    // Lets Host enable or disable a room-local send restriction for one Client.
+    void handleClientSilence(rtc::WebSocket* key, const json& data, bool silenced);
+    // Broadcasts a Host-started GKA epoch request to current Clients.
+    void relayGkaRequest(rtc::WebSocket* key, const json& data);
+    // Forwards one encrypted member contribution to Host.
+    void relayGkaContribution(rtc::WebSocket* key, const json& data);
     // Forwards an encrypted group-key envelope from Host to exactly one Client.
     void relayGroupKey(rtc::WebSocket* key, const json& data);
     // Relays authenticated chat ciphertext to the room or to one target member.

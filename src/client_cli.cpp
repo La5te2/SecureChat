@@ -1,3 +1,5 @@
+// Command-line Client entry point. It joins an existing room and forwards
+// terminal input to ClientSessionCore.
 #include "console_utils.hpp"
 #include "client_session_core.hpp"
 
@@ -16,10 +18,12 @@ namespace {
 std::atomic_bool gStopRequested = false;
 
 void handleStopSignal(int) {
+    // Signal handlers must stay simple; set an atomic flag and let main loop stop.
     gStopRequested.store(true);
 }
 
 ChatCallbacks consoleCallbacks() {
+    // CLI frontend just prints native events. GUI/Web frontends install different callbacks.
     ChatCallbacks callbacks;
     callbacks.onLog = [](const std::string& message) { std::cout << "[log] " << message << std::endl; };
     callbacks.onError = [](const std::string& message) { std::cerr << "[error] " << message << std::endl; };
@@ -76,6 +80,7 @@ std::string roomPasswordFromEnvOrPrompt() {
 }
 
 bool hasDaemonFlag(const std::vector<std::string>& args) {
+    // Client defaults to foreground mode; daemon mode is explicit.
     for (std::size_t i = 1; i < args.size(); ++i) {
         if (args[i] == "--daemon") return true;
     }
@@ -83,6 +88,7 @@ bool hasDaemonFlag(const std::vector<std::string>& args) {
 }
 
 std::vector<std::string> positionalArgs(const std::vector<std::string>& args) {
+    // Strip option flags so argv validation can focus on URL, room, and username.
     std::vector<std::string> positional;
     positional.reserve(args.size());
     for (const auto& arg : args) {
@@ -93,6 +99,7 @@ std::vector<std::string> positionalArgs(const std::vector<std::string>& args) {
 }
 
 void waitForDaemonStop(const std::shared_ptr<ClientSessionCore>& session) {
+    // Daemon mode has no stdin loop; it waits until a signal or session shutdown.
     std::signal(SIGINT, handleStopSignal);
     std::signal(SIGTERM, handleStopSignal);
 
@@ -104,6 +111,8 @@ void waitForDaemonStop(const std::shared_ptr<ClientSessionCore>& session) {
 }
 
 int main(int argc, char** argv) {
+    // CLI main only wires arguments, password input, callbacks, and the session loop.
+    // Protocol work lives inside ClientSessionCore.
     configureConsoleUtf8();
     const auto rawArgs = commandLineArgsUtf8(argc, argv);
     const auto daemonMode = hasDaemonFlag(rawArgs);

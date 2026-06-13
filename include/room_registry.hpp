@@ -1,3 +1,5 @@
+// In-memory room registry for SignalingServer. It records room passwords and
+// Host/Client membership for the current process.
 #pragma once
 
 #include "auth_service.hpp"
@@ -8,14 +10,16 @@
 #include <unordered_map>
 
 enum class RoomRole {
+    // Stored role is used for membership bookkeeping only. Chat authority is
+    // enforced by Host/Client protocol logic and Server connection state.
     Host,
     Client
 };
 
 struct RoomMember {
+    // Account id is stable inside this process and exists only while room is active.
     UserAccount account;
     RoomRole role = RoomRole::Client;
-    bool online = true;
 };
 
 class RoomRegistry {
@@ -26,13 +30,12 @@ public:
     bool passwordMatches(const std::string& roomId, const std::string& password) const;
     // Adds or refreshes a client membership in an existing room.
     RoomMember joinClient(const std::string& roomId, const UserAccount& client);
-    // Marks the host or client account offline without deleting room history.
-    void markOffline(const std::string& roomId, const std::string& userId);
     // Removes a room and all in-memory memberships.
     void closeRoom(const std::string& roomId);
 
 private:
     struct RoomState {
+        // RoomState never stores the room password itself, only its digest.
         std::string roomId;
         std::array<unsigned char, 32> passwordHash{};
         std::optional<RoomMember> host;

@@ -1,19 +1,25 @@
+// Host session implementation. It creates rooms, verifies Client PKI identities,
+// distributes room group keys, and handles encrypted relay messages.
 #include "host_session_core.hpp"
 
 #include "attachment_transfer.hpp"
 #include "secure_relay.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstddef>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <tuple>
 #include <utility>
 #include <vector>
 
 namespace {
 namespace attachment = chat::attachment;
+
+constexpr auto GkaContributionTimeout = std::chrono::seconds(10);
 
 // Returns a copy without surrounding ASCII whitespace.
 std::string trimCopy(std::string value) {
@@ -96,13 +102,28 @@ HostSessionCore::HostSessionCore(
       mUsername(std::move(username)),
       mPassword(std::move(password)),
       mWsConfig(std::move(wsConfig)) {
-    const auto groupKey = chat::secure_relay::generateGroupKey();
-    mGroupKey.assign(groupKey.begin(), groupKey.end());
+    // The Server registers only this opaque token. It cannot recover the room
+    // name without the password, while local PKI signatures still bind mRoomId.
+    mRoomToken = chat::secure_relay::deriveRoomToken(mRoomId, mPassword);
+    // K_G is not generated directly by Host anymore. The first usable room key
+    // is derived from the epoch-1 contribution set after room_created.
     chat::websocket_config::applyClientTlsFromEnvironment(mWsConfig);
+    // Host identity signs group_key envelopes and verifies Client join identities.
     mIdentity = chat::identity_pki::loadFromEnvironment();
+    // Host also owns a member X25519 pair so Clients can send true pairwise
+    // private messages to Host without reusing the room group key as the only key.
+    mMemberKeys = chat::secure_relay::generateMemberKeyPair();
 }
 
-HostSessionCore::~HostSessionCore() = default;
+HostSessionCore::~HostSessionCore() {
+    // Destruction may happen during UI shutdown. Close transports and join the
+    // watchdog without emitting another user-facing "Session stopped" event.
+    mStopped.store(true);
+    stopGkaTimeoutWorker();
+    if (mWs && !mWs->isClosed()) {
+        mWs->close();
+    }
+}
 
 // Replaces UI/CLI event callbacks used by the session.
 void HostSessionCore::setCallbacks(ChatCallbacks callbacks) {
@@ -112,6 +133,7 @@ void HostSessionCore::setCallbacks(ChatCallbacks callbacks) {
 // Opens the signaling WebSocket and creates the chat room.
 void HostSessionCore::start() {
     mStopped.store(false);
+    startGkaTimeoutWorker();
     mWs = std::make_shared<rtc::WebSocket>(mWsConfig);
 
     mWs->onOpen([this]() {
@@ -122,11 +144,14 @@ void HostSessionCore::start() {
         chatEmit(mCallbacks.onStatus, "PKI identity ready: " + mIdentity.fingerprint());
         json msg = {
             {"type", "create_room"},
-            {"roomId", mRoomId},
+            {"roomId", mRoomToken},
             {"username", mUsername},
-            {"password", mPassword}
+            {"password", mRoomToken},
+            {"publicKey", mMemberKeys.publicKey}
         };
+        msg["identity"] = mIdentity.signJoinRoom(mRoomId, mUsername, mMemberKeys.publicKey);
         mWs->send(msg.dump());
+        // Keep the room password only long enough to create the room.
         std::fill(mPassword.begin(), mPassword.end(), '\0');
         mPassword.clear();
     });
@@ -149,6 +174,7 @@ void HostSessionCore::start() {
 // Closes all host-owned transports and marks the session stopped.
 void HostSessionCore::stop() {
     if (mStopped.exchange(true)) return;
+    stopGkaTimeoutWorker();
     if (mWs && !mWs->isClosed()) {
         mWs->close();
     }
@@ -163,6 +189,8 @@ bool HostSessionCore::shouldStop() const {
 
 // Parses one host input line and sends chat, commands, or attachments.
 void HostSessionCore::sendLine(const std::string& line) {
+    if (handleHostCommand(line)) return;
+
     std::string directTarget;
     std::string directBody;
     if (parseDirectPrefix(line, directTarget, directBody)) {
@@ -197,7 +225,7 @@ void HostSessionCore::sendLine(const std::string& line) {
 
     const auto envelope = chat::secure_relay::encryptMessageWithGroupKey(
         msg,
-        mRoomId,
+        mRoomToken,
         chat::protocol::HostActorId,
         mUsername,
         chat::protocol::HostActorKind,
@@ -208,8 +236,8 @@ void HostSessionCore::sendLine(const std::string& line) {
 }
 
 void HostSessionCore::sendLineTo(const std::string& target, const std::string& line) {
-    // Host can privately address any current Client by name or id. The Server
-    // still only sees targetId and ciphertext, not the plaintext body.
+    // Host can privately address any current Client by name or id. The private
+    // target is stored inside the encrypted payload, so Server only broadcasts.
     const auto targetId = resolveClientId(trimCopy(target));
     if (targetId.empty()) {
         sendLine(line);
@@ -240,6 +268,35 @@ void HostSessionCore::sendLineTo(const std::string& target, const std::string& l
     if (sendRelayMessage(msg, chat::protocol::HostActorId, mUsername, chat::protocol::HostActorKind, targetId)) {
         chatEmit(mCallbacks.onMessage, msg.toJson());
     }
+}
+
+bool HostSessionCore::handleHostCommand(const std::string& line) {
+    // Moderation commands are local Host controls, not chat messages. They reuse
+    // the normal input box so CLI, WinUI, and Web wrappers get the same behavior.
+    std::istringstream input(trimCopy(line));
+    std::string command;
+    input >> command;
+    if (command != "/silence" && command != "/unsilence" && command != "/evict" && command != "/ban") {
+        return false;
+    }
+
+    std::string target;
+    input >> target;
+    if (target.empty()) {
+        chatEmit(mCallbacks.onError, "Usage: " + command + " <member-name-or-id>");
+        return true;
+    }
+
+    if (command == "/silence") {
+        setClientSilenced(target, true);
+    }
+    else if (command == "/unsilence") {
+        setClientSilenced(target, false);
+    }
+    else {
+        evictClient(target);
+    }
+    return true;
 }
 
 // Sends an image to all room members through encrypted Server relay.
@@ -305,9 +362,24 @@ bool HostSessionCore::sendRelayMessage(
         return false;
     }
 
+    Message outbound = msg;
+    if (!targetId.empty()) {
+        if (targetId == chat::protocol::HostActorId) {
+            chatEmit(mCallbacks.onError, "Cannot send a private message to yourself");
+            return false;
+        }
+        try {
+            outbound = wrapPairwiseForTarget(msg, targetId);
+        }
+        catch (const std::exception& e) {
+            chatEmit(mCallbacks.onError, std::string("Pairwise private send failed: ") + e.what());
+            return false;
+        }
+    }
+
     const auto envelope = chat::secure_relay::encryptMessageWithGroupKey(
-        msg,
-        mRoomId,
+        outbound,
+        mRoomToken,
         senderId,
         senderName,
         senderKind,
@@ -317,37 +389,394 @@ bool HostSessionCore::sendRelayMessage(
     return true;
 }
 
-bool HostSessionCore::sendGroupKeyToClient(const std::string& clientId, const std::string& clientPublicKey) {
-    // Host is the GKA coordinator: it wraps the current room group key to a
-    // single Client public key and asks the Server to forward the opaque result.
-    if (!chat::secure_relay::hasUsableGroupKey(mGroupKey)) {
-        chatEmit(mCallbacks.onError, "Room group key is not ready");
+Message HostSessionCore::wrapPairwiseForTarget(const Message& msg, const std::string& targetId) {
+    // Host uses the target's PKI-verified X25519 public key for the inner private
+    // layer. This keeps private sends fail-closed instead of silently downgrading
+    // to room-group-key-only delivery.
+    std::string targetPublicKey;
+    std::string targetFingerprint;
+    {
+        std::lock_guard<std::mutex> lock(mClientsMutex);
+        const auto publicKey = mClientPublicKeys.find(targetId);
+        const auto fingerprint = mClientIdentityFingerprints.find(targetId);
+        if (publicKey != mClientPublicKeys.end()) targetPublicKey = publicKey->second;
+        if (fingerprint != mClientIdentityFingerprints.end()) targetFingerprint = fingerprint->second;
+    }
+    if (targetPublicKey.empty() || targetFingerprint.empty()) {
+        throw std::runtime_error("target pairwise identity is not verified");
+    }
+    return chat::secure_relay::encryptMessageForPairwise(
+        msg,
+        mRoomToken,
+        chat::protocol::HostActorId,
+        targetId,
+        targetPublicKey,
+        mIdentity.fingerprint(),
+        targetFingerprint);
+}
+
+Message HostSessionCore::decryptPairwiseFromClient(const Message& msg) {
+    // Clients encrypt private messages to Host's member public key. Host accepts
+    // the inner payload only when the sender id has a verified certificate
+    // fingerprint recorded from join_room.
+    const auto senderId = msg.payload.value("relaySenderId", "");
+    if (senderId.empty() || senderId == chat::protocol::HostActorId) {
+        throw std::runtime_error("invalid pairwise sender");
+    }
+    std::string senderFingerprint;
+    {
+        std::lock_guard<std::mutex> lock(mClientsMutex);
+        const auto it = mClientIdentityFingerprints.find(senderId);
+        if (it != mClientIdentityFingerprints.end()) senderFingerprint = it->second;
+    }
+    if (senderFingerprint.empty()) {
+        throw std::runtime_error("sender pairwise identity is not verified");
+    }
+    auto inner = chat::secure_relay::decryptMessageFromPairwise(
+        msg,
+        mRoomToken,
+        senderId,
+        chat::protocol::HostActorId,
+        mMemberKeys.privateKey,
+        senderFingerprint,
+        mIdentity.fingerprint());
+    inner.payload["relaySenderId"] = senderId;
+    inner.payload["relaySenderKind"] = chat::protocol::ClientActorKind;
+    inner.payload["relaySenderName"] = msg.payload.value("relaySenderName", "");
+    inner.payload["relayTargetId"] = chat::protocol::HostActorId;
+    return inner;
+}
+
+bool HostSessionCore::rememberRelayEnvelope(const json& envelope) {
+    // Replay is different from decryption failure: a replayed ciphertext can be
+    // valid under AES-GCM. Track recent nonce/tag pairs so a Server cannot replay
+    // an old command, text, or attachment chunk in this session.
+    constexpr std::size_t maxRememberedRelayIds = 4096;
+    const auto replayId = chat::secure_relay::replayIdForEnvelope(envelope);
+    if (replayId.empty()) return true;
+    if (mRecentRelayIds.find(replayId) != mRecentRelayIds.end()) {
+        chatEmit(mCallbacks.onError, "Dropped replayed encrypted relay");
         return false;
     }
+    mRecentRelayIds.insert(replayId);
+    mRecentRelayOrder.push_back(replayId);
+    while (mRecentRelayOrder.size() > maxRememberedRelayIds) {
+        mRecentRelayIds.erase(mRecentRelayOrder.front());
+        mRecentRelayOrder.pop_front();
+    }
+    return true;
+}
+
+bool HostSessionCore::sendGroupStateToClient(
+    const std::string& clientId,
+    const std::string& clientPublicKey,
+    const json& groupState,
+    std::uint64_t epoch) {
+    // Host forwards the verified contribution set, not a Host-chosen raw key.
+    // The Client decrypts this state, verifies signatures, and derives K_G itself.
     if (!mWs || mWs->isClosed()) {
         chatEmit(mCallbacks.onStatus, "Signaling channel is not open yet");
         return false;
     }
 
-    auto envelope = chat::secure_relay::encryptGroupKeyForMember(
-        mGroupKey,
-        mRoomId,
+    auto envelope = chat::secure_relay::encryptGroupStateForMember(
+        groupState,
+        mRoomToken,
         clientId,
-        clientPublicKey);
+        clientPublicKey,
+        epoch);
+    // Host signs the final envelope so Client can reject any modified fields
+    // before accepting a room group key.
     mIdentity.signGroupKeyEnvelope(envelope);
     mWs->send(envelope.dump());
-    chatEmit(mCallbacks.onStatus, "Group key sent to " + displayNameForClient(clientId));
+    chatEmit(mCallbacks.onStatus, "GKA state sent to " + displayNameForClient(clientId));
     return true;
 }
 
 void HostSessionCore::rotateGroupKey(const std::string& reason) {
-    const auto groupKey = chat::secure_relay::generateGroupKey();
-    mGroupKey.assign(groupKey.begin(), groupKey.end());
-    chatEmit(mCallbacks.onStatus, "Room group key rotated: " + reason);
-    sendGroupKeyToAllClients();
+    // Rotation now starts a contributory GKA epoch. Host contributes randomness
+    // like every other member; it no longer selects K_G alone.
+    std::unordered_set<std::string> currentMembers;
+    {
+        std::lock_guard<std::mutex> lock(mClientsMutex);
+        for (const auto& [clientId, publicKey] : mClientPublicKeys) {
+            if (!publicKey.empty()) currentMembers.insert(clientId);
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(mGkaMutex);
+        ++mGroupKeyEpoch;
+        mPendingGkaEpoch = mGroupKeyEpoch;
+        mPendingGkaMembers = std::move(currentMembers);
+        mPendingGkaContributions.clear();
+        mPendingGkaContributions[chat::protocol::HostActorId] = makeLocalGkaContribution(mPendingGkaEpoch);
+        // A malicious or broken member must not hold the room forever. The
+        // watchdog will evict any Client still missing at this deadline.
+        mPendingGkaDeadline = std::chrono::steady_clock::now() + GkaContributionTimeout;
+    }
+    mGkaCv.notify_all();
+    chatEmit(mCallbacks.onStatus, "GKA epoch started: " + reason);
+    sendGkaRequestToClients();
+    tryCommitGkaEpoch();
 }
 
-void HostSessionCore::sendGroupKeyToAllClients() {
+void HostSessionCore::sendGkaRequestToClients() {
+    if (!mWs || mWs->isClosed()) {
+        chatEmit(mCallbacks.onStatus, "Signaling channel is not open yet");
+        return;
+    }
+    std::uint64_t epoch = 0;
+    {
+        std::lock_guard<std::mutex> lock(mGkaMutex);
+        epoch = mPendingGkaEpoch;
+    }
+    if (epoch == 0) return;
+    json msg = {
+        {"type", chat::secure_relay::GkaRequestType},
+        {"roomId", mRoomToken},
+        {"epoch", epoch}
+    };
+    mWs->send(msg.dump());
+}
+
+void HostSessionCore::startGkaTimeoutWorker() {
+    // Starts one lightweight watchdog for this Host session. It does no network
+    // work until rotateGroupKey() publishes a pending epoch and deadline.
+    {
+        std::lock_guard<std::mutex> lock(mGkaMutex);
+        mGkaTimeoutStop = false;
+    }
+    if (!mGkaTimeoutThread.joinable()) {
+        mGkaTimeoutThread = std::thread(&HostSessionCore::gkaTimeoutLoop, this);
+    }
+}
+
+void HostSessionCore::stopGkaTimeoutWorker() {
+    // Cancels any pending epoch and joins the watchdog so shutdown cannot leave a
+    // background thread holding callbacks or WebSocket state.
+    {
+        std::lock_guard<std::mutex> lock(mGkaMutex);
+        mGkaTimeoutStop = true;
+        mPendingGkaEpoch = 0;
+        mPendingGkaMembers.clear();
+        mPendingGkaContributions.clear();
+    }
+    mGkaCv.notify_all();
+    if (mGkaTimeoutThread.joinable() &&
+        mGkaTimeoutThread.get_id() != std::this_thread::get_id()) {
+        mGkaTimeoutThread.join();
+    }
+}
+
+void HostSessionCore::gkaTimeoutLoop() {
+    // Waits for the current GKA deadline. A new epoch or a successful commit
+    // wakes this loop through mGkaCv, so it only evicts members for the exact
+    // epoch that actually timed out.
+    std::unique_lock<std::mutex> lock(mGkaMutex);
+    while (!mGkaTimeoutStop) {
+        if (mPendingGkaEpoch == 0) {
+            mGkaCv.wait(lock, [this]() {
+                return mGkaTimeoutStop || mPendingGkaEpoch != 0;
+            });
+            continue;
+        }
+
+        const auto epoch = mPendingGkaEpoch;
+        const auto deadline = mPendingGkaDeadline;
+        const bool changed = mGkaCv.wait_until(lock, deadline, [this, epoch]() {
+            return mGkaTimeoutStop || mPendingGkaEpoch == 0 || mPendingGkaEpoch != epoch;
+        });
+        if (changed) continue;
+
+        lock.unlock();
+        evictGkaTimeoutMembers(epoch);
+        lock.lock();
+    }
+}
+
+void HostSessionCore::evictGkaTimeoutMembers(std::uint64_t epoch) {
+    // Converts a stalled GKA epoch into an explicit membership change. Missing
+    // contributors are removed and their current-room certificate fingerprints
+    // are banned, then a new epoch starts with the remaining members.
+    std::vector<std::string> missingMembers;
+    {
+        std::lock_guard<std::mutex> lock(mGkaMutex);
+        if (mPendingGkaEpoch != epoch) return;
+        for (const auto& memberId : mPendingGkaMembers) {
+            if (mPendingGkaContributions.find(memberId) == mPendingGkaContributions.end()) {
+                missingMembers.push_back(memberId);
+            }
+        }
+        if (missingMembers.empty()) return;
+        // This epoch cannot commit because at least one member stalled. Clear it
+        // before removing members; rotateGroupKey() will build a fresh epoch with
+        // the remaining current membership.
+        mPendingGkaEpoch = 0;
+        mPendingGkaMembers.clear();
+        mPendingGkaContributions.clear();
+    }
+
+    std::vector<std::string> removedNames;
+    std::vector<std::string> removedIds;
+    {
+        std::lock_guard<std::mutex> lock(mClientsMutex);
+        for (const auto& clientId : missingMembers) {
+            auto name = mClientNames.find(clientId);
+            if (name == mClientNames.end()) continue;
+
+            const auto displayName = name->second;
+            auto fingerprint = mClientIdentityFingerprints.find(clientId);
+            if (fingerprint != mClientIdentityFingerprints.end() && !fingerprint->second.empty()) {
+                mBannedIdentityFingerprints.insert(fingerprint->second);
+            }
+            mClientNames.erase(clientId);
+            mClientPublicKeys.erase(clientId);
+            mClientIdentityFingerprints.erase(clientId);
+            mClientIdentitySubjects.erase(clientId);
+            mClientIdentityObjects.erase(clientId);
+            mSilencedClientIds.erase(clientId);
+            removedNames.push_back(displayName.empty() ? clientId : displayName);
+            removedIds.push_back(clientId);
+        }
+    }
+
+    for (const auto& clientId : removedIds) {
+        rejectClient(clientId, "GKA contribution timeout");
+        mPendingTransfers.clear(clientId);
+    }
+
+    if (removedNames.empty()) return;
+    std::ostringstream names;
+    for (std::size_t i = 0; i < removedNames.size(); ++i) {
+        if (i != 0) names << ", ";
+        names << removedNames[i];
+    }
+    chatEmit(mCallbacks.onStatus, "GKA contribution timeout; evicted: " + names.str());
+    rotateGroupKey("GKA contribution timeout");
+}
+
+json HostSessionCore::makeLocalGkaContribution(std::uint64_t epoch) const {
+    const auto contribution = chat::secure_relay::generateGroupContribution();
+    json item = {
+        {"memberId", chat::protocol::HostActorId},
+        {"username", mUsername},
+        {"publicKey", mMemberKeys.publicKey},
+        {"contribution", contribution}
+    };
+    item["identity"] = mIdentity.signGkaContribution(
+        mRoomId,
+        epoch,
+        chat::protocol::HostActorId,
+        mUsername,
+        mMemberKeys.publicKey,
+        contribution);
+    item["fingerprint"] = mIdentity.fingerprint();
+    return item;
+}
+
+bool HostSessionCore::rememberGkaContribution(const json& contribution, const std::string& expectedMemberId) {
+    if (!contribution.is_object()) return false;
+    const auto memberId = contribution.value("memberId", "");
+    const auto username = contribution.value("username", memberId);
+    const auto publicKey = contribution.value("publicKey", "");
+    const auto secret = contribution.value("contribution", "");
+    const auto identity = contribution.find("identity");
+    if (memberId.empty() || memberId != expectedMemberId || publicKey.empty() || secret.empty() ||
+        identity == contribution.end() || !identity->is_object()) {
+        chatEmit(mCallbacks.onError, "Invalid GKA contribution from " + expectedMemberId);
+        return false;
+    }
+
+    std::uint64_t pendingEpoch = 0;
+    {
+        std::lock_guard<std::mutex> lock(mGkaMutex);
+        pendingEpoch = mPendingGkaEpoch;
+        if (pendingEpoch == 0 || mPendingGkaMembers.find(memberId) == mPendingGkaMembers.end()) {
+            chatEmit(mCallbacks.onError, "Dropped unexpected GKA contribution from " + memberId);
+            return false;
+        }
+    }
+
+    std::string knownPublicKey;
+    std::string knownName;
+    std::string knownFingerprint;
+    {
+        std::lock_guard<std::mutex> lock(mClientsMutex);
+        auto key = mClientPublicKeys.find(memberId);
+        auto name = mClientNames.find(memberId);
+        auto fp = mClientIdentityFingerprints.find(memberId);
+        if (key != mClientPublicKeys.end()) knownPublicKey = key->second;
+        if (name != mClientNames.end()) knownName = name->second;
+        if (fp != mClientIdentityFingerprints.end()) knownFingerprint = fp->second;
+    }
+    if (knownPublicKey != publicKey || (!knownName.empty() && knownName != username)) {
+        chatEmit(mCallbacks.onError, "GKA contribution identity does not match member state: " + memberId);
+        return false;
+    }
+
+    try {
+        const auto verified = mIdentity.verifyGkaContribution(
+            mRoomId,
+            pendingEpoch,
+            memberId,
+            username,
+            publicKey,
+            secret,
+            *identity);
+        if (!knownFingerprint.empty() && verified.fingerprint != knownFingerprint) {
+            throw std::runtime_error("contribution fingerprint does not match joined identity");
+        }
+        json stored = contribution;
+        stored["fingerprint"] = verified.fingerprint;
+        {
+            std::lock_guard<std::mutex> lock(mGkaMutex);
+            if (mPendingGkaEpoch != pendingEpoch ||
+                mPendingGkaMembers.find(memberId) == mPendingGkaMembers.end()) {
+                chatEmit(mCallbacks.onError, "Dropped stale GKA contribution from " + memberId);
+                return false;
+            }
+            mPendingGkaContributions[memberId] = stored;
+        }
+        mGkaCv.notify_all();
+        chatEmit(mCallbacks.onStatus, "GKA contribution verified: " + username + " / " + memberId);
+        return true;
+    }
+    catch (const std::exception& e) {
+        chatEmit(mCallbacks.onError, "GKA contribution rejected: " + memberId + ": " + e.what());
+        return false;
+    }
+}
+
+void HostSessionCore::tryCommitGkaEpoch() {
+    std::uint64_t epoch = 0;
+    json contributions = json::array();
+    {
+        std::lock_guard<std::mutex> lock(mGkaMutex);
+        if (mPendingGkaEpoch == 0 || mPendingGkaEpoch != mGroupKeyEpoch) return;
+        for (const auto& memberId : mPendingGkaMembers) {
+            if (mPendingGkaContributions.find(memberId) == mPendingGkaContributions.end()) {
+                return;
+            }
+        }
+        epoch = mPendingGkaEpoch;
+        for (const auto& [_, contribution] : mPendingGkaContributions) {
+            contributions.push_back(contribution);
+        }
+    }
+
+    json groupState = {
+        {"version", 3},
+        {"roomId", mRoomToken},
+        {"epoch", epoch},
+        {"contributions", contributions}
+    };
+
+    auto groupKey = chat::secure_relay::deriveGroupKeyFromContributions(
+        mRoomToken,
+        epoch,
+        contributions);
+
     std::vector<std::pair<std::string, std::string>> clients;
     {
         std::lock_guard<std::mutex> lock(mClientsMutex);
@@ -357,11 +786,21 @@ void HostSessionCore::sendGroupKeyToAllClients() {
         }
     }
 
-    // Server relays one opaque key envelope per member. It never receives the
-    // raw group key or participates in the GKA semantics.
-    for (const auto& [clientId, publicKey] : clients) {
-        sendGroupKeyToClient(clientId, publicKey);
+    {
+        std::lock_guard<std::mutex> lock(mGkaMutex);
+        if (mPendingGkaEpoch != epoch) return;
+        mGroupKey = std::move(groupKey);
+        mPendingGkaEpoch = 0;
+        mPendingGkaMembers.clear();
+        mPendingGkaContributions.clear();
     }
+    mGkaCv.notify_all();
+
+    for (const auto& [clientId, publicKey] : clients) {
+        sendGroupStateToClient(clientId, publicKey, groupState, epoch);
+    }
+    chatEmit(mCallbacks.onStatus, "Room group key ready");
+    announceVerifiedMembers();
 }
 
 bool HostSessionCore::sendAttachmentRelay(
@@ -372,7 +811,8 @@ bool HostSessionCore::sendAttachmentRelay(
     const std::string& mime,
     const std::string& targetId) {
     // Attachments are encrypted as metadata plus chunk messages. Passing a
-    // targetId switches the Server from broadcast relay to private relay.
+    // targetId remains inside encrypted payloads. Server broadcasts every relay
+    // frame, and the intended recipient opens the inner pairwise layer.
     const auto bytes = attachment::readFileBytes(filePath, kind);
     const auto actor = currentHostActorName();
     const auto targetName = targetId.empty() ? std::string() : displayNameForClient(targetId);
@@ -436,7 +876,7 @@ void HostSessionCore::handleSignalingMessage(const std::string& s) {
 
         if (type == "room_created") {
             chatEmit(mCallbacks.onStatus, "Room created: " + mRoomId);
-            chatEmit(mCallbacks.onStatus, "Group key ready");
+            rotateGroupKey("room created");
         }
         else if (type == "room_members") {
             std::ostringstream members;
@@ -463,6 +903,7 @@ void HostSessionCore::handleSignalingMessage(const std::string& s) {
             std::string clientId = j.value("clientId", "");
             std::string username = j.value("username", clientId);
             std::string publicKey = j.value("publicKey", "");
+            json identityObject;
             std::string identityFingerprint;
             std::string identitySubject;
             if (!clientId.empty() && publicKey.empty()) {
@@ -472,8 +913,11 @@ void HostSessionCore::handleSignalingMessage(const std::string& s) {
             }
             if (!clientId.empty()) {
                 try {
+                    // Host is the trust decision point for joining Clients. Server
+                    // forwarded this identity object but did not verify it.
                     auto identity = j.find("identity");
                     if (identity == j.end()) throw std::runtime_error("client identity is missing");
+                    identityObject = *identity;
                     const auto verified = mIdentity.verifyJoinRoom(mRoomId, username, publicKey, *identity);
                     identityFingerprint = verified.fingerprint;
                     identitySubject = verified.subject;
@@ -485,6 +929,17 @@ void HostSessionCore::handleSignalingMessage(const std::string& s) {
                     return;
                 }
             }
+            bool bannedCertificate = false;
+            {
+                std::lock_guard<std::mutex> lock(mClientsMutex);
+                bannedCertificate = !identityFingerprint.empty() &&
+                    mBannedIdentityFingerprints.find(identityFingerprint) != mBannedIdentityFingerprints.end();
+            }
+            if (bannedCertificate) {
+                chatEmit(mCallbacks.onStatus, "Rejected banned member certificate: " + username + " / " + identityFingerprint);
+                rejectClient(clientId, "member certificate is banned");
+                return;
+            }
             {
                 std::lock_guard<std::mutex> lock(mClientsMutex);
                 mClientNames[clientId] = username;
@@ -492,24 +947,63 @@ void HostSessionCore::handleSignalingMessage(const std::string& s) {
                 if (!identityFingerprint.empty()) {
                     mClientIdentityFingerprints[clientId] = identityFingerprint;
                     mClientIdentitySubjects[clientId] = identitySubject;
+                    mClientIdentityObjects[clientId] = identityObject;
                 }
             }
             if (!clientId.empty()) {
                 chatEmit(mCallbacks.onStatus, "Client joined: " + username);
+                // A new member means a new room group key so the member receives
+                // only the current key version through its verified public key.
                 rotateGroupKey("member joined");
-                announceVerifiedMembers();
             }
         }
         else if (type == "client_left") {
             const std::string clientId = j.value("clientId", "");
-            removePeer(clientId);
+            removeClient(clientId);
+        }
+        else if (type == chat::secure_relay::GkaContributionType) {
+            const auto epoch = j.value("epoch", 0ULL);
+            const auto senderId = j.value("senderId", "");
+            std::uint64_t pendingEpoch = 0;
+            {
+                std::lock_guard<std::mutex> lock(mGkaMutex);
+                pendingEpoch = mPendingGkaEpoch;
+            }
+            if (pendingEpoch == 0 || epoch != pendingEpoch) {
+                chatEmit(mCallbacks.onError, "Dropped stale GKA contribution from " + senderId);
+                return;
+            }
+            auto contribution = chat::secure_relay::decryptGkaContributionForHost(
+                j,
+                mRoomToken,
+                senderId,
+                mMemberKeys.privateKey);
+            if (rememberGkaContribution(contribution, senderId)) {
+                tryCommitGkaEpoch();
+            }
         }
         else if (type == chat::secure_relay::EnvelopeType) {
+            // Host decrypts application relay exactly like a normal member.
             if (!chat::secure_relay::hasUsableGroupKey(mGroupKey)) {
                 chatEmit(mCallbacks.onError, "Room group key is not ready");
                 return;
             }
-            const auto msg = chat::secure_relay::decryptMessageWithGroupKey(j, mRoomId, mGroupKey);
+            if (!rememberRelayEnvelope(j)) return;
+            auto msg = chat::secure_relay::decryptMessageWithGroupKey(j, mRoomToken, mGroupKey);
+            const auto relayTargetId = msg.payload.value("relayTargetId", "");
+            if (!relayTargetId.empty() && relayTargetId != chat::protocol::HostActorId) {
+                chatEmit(mCallbacks.onError, "Dropped encrypted relay for another member");
+                return;
+            }
+            if (msg.type == chat::secure_relay::PairwisePrivateType) {
+                try {
+                    msg = decryptPairwiseFromClient(msg);
+                }
+                catch (const std::exception& e) {
+                    chatEmit(mCallbacks.onError, std::string("Pairwise private receive failed: ") + e.what());
+                    return;
+                }
+            }
             handleRelayMessage(msg);
         }
         else if (type == "error") {
@@ -528,26 +1022,136 @@ void HostSessionCore::handleSignalingMessage(const std::string& s) {
 }
 
 // Removes a client member and clears any staged attachment transfer from it.
-void HostSessionCore::removePeer(const std::string& id) {
+void HostSessionCore::removeClient(const std::string& id) {
     if (id.empty()) return;
     if (mStopped.load()) return;
 
     std::string displayName = id;
+    bool knownClient = false;
     {
         std::lock_guard<std::mutex> lock(mClientsMutex);
         auto name = mClientNames.find(id);
-        if (name != mClientNames.end()) displayName = name->second;
-        mClientNames.erase(id);
-        mClientPublicKeys.erase(id);
-        mClientIdentityFingerprints.erase(id);
-        mClientIdentitySubjects.erase(id);
+        if (name != mClientNames.end()) {
+            displayName = name->second;
+            knownClient = true;
+        }
+        knownClient = mClientNames.erase(id) > 0 || knownClient;
+        knownClient = mClientPublicKeys.erase(id) > 0 || knownClient;
+        knownClient = mClientIdentityFingerprints.erase(id) > 0 || knownClient;
+        knownClient = mClientIdentitySubjects.erase(id) > 0 || knownClient;
+        knownClient = mClientIdentityObjects.erase(id) > 0 || knownClient;
+        mSilencedClientIds.erase(id);
+    }
+    if (!knownClient) {
+        // A malicious or confused Server may report stale/unknown client_left.
+        // Ignoring it avoids unnecessary group-key rotation and UI churn.
+        chatEmit(mCallbacks.onStatus, "Ignored unknown client_left: " + id);
+        return;
     }
     mPendingTransfers.clear(id);
     chatEmit(mCallbacks.onStatus, "Client left: " + displayName);
+    // Leaving members must not read future messages, so Host rotates K_G.
     rotateGroupKey("member left");
 }
 
+void HostSessionCore::setClientSilenced(const std::string& target, bool silenced) {
+    if (!mWs || mWs->isClosed()) {
+        chatEmit(mCallbacks.onStatus, "Signaling channel is not open yet");
+        return;
+    }
+
+    const auto clientId = resolveClientId(trimCopy(target));
+    if (clientId.empty() || clientId == chat::protocol::HostActorId) {
+        chatEmit(mCallbacks.onError, "Target member is not a client");
+        return;
+    }
+
+    std::string displayName;
+    bool foundClient = false;
+    {
+        std::lock_guard<std::mutex> lock(mClientsMutex);
+        auto name = mClientNames.find(clientId);
+        if (name != mClientNames.end()) {
+            foundClient = true;
+            displayName = name->second;
+        }
+        if (foundClient) {
+            if (silenced) {
+                mSilencedClientIds.insert(clientId);
+            }
+            else {
+                mSilencedClientIds.erase(clientId);
+            }
+        }
+    }
+    if (!foundClient) {
+        chatEmit(mCallbacks.onError, "Target client not found: " + target);
+        return;
+    }
+
+    sendClientModeration(silenced ? "silence_client" : "unsilence_client", clientId);
+    chatEmit(mCallbacks.onStatus, std::string(silenced ? "Client silenced: " : "Client unsilenced: ") + displayName);
+}
+
+void HostSessionCore::evictClient(const std::string& target) {
+    if (!mWs || mWs->isClosed()) {
+        chatEmit(mCallbacks.onStatus, "Signaling channel is not open yet");
+        return;
+    }
+
+    const auto clientId = resolveClientId(trimCopy(target));
+    if (clientId.empty() || clientId == chat::protocol::HostActorId) {
+        chatEmit(mCallbacks.onError, "Target member is not a client");
+        return;
+    }
+
+    std::string displayName;
+    std::string fingerprint;
+    bool foundClient = false;
+    {
+        std::lock_guard<std::mutex> lock(mClientsMutex);
+        auto name = mClientNames.find(clientId);
+        if (name != mClientNames.end()) {
+            foundClient = true;
+            displayName = name->second;
+        }
+        if (foundClient) {
+            auto identity = mClientIdentityFingerprints.find(clientId);
+            if (identity != mClientIdentityFingerprints.end()) {
+                fingerprint = identity->second;
+                mBannedIdentityFingerprints.insert(fingerprint);
+            }
+        }
+    }
+    if (!foundClient) {
+        chatEmit(mCallbacks.onError, "Target client not found: " + target);
+        return;
+    }
+
+    rejectClient(clientId, "member evicted by host");
+    chatEmit(mCallbacks.onStatus, "Client evicted: " + displayName);
+    if (!fingerprint.empty()) {
+        chatEmit(mCallbacks.onStatus, "Banned member certificate for this room: " + fingerprint);
+    }
+    removeClient(clientId);
+}
+
+void HostSessionCore::sendClientModeration(const std::string& type, const std::string& clientId) {
+    if (clientId.empty() || !mWs || mWs->isClosed()) {
+        chatEmit(mCallbacks.onStatus, "Signaling channel is not open yet");
+        return;
+    }
+    json msg = {
+        {"type", type},
+        {"roomId", mRoomToken},
+        {"targetId", clientId}
+    };
+    mWs->send(msg.dump());
+}
+
 void HostSessionCore::handleRelayMessage(const Message& msg) {
+    // member_identity is a Host-originated control message sent to Clients only;
+    // if it loops back, the Host ignores it.
     if (msg.type == "member_identity") {
         return;
     }
@@ -560,6 +1164,8 @@ void HostSessionCore::handleRelayMessage(const Message& msg) {
     attachment::Kind kind = attachment::Kind::Text;
     const auto senderKey = actorIdFromMessage(msg);
     if (attachmentKindForMeta(msg.type, kind)) {
+        // Metadata opens a receive slot. The following binary chunks must carry
+        // the same transferId or they are rejected.
         const auto transferId = attachment::transferIdFromMessage(msg);
         const auto pending = mPendingTransfers.stage(
             senderKey,
@@ -591,6 +1197,8 @@ void HostSessionCore::handleRelayMessage(const Message& msg) {
 }
 
 void HostSessionCore::handleRelayBinaryChunk(const std::string& senderKey, const Message& msg) {
+    // Binary chunks are already decrypted application Messages here. This function
+    // checks transfer continuity and appends bytes to the local cache file.
     std::string transferId;
     try {
         transferId = attachment::transferIdFromMessage(msg);
@@ -665,7 +1273,7 @@ void HostSessionCore::rejectClient(const std::string& clientId, const std::strin
     if (clientId.empty() || !mWs || mWs->isClosed()) return;
     json msg = {
         {"type", "reject_client"},
-        {"roomId", mRoomId},
+        {"roomId", mRoomToken},
         {"targetId", clientId},
         {"reason", reason}
     };
@@ -676,8 +1284,10 @@ void HostSessionCore::announceVerifiedMember(
     const std::string& memberId,
     const std::string& displayName,
     const std::string& fingerprint,
-    const std::string& subject) {
-    if (memberId.empty() || fingerprint.empty()) return;
+    const std::string& subject,
+    const std::string& publicKey,
+    const json& identity) {
+    if (memberId.empty() || fingerprint.empty() || publicKey.empty() || !identity.is_object()) return;
 
     Message msg;
     msg.type = "member_identity";
@@ -687,31 +1297,46 @@ void HostSessionCore::announceVerifiedMember(
     msg.payload["displayName"] = displayName.empty() ? memberId : displayName;
     msg.payload["fingerprint"] = fingerprint;
     msg.payload["subject"] = subject;
+    msg.payload["publicKey"] = publicKey;
+    msg.payload["identity"] = identity;
     msg.payload["state"] = "verified";
     msg.payload["verifiedBy"] = chat::protocol::HostActorId;
 
     // The announcement is an encrypted control message. Server can relay it but
-    // cannot read or forge the certificate fingerprint inside the AEAD payload.
+    // cannot read it. Clients still verify the embedded identity signature so an
+    // untrusted Host cannot silently substitute another member's public key.
     sendRelayMessage(msg, chat::protocol::HostActorId, mUsername, chat::protocol::HostActorKind, "");
 }
 
 void HostSessionCore::announceVerifiedMembers() {
-    std::vector<std::tuple<std::string, std::string, std::string, std::string>> members;
+    std::vector<std::tuple<std::string, std::string, std::string, std::string, std::string, json>> members;
+    members.emplace_back(
+        chat::protocol::HostActorId,
+        mUsername,
+        mIdentity.fingerprint(),
+        mIdentity.subject(),
+        mMemberKeys.publicKey,
+        mIdentity.signJoinRoom(mRoomId, mUsername, mMemberKeys.publicKey));
     {
         std::lock_guard<std::mutex> lock(mClientsMutex);
-        members.reserve(mClientIdentityFingerprints.size());
+        members.reserve(members.size() + mClientIdentityFingerprints.size());
         for (const auto& [memberId, fingerprint] : mClientIdentityFingerprints) {
             const auto name = mClientNames.find(memberId);
             const auto subject = mClientIdentitySubjects.find(memberId);
+            const auto publicKey = mClientPublicKeys.find(memberId);
+            const auto identity = mClientIdentityObjects.find(memberId);
+            if (publicKey == mClientPublicKeys.end() || identity == mClientIdentityObjects.end()) continue;
             members.emplace_back(
                 memberId,
                 name == mClientNames.end() ? memberId : name->second,
                 fingerprint,
-                subject == mClientIdentitySubjects.end() ? std::string() : subject->second);
+                subject == mClientIdentitySubjects.end() ? std::string() : subject->second,
+                publicKey->second,
+                identity->second);
         }
     }
 
-    for (const auto& [memberId, displayName, fingerprint, subject] : members) {
-        announceVerifiedMember(memberId, displayName, fingerprint, subject);
+    for (const auto& [memberId, displayName, fingerprint, subject, publicKey, identity] : members) {
+        announceVerifiedMember(memberId, displayName, fingerprint, subject, publicKey, identity);
     }
 }

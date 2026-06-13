@@ -1,3 +1,5 @@
+// Main WinUI window. This file handles user input, visual state, attachment
+// preview policy, and event dispatch from the C++ native chat core.
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
@@ -30,13 +32,21 @@ public sealed partial class MainWindow : Window
         Join
     }
 
+    // 保存 native 回调委托的字段必须一直活着；如果只创建局部变量，
+    // .NET GC 可能回收委托，C++ 再回调时就会崩溃或丢事件。
     private readonly NativeMethods.ChatEventCallback callback;
     private readonly DispatcherQueue dispatcherQueue;
     private readonly DispatcherTimer infoBarTimer = new();
+    // WinUI 不直接维护真正的房间状态，真正状态在 C++ core 和 Server。
+    // 这里保存的是界面需要显示和点击的成员快照。
     private readonly HashSet<string> participants = new(StringComparer.OrdinalIgnoreCase);
+    // 这三个集合组成附件预览状态机：
+    // Unknown 默认不自动预览；Verified 表示 PKI 已验证；Trusted/Blocked 是用户在当前房间的临时选择。
     private readonly HashSet<string> trustedAttachmentMembers = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> blockedAttachmentMembers = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, VerifiedMemberInfo> verifiedAttachmentMembers = new(StringComparer.OrdinalIgnoreCase);
+    // native core 先回调附件 metadata，再回调解密后的本地缓存路径。
+    // 这里用队列把“来源成员”暂存起来，等真正渲染附件卡片时取出。
     private readonly Dictionary<string, Queue<AttachmentSenderInfo>> pendingAttachmentSenders = new(StringComparer.OrdinalIgnoreCase);
     private SessionMode sessionMode = SessionMode.None;
     private bool sidebarVisible = true;
@@ -66,6 +76,8 @@ public sealed partial class MainWindow : Window
     private bool isClosing;
 
     private static readonly NativeMethods.ChatEventCallback NoOpCallback = (_, _, _) => { };
+    // 附件预览信任状态只影响 WinUI 是否自动预览，不影响加解密和传输。
+    // 加解密仍由 C++ secure relay 和 group key 完成。
     private enum AttachmentMemberState
     {
         Unknown,
@@ -112,6 +124,7 @@ public sealed partial class MainWindow : Window
             await FadeOutInfoBarAsync();
         };
 
+        // C++ native.dll 只把事件字符串交给 C#；UI 更新必须切回 WinUI UI 线程。
         callback = OnNativeEvent;
         NativeMethods.chat_set_event_callback(callback, IntPtr.Zero);
 
@@ -133,8 +146,10 @@ public sealed partial class MainWindow : Window
     {
         if (isClosing) return;
 
+        // native.dll 传来的 UTF-8 指针只在回调期间可靠，所以先复制成 C# string。
         var kind = Marshal.PtrToStringUTF8(kindPtr) ?? "status";
         var message = Marshal.PtrToStringUTF8(messagePtr) ?? "";
+        // WinUI 控件只能在 UI 线程访问；DispatcherQueue 相当于把工作投递回主线程。
         dispatcherQueue.TryEnqueue(() =>
         {
             if (!isClosing) AddLine(kind, message);
@@ -149,6 +164,7 @@ public sealed partial class MainWindow : Window
 
         try
         {
+            // 先把回调换成空实现，避免窗口销毁后 native core 继续向旧 UI 派发事件。
             NativeMethods.chat_set_event_callback(NoOpCallback, IntPtr.Zero);
         }
         catch
@@ -170,8 +186,8 @@ public sealed partial class MainWindow : Window
             }
         });
 
-        // Native WebSocket shutdown can occasionally wait on network teardown. Keep
-        // the UI close path bounded so the window does not appear stuck.
+        // native WebSocket 关闭偶尔会等待网络释放；这里设置一个兜底退出，
+        // 防止用户点关闭后窗口长时间卡住。
         System.Threading.Tasks.Task.Run(async () =>
         {
             await System.Threading.Tasks.Task.Delay(1200);
@@ -189,7 +205,8 @@ public sealed partial class MainWindow : Window
         }
 
         ClearAttachmentMemberStates();
-        // Host is a participant now; only Server owns listening and TLS setup.
+        // Host 只是第一个聊天成员/房间管理者，不负责监听端口。
+        // 监听、TLS/WSS 和 relay 都由外部 Server 进程处理。
         var ok = NativeMethods.chat_host_start(
             serverUrl,
             HostRoomBox.Text.Trim(),
@@ -208,6 +225,8 @@ public sealed partial class MainWindow : Window
     private void Join_Click(object sender, RoutedEventArgs e)
     {
         ClearAttachmentMemberStates();
+        // Join 和 Host 都调用 native.dll。C# 只负责收集 UI 输入，
+        // PKI、GKA、WebSocket 和 encrypted relay 都在 C++ core 中执行。
         var ok = NativeMethods.chat_join_start(
             JoinUrlBox.Text.Trim(),
             JoinRoomBox.Text.Trim(),
@@ -245,6 +264,8 @@ public sealed partial class MainWindow : Window
 
     private void SendSelectedMode()
     {
+        // 发送按钮根据下拉框切换文本、图片、普通文件或语音。
+        // 文件类消息先打开系统文件选择器，再把本地路径交给 native core 加密发送。
         var mode = SelectedSendMode();
         if (mode == "Image")
         {
@@ -304,6 +325,7 @@ public sealed partial class MainWindow : Window
         if (file is null) return;
         var target = PrivateTargetBox.Text.Trim();
 
+        // target 为空表示群发；target 非空时，native core 会解析成员 name/id 并走私发 relay。
         _ = kind switch
         {
             FileKind.Image => target.Length == 0
@@ -404,6 +426,8 @@ public sealed partial class MainWindow : Window
         var sender = TakeAttachmentSender(kind);
         var sizeBytes = File.Exists(path) ? new FileInfo(path).Length : 0;
         var isOwnLocalAttachment = SenderOwnsAttachment(sender, path);
+        // 这里的 path 已经是 native core 解密后的本地缓存文件。
+        // UI 层仍然把它当作不可信文件，先计算来源和策略，再决定是否预览。
         var previewInfo = new AttachmentPreviewInfo(
             kind,
             path,
@@ -432,9 +456,13 @@ public sealed partial class MainWindow : Window
 
     private bool ShouldAutoPreviewAttachment(AttachmentPreviewInfo info)
     {
+        // 普通文件永不自动打开，避免把未知格式交给系统关联程序。
         if (info.Kind == "file") return false;
+        // 自己刚选择发送的本地文件可以按用户设置预览。
         if (info.IsOwnLocalAttachment) return info.Kind == "image" ? autoPreviewImages : autoLoadAudio;
+        // Unknown 和 Blocked 都禁止自动进入图片/音频解码器。
         if (info.MemberState is AttachmentMemberState.Unknown or AttachmentMemberState.Blocked) return false;
+        // 默认更保守：PKI Verified 只能证明身份，仍需用户手动标记 Trusted 才自动预览。
         if (onlyTrustedAttachmentPreview && info.MemberState != AttachmentMemberState.Trusted) return false;
         return info.Kind == "image" ? autoPreviewImages : autoLoadAudio;
     }
@@ -521,6 +549,7 @@ public sealed partial class MainWindow : Window
         {
             if (info.Kind == "image")
             {
+                // 图片预览前先解析尺寸和像素数，避免超大图片拖垮 UI 或解码器。
                 ValidateImagePreview(info.Path, info.SizeBytes);
                 preview = new Image
                 {
@@ -534,6 +563,7 @@ public sealed partial class MainWindow : Window
 
             if (info.Kind == "voice")
             {
+                // 音频只支持受限 WAV 预览，先检查采样率、声道数、位深和时长。
                 ValidateWavPreview(info.Path, info.SizeBytes);
                 preview = new MediaPlayerElement
                 {
@@ -563,6 +593,7 @@ public sealed partial class MainWindow : Window
 
     private void ValidateImagePreview(string path, long sizeBytes)
     {
+        // 这些限制只保护 WinUI 预览路径；协议层附件大小限制在 C++ core 中。
         if (sizeBytes <= 0) throw new InvalidDataException("empty image file");
         if (sizeBytes > MaxPreviewImageBytes) throw new InvalidDataException("image is too large for inline preview");
 
@@ -580,6 +611,7 @@ public sealed partial class MainWindow : Window
 
     private void ValidateWavPreview(string path, long sizeBytes)
     {
+        // WAV 解析只读取文件头和 chunk 结构，不做杀毒或复杂格式沙箱。
         if (sizeBytes <= 0) throw new InvalidDataException("empty audio file");
         if (sizeBytes > MaxPreviewAudioBytes) throw new InvalidDataException("audio is too large for inline preview");
 
@@ -597,6 +629,7 @@ public sealed partial class MainWindow : Window
     {
         if (string.IsNullOrWhiteSpace(sender.DisplayName) && string.IsNullOrWhiteSpace(sender.ActorId)) return;
 
+        // metadata 回调和文件路径回调是分开的；按附件种类排队可保持顺序对应。
         var kind = type.ToLowerInvariant() switch
         {
             "image_meta" => "image",
@@ -631,6 +664,7 @@ public sealed partial class MainWindow : Window
 
     private AttachmentMemberState AttachmentMemberStateForSender(AttachmentSenderInfo sender)
     {
+        // actorId 优先，displayName 兜底。这样成员改名或重名时尽量使用稳定 id。
         var keys = AttachmentTrustKeys(sender).ToList();
         if (keys.Any(key => blockedAttachmentMembers.Contains(key))) return AttachmentMemberState.Blocked;
         var verified = keys.Any(key => verifiedAttachmentMembers.ContainsKey(key));
@@ -713,6 +747,8 @@ public sealed partial class MainWindow : Window
 
     private void ToggleTrustedParticipant(string participant)
     {
+        // Trusted 是用户在当前房间内的 UI 选择，不写入全局信任库。
+        // 离开房间后 ClearAttachmentMemberStates 会清空它。
         var key = PrimaryParticipantKey(participant);
         if (key.Length == 0) return;
 
@@ -731,6 +767,7 @@ public sealed partial class MainWindow : Window
 
     private void ToggleBlockedParticipant(string participant)
     {
+        // Blocked 优先级高于 Trusted，用来临时禁止某成员附件自动预览。
         var key = PrimaryParticipantKey(participant);
         if (key.Length == 0) return;
 
@@ -744,6 +781,8 @@ public sealed partial class MainWindow : Window
 
     private void MarkVerifiedMember(string displayName, string memberId, string fingerprint, string subject = "")
     {
+        // Verified 来自 C++ core 的 PKI 验证结果：证书链、签名和指纹已经通过 native 层检查。
+        // WinUI 只保存显示名、成员 id 和指纹，用于成员列表颜色和复制指纹。
         var normalizedId = memberId.Trim();
         var normalizedName = displayName.Trim();
         var normalizedFingerprint = fingerprint.Trim();
@@ -765,6 +804,8 @@ public sealed partial class MainWindow : Window
 
     private bool TryMarkVerifiedMemberStatus(string message)
     {
+        // native core 用 status 字符串把“成员 PKI 已验证”通知 UI。
+        // 这里解析格式并转换成 WinUI 成员状态。
         const string prefix = "PKI member verified: ";
         if (!message.StartsWith(prefix, StringComparison.Ordinal)) return false;
 
@@ -778,6 +819,7 @@ public sealed partial class MainWindow : Window
 
     private bool TryRememberLocalIdentityStatus(string message)
     {
+        // 本地身份指纹可能先于 joined/room_members 事件到达，先暂存再补到自己的成员行。
         const string prefix = "PKI identity ready: ";
         if (!message.StartsWith(prefix, StringComparison.Ordinal)) return false;
 
@@ -831,6 +873,7 @@ public sealed partial class MainWindow : Window
 
     private void PruneAttachmentMemberStates()
     {
+        // 房间成员变化后，清理已经离开的成员的 Trusted/Blocked/Verified UI 状态。
         var liveKeys = participants.SelectMany(ParticipantTrustKeys)
             .Where(key => key.Length > 0)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -864,6 +907,7 @@ public sealed partial class MainWindow : Window
 
     private void CopyParticipantFingerprint(string participant)
     {
+        // 成员列表点击复制完整证书指纹；界面只显示 name / id，避免长指纹破坏布局。
         var info = VerifiedInfoForParticipant(participant);
         if (info is null || string.IsNullOrWhiteSpace(info.Fingerprint))
         {

@@ -1,3 +1,5 @@
+// WebSocket client TLS configuration helpers. Host/Client use this when
+// connecting to WSS or to an mTLS reverse proxy.
 #pragma once
 
 #include <rtc/rtc.hpp>

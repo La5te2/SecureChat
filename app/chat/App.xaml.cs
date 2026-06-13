@@ -1,3 +1,5 @@
+// WinUI application bootstrap. It creates MainWindow and writes managed crash
+// reports so UI failures can be diagnosed after the window closes.
 using Microsoft.UI.Xaml;
 using System;
 using System.IO;
@@ -13,6 +15,7 @@ public partial class App : Application
     public App()
     {
         InitializeComponent();
+        // 三类托管异常都写入 cr/，方便验收或调试时定位 UI 崩溃来源。
         UnhandledException += (_, e) => WriteCrashReport("Application.UnhandledException", e.Exception);
         AppDomain.CurrentDomain.UnhandledException += (_, e) =>
             WriteCrashReport("AppDomain.UnhandledException", e.ExceptionObject as Exception);
@@ -25,6 +28,7 @@ public partial class App : Application
 
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
+        // WinUI 应用真正的主窗口在这里创建；界面逻辑都在 MainWindow.xaml.cs。
         window = new MainWindow();
         window.Activate();
     }
@@ -33,6 +37,7 @@ public partial class App : Application
     {
         try
         {
+            // 日志写在程序目录下，避免依赖额外服务；写失败时吞掉异常，防止二次崩溃。
             var directory = Path.Combine(AppContext.BaseDirectory, "cr");
             Directory.CreateDirectory(directory);
             var fileName = DateTime.Now.ToString("yyyyMMdd_HHmmss_fff") + ".log";
