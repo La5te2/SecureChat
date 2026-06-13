@@ -8,6 +8,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -118,9 +119,7 @@ void HostSessionCore::start() {
         if (chat::websocket_config::hasClientCertificate(mWsConfig)) {
             chatEmit(mCallbacks.onStatus, "mTLS client certificate ready");
         }
-        if (mIdentity.enabled()) {
-            chatEmit(mCallbacks.onStatus, "PKI identity ready: " + mIdentity.fingerprint());
-        }
+        chatEmit(mCallbacks.onStatus, "PKI identity ready: " + mIdentity.fingerprint());
         json msg = {
             {"type", "create_room"},
             {"roomId", mRoomId},
@@ -335,9 +334,7 @@ bool HostSessionCore::sendGroupKeyToClient(const std::string& clientId, const st
         mRoomId,
         clientId,
         clientPublicKey);
-    if (mIdentity.enabled()) {
-        mIdentity.signGroupKeyEnvelope(envelope);
-    }
+    mIdentity.signGroupKeyEnvelope(envelope);
     mWs->send(envelope.dump());
     chatEmit(mCallbacks.onStatus, "Group key sent to " + displayNameForClient(clientId));
     return true;
@@ -466,17 +463,21 @@ void HostSessionCore::handleSignalingMessage(const std::string& s) {
             std::string clientId = j.value("clientId", "");
             std::string username = j.value("username", clientId);
             std::string publicKey = j.value("publicKey", "");
+            std::string identityFingerprint;
+            std::string identitySubject;
             if (!clientId.empty() && publicKey.empty()) {
                 chatEmit(mCallbacks.onError, "Client public key is missing: " + username);
                 rejectClient(clientId, "client public key is missing");
                 return;
             }
-            if (!clientId.empty() && mIdentity.enabled()) {
+            if (!clientId.empty()) {
                 try {
                     auto identity = j.find("identity");
                     if (identity == j.end()) throw std::runtime_error("client identity is missing");
-                    mIdentity.verifyJoinRoom(mRoomId, username, publicKey, *identity);
-                    chatEmit(mCallbacks.onStatus, "Client identity verified: " + username);
+                    const auto verified = mIdentity.verifyJoinRoom(mRoomId, username, publicKey, *identity);
+                    identityFingerprint = verified.fingerprint;
+                    identitySubject = verified.subject;
+                    chatEmit(mCallbacks.onStatus, "PKI member verified: " + username + " / " + clientId + " / " + identityFingerprint);
                 }
                 catch (const std::exception& e) {
                     chatEmit(mCallbacks.onError, "Client identity rejected: " + username + ": " + e.what());
@@ -488,10 +489,15 @@ void HostSessionCore::handleSignalingMessage(const std::string& s) {
                 std::lock_guard<std::mutex> lock(mClientsMutex);
                 mClientNames[clientId] = username;
                 if (!publicKey.empty()) mClientPublicKeys[clientId] = publicKey;
+                if (!identityFingerprint.empty()) {
+                    mClientIdentityFingerprints[clientId] = identityFingerprint;
+                    mClientIdentitySubjects[clientId] = identitySubject;
+                }
             }
             if (!clientId.empty()) {
                 chatEmit(mCallbacks.onStatus, "Client joined: " + username);
                 rotateGroupKey("member joined");
+                announceVerifiedMembers();
             }
         }
         else if (type == "client_left") {
@@ -533,6 +539,8 @@ void HostSessionCore::removePeer(const std::string& id) {
         if (name != mClientNames.end()) displayName = name->second;
         mClientNames.erase(id);
         mClientPublicKeys.erase(id);
+        mClientIdentityFingerprints.erase(id);
+        mClientIdentitySubjects.erase(id);
     }
     mPendingTransfers.clear(id);
     chatEmit(mCallbacks.onStatus, "Client left: " + displayName);
@@ -540,6 +548,10 @@ void HostSessionCore::removePeer(const std::string& id) {
 }
 
 void HostSessionCore::handleRelayMessage(const Message& msg) {
+    if (msg.type == "member_identity") {
+        return;
+    }
+
     if (msg.type == "text") {
         chatEmit(mCallbacks.onMessage, msg.toJson());
         return;
@@ -658,4 +670,48 @@ void HostSessionCore::rejectClient(const std::string& clientId, const std::strin
         {"reason", reason}
     };
     mWs->send(msg.dump());
+}
+
+void HostSessionCore::announceVerifiedMember(
+    const std::string& memberId,
+    const std::string& displayName,
+    const std::string& fingerprint,
+    const std::string& subject) {
+    if (memberId.empty() || fingerprint.empty()) return;
+
+    Message msg;
+    msg.type = "member_identity";
+    msg.from = currentHostActorName();
+    setCurrentHostActorMetadata(msg);
+    msg.payload["memberId"] = memberId;
+    msg.payload["displayName"] = displayName.empty() ? memberId : displayName;
+    msg.payload["fingerprint"] = fingerprint;
+    msg.payload["subject"] = subject;
+    msg.payload["state"] = "verified";
+    msg.payload["verifiedBy"] = chat::protocol::HostActorId;
+
+    // The announcement is an encrypted control message. Server can relay it but
+    // cannot read or forge the certificate fingerprint inside the AEAD payload.
+    sendRelayMessage(msg, chat::protocol::HostActorId, mUsername, chat::protocol::HostActorKind, "");
+}
+
+void HostSessionCore::announceVerifiedMembers() {
+    std::vector<std::tuple<std::string, std::string, std::string, std::string>> members;
+    {
+        std::lock_guard<std::mutex> lock(mClientsMutex);
+        members.reserve(mClientIdentityFingerprints.size());
+        for (const auto& [memberId, fingerprint] : mClientIdentityFingerprints) {
+            const auto name = mClientNames.find(memberId);
+            const auto subject = mClientIdentitySubjects.find(memberId);
+            members.emplace_back(
+                memberId,
+                name == mClientNames.end() ? memberId : name->second,
+                fingerprint,
+                subject == mClientIdentitySubjects.end() ? std::string() : subject->second);
+        }
+    }
+
+    for (const auto& [memberId, displayName, fingerprint, subject] : members) {
+        announceVerifiedMember(memberId, displayName, fingerprint, subject);
+    }
 }

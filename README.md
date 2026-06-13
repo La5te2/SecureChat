@@ -28,8 +28,8 @@ SecureChat 当前定位为课程/论文实验系统；公网运行时应按本�
 - 信令支持 `ws://` insecure mode 和 `wss://` secure mode。`ws://` 配置简单、便于本地或无证书场景使用，但传输不加密；真实公网部署应使用 `wss://`。
 - 文本消息和附件 metadata/chunk 已走应用层 AES-256-GCM encrypted relay：Server 只转发 opaque envelope，不能解密应用内容。
 - Host/Client 使用 GKA v2：Client 加入时提交临时 X25519 public key，Host 生成 room group key，并为每个成员封装分发；文本和附件使用该 group key 做 AES-256-GCM。
-- 成员加入或离开时，Host 会轮换新的 room group key 并重新分发给当前成员。未启用 PKI 时，GKA v2 的成员公钥只由信令消息携带；如果信令被篡改，恶意或被攻破的 Server 可能尝试公钥替换攻击。
-- 可选 PKI 身份认证已实现：Client 可以用成员身份私钥签名 `join_room`，把成员证书绑定到临时 X25519 public key；Host 可以签名 `group_key` envelope，Client 验证 Host 证书和签名后才解封装 group key。
+- 成员加入或离开时，Host 会轮换新的 room group key 并重新分发给当前成员。
+- PKI 身份认证是 Host/Client 必需配置：Client 用成员身份私钥签名 `join_room`，把成员证书绑定到临时 X25519 public key；Host 签名 `group_key` envelope，Client 验证 Host 证书和签名后才解封装 group key。
 - 可选 mTLS 部署已提供：Nginx 在公网入口要求 TLS 客户端证书，SecureChat Server 作为本机 WebSocket backend 运行。模板见 `deploy/securechat-nginx-mtls.conf` 和 `deploy/securechat-server-mtls-backend.service`。
 - 房间密码能阻止普通误入，但不能替代 TLS、限速、防火墙和强认证。
 - 能限制安全组来源 IP 时，不建议长期使用 `0.0.0.0/0`。
@@ -45,7 +45,97 @@ SecureChat 当前定位为课程/论文实验系统；公网运行时应按本�
 docs/signaling-security.md
 docs/relay-attachment-security.md
 docs/pki-identity.md
+docs/security-tests.md
+docs/acceptance-guide.md
+docs/cpp-csharp-guide.md
 ```
+
+## 完整测试流程
+
+本节只给出从“已经能构建”到“能证明功能和安全边界”的测试主线。安装、编译、运行命令和部署细节已经在后续小节展开：Windows 构建见 [Windows 构建](#windows-构建)，Linux 环境和构建见 [Linux 环境配置](#linux-环境配置) 与 [Linux 构建](#linux-构建)，成员 PKI 见 [PKI 身份认证](#pki-身份认证)，mTLS 入口见 [mTLS 反向代理部署](#mtls-反向代理部署)，公网部署见 [公网云服务器部署](#公网云服务器部署)，启动命令见 [运行 Server、Host 和 Client](#运行-serverhost-和-client)。
+
+### 1. 本地局域网功能测试
+
+1. 按 [Windows 构建](#windows-构建) 或 [Linux 构建](#linux-构建) 生成 `server`、`host`、`client`、WinUI 和 Web UI。
+2. 按 [PKI 身份认证](#pki-身份认证) 准备测试 Root CA、Host 证书、Client 证书。Server 不需要成员 PKI 环境变量；Host/Client/WinUI/Web 作为聊天成员必须配置成员证书、成员私钥和信任根。
+3. 启动本地 Server，例如 `ws://127.0.0.1:25566`。具体命令见 [运行 Server、Host 和 Client](#运行-serverhost-和-client)。
+4. 用 Host 创建一个 room，再用 Client、第二个 WinUI 或 Web UI 加入同一 room。
+5. 确认成员列表显示 `name / id`，身份框为绿色；点击身份框应复制完整证书指纹。
+6. 测试群发文本、`To: member` 私发文本、图片、WAV 语音和普通文件附件。
+7. 测试附件预览策略：未知成员附件默认只显示“附件已接收”；手动标记为 Trusted 后，再按图片/音频自动预览开关预览。
+8. 让成员离开或断线，观察成员状态、Host 侧 group key 轮换和后续消息可读性。
+
+预期结果：
+
+- 房间只能由 Host 创建，Client 只能加入已有房间。
+- Server 只保存房间注册、成员连接状态和密文 relay 状态，不显示聊天明文、附件名明文或附件 metadata 明文。
+- Host/Client 缺少完整 PKI 配置时启动失败。
+- 私发消息只对目标成员和发送者可解密，其他成员只能收到不可解密密文或不显示内容。
+
+### 2. 公网 WSS 测试
+
+1. 按 [公网云服务器部署](#公网云服务器部署) 将域名解析到云服务器公网 IP，并放行 SecureChat 入口端口。
+2. 准备服务器 TLS 证书，使用 `wss://<domain>:25566` 启动 Server。启动脚本和证书位置见 [运行 Server、Host 和 Client](#运行-serverhost-和-client)。
+3. Host 和 Client 分别使用自己的成员证书连接公网 `wss://` 地址。
+4. 在 Wireshark 或服务器抓包工具中观察公网链路。
+
+预期结果：
+
+- DNS 只负责把域名解析到公网 IP；没有 WebRTC 点对点链路，也不需要 STUN。
+- `wss://` 链路上只能看到 TLS record、IP、端口和连接时序，不能直接看到信令 JSON、聊天文本、附件名或 group key。
+- Server 日志即使开启 `SECURECHAT_SERVER_LOG_FILE`，也不应包含聊天文本或原始附件名。
+
+### 3. mTLS 反向代理测试
+
+1. 按 [mTLS 反向代理部署](#mtls-反向代理部署) 让 Nginx 监听公网 `25566`，SecureChat Server 只监听 `127.0.0.1:25567`。
+2. Host/Client 同时配置应用层成员 PKI 和 TLS 客户端证书。
+3. 分别测试“带正确客户端 TLS 证书”和“不带客户端 TLS 证书”的连接。
+4. 在服务器上检查监听状态：
+
+```bash
+ss -lntp | grep -E ':25566|:25567'
+```
+
+预期结果：
+
+- 公网只暴露 Nginx 的 `25566`。
+- 后端 `25567` 只在本机监听，不能从公网直接连接。
+- 没有合法 TLS 客户端证书的连接会在反向代理层被拒绝；通过 mTLS 的连接仍需通过应用层 PKI 身份认证。
+
+### 4. PKI 和 GKA 安全测试
+
+1. 不设置 `SECURECHAT_PKI_TRUST_STORE`、`SECURECHAT_IDENTITY_CERT_FILE` 或 `SECURECHAT_IDENTITY_KEY_FILE`，Host/Client 应直接启动失败。
+2. 用错误 Root CA、过期证书、非 `digitalSignature` 用途证书或吊销指纹测试加入流程。
+3. 篡改 `join_room.publicKey`、`identity.signature` 或 `identity.nonce`，Host 应拒绝该 Client。
+4. 篡改 `group_key.ciphertext`、`ephemeralPublicKey`、`tag` 或 Host identity，Client 应拒绝 group key。
+5. 在普通 `ws://` 本地测试中抓包，确认中继信令可见但聊天内容、附件 metadata 和 group key 不以明文出现。
+
+预期结果：
+
+- 应用层 PKI 绑定成员长期签名身份和临时 X25519 公钥，防止 Server 或中间人静默替换成员公钥。
+- GKA v2 的 room group key 只通过目标成员的 X25519 密钥封装分发，Server 只能转发 envelope。
+
+### 5. 敌手挑战和部署面测试
+
+更完整的敌手步骤见 `docs/adversary-challenges.md` 和 `docs/security-tests.md`。README 只保留最常用的验收入口：
+
+```bash
+nmap -Pn -p 22,80,443,25566,25567,5188 chat.la5te2.online
+ss -lntp
+sudo ufw status
+```
+
+预期结果：公网只暴露必要端口；Web UI `5188` 不直接暴露；mTLS 后端 `25567` 只监听 `127.0.0.1`。
+
+低速、限量 TCP 半连接测试只在自有服务器上执行：
+
+```bash
+sysctl net.ipv4.tcp_syncookies
+sudo nping --tcp -S -p 25566 --rate 10 -c 100 chat.la5te2.online
+watch -n 1 "ss -ant state syn-recv | wc -l"
+```
+
+预期结果：Linux TCP 栈、云安全组、Nginx 和系统 backlog 承担半连接防护；SecureChat 应用层主要处理 WebSocket 建立之后的超时、连接数和坏消息限制。
 
 ## GKA v2 原理与安全边界
 
@@ -57,7 +147,7 @@ docs/pki-identity.md
 
 X25519 是基于 Curve25519 的椭圆曲线 Diffie-Hellman 密钥交换函数。它的作用是：双方各自持有私钥，交换公钥后，在不发送私钥的情况下计算出同一个共享秘密 `S`。这个共享秘密通常不会直接当作 AES 密钥使用，而是先经过 HKDF 派生成固定长度、带上下文绑定的密钥。
 
-X25519 只解决“被动窃听者算不出共享秘密”的问题，不解决“这个公钥到底属于谁”的认证问题。因此如果未启用 PKI 身份认证，信令层公钥被替换时，X25519 本身不会检测出该攻击。启用 PKI 后，Client 会对 `roomId || username || publicKey || nonce` 签名，Host 验证成员证书链和签名后才信任该 public key。
+X25519 只解决“被动窃听者算不出共享秘密”的问题，不解决“这个公钥到底属于谁”的认证问题。因此 SecureChat 强制使用 PKI 身份认证：Client 会对 `roomId || username || publicKey || nonce` 签名，Host 验证成员证书链和签名后才信任该 public key。
 
 数学流程如下。设 X25519 基点为 `G`：
 
@@ -181,11 +271,9 @@ std::vector<unsigned char> decryptGroupKeyForMember(
 安全边界：
 
 - 如果没有中间人攻击且 Host 可信，则不可信 Server 和网络旁路看不到聊天/附件明文。
-- 启用 PKI 身份认证后，恶意 Server 不能在不破坏成员身份签名的情况下静默替换 Client 的临时 X25519 public key，也不能在不破坏 Host 签名的情况下替换 `group_key` envelope。
+- 恶意 Server 不能在不破坏成员身份签名的情况下静默替换 Client 的临时 X25519 public key，也不能在不破坏 Host 签名的情况下替换 `group_key` envelope。
 - 其他合法群成员会持有同一个 `K_G`，因此群聊内容对群成员本身不保密。恶意成员可以保存、截图或转发自己收到的明文。
 - 当前私发是定向投递：Server 只把密文转发给目标成员，但密文仍使用 room group key，而不是独立点对点私聊密钥。因此它不是密码学意义上的成员专属私聊。
-- 未启用 PKI 身份认证时，GKA v2 的成员公钥仍只由信令消息携带；恶意 Server 或网络中间人如果能篡改信令，可能实施公钥替换攻击。
-
 典型中间人攻击是公钥替换：
 
 ```text
@@ -197,9 +285,11 @@ std::vector<unsigned char> decryptGroupKeyForMember(
 6. Client 正常进入房间，但 MITM 也已经获得 group key。
 ```
 
+当前实现强制 PKI 身份认证，因此上面的攻击不能静默完成：`join_room.identity` 的签名覆盖原始 `publicKey`，Host 会在验证时发现替换；`group_key.identity` 的签名覆盖 envelope 关键字段，Client 会在解封装前发现篡改。
+
 ## PKI 身份认证
 
-PKI 身份认证是可选模式。不配置 PKI 环境变量时，系统仍按房间密码 + GKA v2 工作；配置后，Host/Client 会加载本机成员证书链、成员身份私钥和受信任 CA bundle。
+PKI 身份认证是 Host/Client 必需配置。不配置完整 PKI 环境变量时，Host/Client 启动失败；Server 仍只做字段结构和大小校验，不验证证书链。Host/Client 会加载本机成员证书链、成员身份私钥和受信任 CA bundle。
 
 ```bash
 export SECURECHAT_PKI_TRUST_STORE=certs/pki/root-ca.pem
@@ -221,12 +311,13 @@ export SECURECHAT_PKI_REVOCATION_FILE=certs/pki/revoked.txt
 
 当前实现会验证证书链、有效期、Key Usage `digitalSignature`、本地 SHA-256 指纹吊销列表、签名算法一致性和签名内容。Server 只检查 `identity` 字段结构和大小，然后转发；证书验证发生在 Host/Client 本地。
 
-PKI 模式下：
+运行时：
 
 - Client 在 `join_room` 中签名 `roomId`、`username`、临时 X25519 `publicKey` 和 `nonce`。
 - Host 验证 Client 身份后才记录 public key、轮换 group key，并为成员封装 group key。
 - Host 在 `group_key` envelope 中签名 room、target、ephemeralPublicKey、ciphertext、tag 和 nonce。
 - Client 验证 Host 身份后才解封装 room group key。
+- Host 会把已验证成员的证书 SHA-256 指纹通过加密 `member_identity` 控制消息发给房间成员；WinUI 成员列表用绿色身份框表示已验证成员，点击 `name / id` 框会复制完整证书指纹。
 
 详细字段见 `docs/pki-identity.md`。
 
@@ -557,6 +648,8 @@ export SECURECHAT_LOGS_MAX_BYTES=1073741824
 接收端会清理最旧的受管理附件缓存文件，但只清理 `logs/images`、`logs/voice`、`logs/files`。文件扩展名和文件头校验只能降低误传/伪装风险，不等于杀毒。
 
 附件当前已经实现应用层 E2EE relay：文件名、mime、metadata 和 binary chunk 都在 Host/Client 本地加密，Server 只转发 ciphertext。安全边界是：网络路径和不可信 Server 不应看到附件明文；接收成员本机会解密并缓存附件，因此成员设备、用户手动打开文件、图片/音频解码器和本地文件系统仍是信任边界。附件安全边界不覆盖杀毒扫描、沙箱打开、复杂文档格式隔离或恶意文件内容检测。
+
+WinUI 对附件预览采用当前房间内的身份状态策略：`Unknown` 表示没有 PKI 验证结果，`Verified` 表示成员证书和签名已通过 PKI 验证，`Trusted` 表示 `Verified` 成员又被本机用户允许自动预览，`Blocked` 表示本机用户阻止该成员附件自动预览。`Trusted` 和 `Blocked` 只保存在当前房间内存中，退出、断开或切换房间后清空。默认远端未知成员发来的图片和音频先显示“附件已接收”，只有用户点击“预览”才会触发本地解码器；Verified 成员默认仍不会自动预览，除非用户标记 Trusted，或关闭“仅信任成员自动预览”。设置面板提供“自动预览图片”“自动加载音频”“仅信任成员自动预览”三个开关。WinUI 预览前还会额外检查图片宽高、总像素数、文件大小，以及 WAV 采样率、声道数、时长和 chunk 结构。`MaxPreviewImageBytes`、`MaxPreviewAudioBytes` 只限制本地预览，协议传输大小仍统一由 `SECURECHAT_ATTACHMENT_MAX_BYTES` 控制。
 
 因此建议总是从项目根目录启动：
 

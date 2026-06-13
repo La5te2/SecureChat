@@ -6,7 +6,7 @@
 
 ## 启用方式
 
-PKI 是可选模式。不配置任何 PKI 变量时，Host/Client 仍按房间密码 + GKA v2 工作。只要配置了任一 PKI 变量，就必须同时提供信任根、成员证书链和成员私钥：
+PKI 是 Host/Client 必需配置。不配置完整 PKI 变量时，Host/Client 启动失败。每个 Host/Client 都必须提供信任根、成员证书链和成员私钥：
 
 ```bash
 export SECURECHAT_PKI_TRUST_STORE=certs/pki/root-ca.pem
@@ -98,7 +98,7 @@ openssl x509 -in certs/pki/alice-chain.pem -noout -fingerprint -sha256
 
 ## join_room 绑定
 
-Client 加入房间时仍会生成临时 X25519 key pair，并把 public key 放入 `join_room`。启用 PKI 后，Client 还会附带 `identity` 对象：
+Client 加入房间时仍会生成临时 X25519 key pair，并把 public key 放入 `join_room`。同时，Client 必须附带 `identity` 对象：
 
 ```json
 {
@@ -152,6 +152,26 @@ identityNonce:<len>:<identity-nonce>
 
 Client 在解封装 group key 之前，会先验证 Host 证书链、吊销状态、签名算法和签名。如果验证失败，Client 不会执行 X25519 解封装，也不会接受该 room group key。
 
+## 验证结果进入 UI
+
+Host 验证 Client 身份后，会记录该成员证书的 SHA-256 指纹和 subject。随后 Host 通过加密 `member_identity` 控制消息向房间内成员广播已验证成员：
+
+```json
+{
+  "type": "member_identity",
+  "payload": {
+    "memberId": "client-id",
+    "displayName": "alice",
+    "fingerprint": "sha256-hex",
+    "subject": "/CN=alice",
+    "state": "verified",
+    "verifiedBy": "host"
+  }
+}
+```
+
+该控制消息本身仍走应用层 encrypted relay。接收端只接受 relay metadata 显示发送者是 Host 的 `member_identity`，并在 WinUI 成员列表中标记为 `Verified`。Verified/Trusted 成员使用绿色 `name / id` 身份框，Unknown/Blocked 使用红色身份框；点击身份框会复制完整证书指纹。用户可以把 `Verified` 成员临时标记为 `Trusted` 以允许自动预览附件，也可以标记为 `Blocked` 禁止自动预览。
+
 ## 吊销列表
 
 `SECURECHAT_PKI_REVOCATION_FILE` 是本地受信任文本文件，每行一个 SHA-256 证书指纹，大小写和冒号不敏感：
@@ -180,4 +200,26 @@ WSS、mTLS 和 PKI 解决的问题不同：
 - mTLS 在反向代理入口要求客户端 TLS 证书，用于限制谁能建立到 Server 的连接；
 - PKI 成员身份认证把成员证书签名绑定到 GKA v2 的临时 X25519 public key 和 Host 的 `group_key` envelope；
 - 即使使用 PKI，Server 仍能看到 roomId、成员状态、消息大小和转发时序等元数据；
-- 即使使用 WSS，如果不启用成员身份 PKI，恶意 Server 仍可能在应用层尝试替换成员 public key。
+- 即使使用 WSS，恶意 Server 仍可能尝试替换成员 public key，但 Host/Client 的 PKI 签名验证会拒绝不一致的 identity。
+
+## Server 不验证哪一种证书
+
+本文档中的 PKI 证书指的是应用层成员身份证书，也就是 `join_room.identity.certChainPem` 和 `group_key.identity.certChainPem` 携带的证书链。Server 对这些证书只做 JSON 字段存在性、字段名、类型和大小检查，然后转发给 Host/Client。Server 不验证：
+
+- 证书链是否由受信任 Root CA 签发；
+- 证书是否过期；
+- 证书 Key Usage 是否允许 `digitalSignature`；
+- 证书是否出现在本地吊销列表；
+- `join_room` 或 `group_key` 的 identity 签名是否正确。
+
+这些验证都发生在 Host/Client 本地。这样设计的原因是 Server 是不可信 relay，不能成为成员身份语义的信任根。mTLS 使用的客户端 TLS 证书是另一层连接准入证书，由 Nginx 等反向代理在 TLS 握手阶段验证，不是这里的应用层成员身份证书。
+
+## 成员 id 命名
+
+当前实现中有三个相关命名：
+
+- `clientId`：Server 分配给普通 Client 的连接成员 id。
+- `actorId`：加密消息 payload 中的稳定发送者 id，覆盖 Host 和 Client；Host 的 actor id 固定为 `host`。
+- `memberId`：`member_identity` 控制消息和 WinUI UI 层使用的通用成员 id，值可以是 Host 的 `host`，也可以是普通 Client 的 `clientId`。
+
+因此 `memberId` 存在于当前代码和协议控制消息中，但它不是 Server 内部唯一命名。Server 内部仍以 `clientId` 表示普通 Client，以固定 `host` 表示 Host。

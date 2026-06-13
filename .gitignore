@@ -22,6 +22,9 @@ app/**/uploads/
 # Local Files
 todolist.md
 artifacts/
+docs/report/*
+!docs/report/report.tex
+!docs/report/report.pdf
 
 # Secret Certs
 certs/

@@ -7,14 +7,18 @@
 
 namespace chat::identity_pki {
 
+struct VerifiedIdentity {
+    std::string subject;
+    std::string fingerprint;
+};
+
 // Holds the local identity certificate, signing key, trust store, and optional
 // revocation list used to authenticate GKA public keys.
 class IdentityContext {
 public:
     IdentityContext();
 
-    // Returns true when SECURECHAT_PKI_TRUST_STORE, SECURECHAT_IDENTITY_CERT_FILE,
-    // and SECURECHAT_IDENTITY_KEY_FILE are all configured and loaded.
+    // Reports whether this context holds a loaded certificate, key, and trust store.
     bool enabled() const;
 
     // Human-readable local certificate subject and SHA-256 fingerprint for logs/UI.
@@ -28,7 +32,7 @@ public:
         const std::string& publicKey) const;
 
     // Verifies a Client join identity object against the trusted CA bundle.
-    void verifyJoinRoom(
+    VerifiedIdentity verifyJoinRoom(
         const std::string& roomId,
         const std::string& username,
         const std::string& publicKey,
@@ -38,7 +42,7 @@ public:
     void signGroupKeyEnvelope(json& envelope) const;
 
     // Verifies the Host signature on a group_key envelope before unwrapping it.
-    void verifyGroupKeyEnvelope(const json& envelope) const;
+    VerifiedIdentity verifyGroupKeyEnvelope(const json& envelope) const;
 
 private:
     struct Data;
@@ -49,7 +53,7 @@ private:
     friend IdentityContext loadFromEnvironment();
 };
 
-// Loads optional PKI identity configuration from SECURECHAT_* environment variables.
+// Loads mandatory PKI identity configuration from SECURECHAT_* environment variables.
 IdentityContext loadFromEnvironment();
 
 }

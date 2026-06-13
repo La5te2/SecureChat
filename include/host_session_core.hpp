@@ -81,6 +81,9 @@ private:
     std::string resolveClientId(const std::string& token);
     // Asks Server to remove a Client that failed Host-side identity checks.
     void rejectClient(const std::string& clientId, const std::string& reason);
+    // Announces Host-verified member certificate fingerprints through encrypted relay.
+    void announceVerifiedMember(const std::string& memberId, const std::string& displayName, const std::string& fingerprint, const std::string& subject);
+    void announceVerifiedMembers();
 
 private:
     std::string mWsUrl;
@@ -94,6 +97,8 @@ private:
     std::mutex mClientsMutex;
     std::unordered_map<std::string, std::string> mClientNames;
     std::unordered_map<std::string, std::string> mClientPublicKeys;
+    std::unordered_map<std::string, std::string> mClientIdentityFingerprints;
+    std::unordered_map<std::string, std::string> mClientIdentitySubjects;
     chat::identity_pki::IdentityContext mIdentity;
     std::vector<unsigned char> mGroupKey;
     // Core attachment receive state, keyed by encrypted relay sender actor id.

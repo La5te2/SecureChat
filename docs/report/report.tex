@@ -71,6 +71,7 @@ SecureChat 当前实现的主要功能如下。
   \item 支持图片、语音和普通文件附件。
   \item 支持私发图片、语音和文件附件。
   \item 成员列表显示 name / id，便于选择私发目标。
+  \item WinUI 成员列表用绿色或红色身份框呈现验证状态，点击 name / id 框可复制完整证书指纹，用于附件自动预览策略。
 \end{itemize}
 
 \subsection{安全功能}
@@ -85,6 +86,7 @@ SecureChat 当前实现的主要功能如下。
   \item WSS（WebSocket Secure）支持服务器证书和 TLS 加密。
   \item mTLS 通过 Nginx 反向代理实现客户端证书准入。
   \item 附件具有扩展名、文件头、大小、文件名净化和缓存上限检查。
+  \item WinUI 默认不自动预览 Unknown 或未 Trusted 的远端成员附件，图片和音频需先显示为附件卡片。
 \end{itemize}
 
 \subsection{客户端和部署功能}
@@ -501,7 +503,7 @@ json IdentityContext::signJoinRoom(
         nonce);
 }
 
-void IdentityContext::verifyJoinRoom(
+VerifiedIdentity IdentityContext::verifyJoinRoom(
     const std::string& roomId,
     const std::string& username,
     const std::string& publicKey,
@@ -521,6 +523,10 @@ void IdentityContext::verifyJoinRoom(
         signature)) {
         throw std::runtime_error("join_room identity signature verification failed");
     }
+    return {
+        certificateSubject(certs.front().get()),
+        certificateFingerprint(certs.front().get())
+    };
 }
 \end{lstlisting}
 
@@ -529,12 +535,17 @@ void IdentityContext::verifyJoinRoom(
 Host 发现成员身份验证失败时，不记录该成员 publicKey，也不轮换 group key，而是请求 Server 移除该 Client。
 
 \begin{lstlisting}[language=C++,caption={host\_session\_core.cpp：Host 验证并拒绝 Client}]
-if (!clientId.empty() && mIdentity.enabled()) {
+if (!clientId.empty()) {
     try {
         auto identity = j.find("identity");
         if (identity == j.end()) throw std::runtime_error("client identity is missing");
-        mIdentity.verifyJoinRoom(mRoomId, username, publicKey, *identity);
-        chatEmit(mCallbacks.onStatus, "Client identity verified: " + username);
+        const auto verified = mIdentity.verifyJoinRoom(
+            mRoomId, username, publicKey, *identity);
+        identityFingerprint = verified.fingerprint;
+        identitySubject = verified.subject;
+        chatEmit(mCallbacks.onStatus,
+            "PKI member verified: " + username + " / " +
+            clientId + " / " + identityFingerprint);
     }
     catch (const std::exception& e) {
         chatEmit(mCallbacks.onError,
@@ -542,6 +553,38 @@ if (!clientId.empty() && mIdentity.enabled()) {
         rejectClient(clientId, "client identity verification failed");
         return;
     }
+}
+\end{lstlisting}
+
+\subsubsection{PKI 验证结果同步到成员列表}
+
+Host 验证 Client 证书和签名后，会把成员证书指纹作为加密控制消息同步给房间成员。Server 只转发 encrypted relay，不能读取或伪造该控制消息内容；WinUI 只接受 relay metadata 显示发送者是 Host 的 member\_identity 消息，并据此把成员标记为 Verified。
+
+\begin{lstlisting}[language=C++,caption={host\_session\_core.cpp：广播已验证成员指纹}]
+void HostSessionCore::announceVerifiedMember(
+    const std::string& memberId,
+    const std::string& displayName,
+    const std::string& fingerprint,
+    const std::string& subject) {
+    if (memberId.empty() || fingerprint.empty()) return;
+
+    Message msg;
+    msg.type = "member_identity";
+    msg.from = currentHostActorName();
+    setCurrentHostActorMetadata(msg);
+    msg.payload["memberId"] = memberId;
+    msg.payload["displayName"] = displayName.empty() ? memberId : displayName;
+    msg.payload["fingerprint"] = fingerprint;
+    msg.payload["subject"] = subject;
+    msg.payload["state"] = "verified";
+    msg.payload["verifiedBy"] = chat::protocol::HostActorId;
+
+    sendRelayMessage(
+        msg,
+        chat::protocol::HostActorId,
+        mUsername,
+        chat::protocol::HostActorKind,
+        "");
 }
 \end{lstlisting}
 
@@ -605,6 +648,72 @@ private void Join_Click(object sender, RoutedEventArgs e)
 }
 \end{lstlisting}
 
+\subsubsection{WinUI 附件预览安全策略}
+
+WinUI 使用 Unknown、Verified、Trusted、Blocked 四态控制附件预览。Unknown 表示没有 PKI 验证结果；Verified 表示成员证书和签名已通过 PKI 验证；Trusted 表示用户在当前房间内允许该 Verified 成员自动预览附件；Blocked 表示本机用户阻止该成员自动预览。成员列表只显示 name / id，Verified/Trusted 使用绿色身份框，Unknown/Blocked 使用红色身份框；点击身份框会复制完整证书指纹。Trusted 和 Blocked 都是当前房间内存状态，不跨房间保存。
+
+\begin{lstlisting}[language={[Sharp]C},caption={MainWindow.xaml.cs：附件预览策略}]
+// These caps only protect local WinUI preview/decoder paths.
+// The protocol transfer limit remains SECURECHAT_ATTACHMENT_MAX_BYTES.
+private const long MaxPreviewImageBytes = 15L * 1024 * 1024;
+private const long MaxPreviewAudioBytes = 50L * 1024 * 1024;
+private const int MaxPreviewImageDimension = 8192;
+private const long MaxPreviewImagePixels = 24_000_000;
+private const double MaxPreviewAudioSeconds = 600;
+
+private bool ShouldAutoPreviewAttachment(AttachmentPreviewInfo info)
+{
+    if (info.Kind == "file") return false;
+    if (info.IsOwnLocalAttachment) {
+        return info.Kind == "image" ? autoPreviewImages : autoLoadAudio;
+    }
+    if (info.MemberState is AttachmentMemberState.Unknown or
+        AttachmentMemberState.Blocked) return false;
+    if (onlyTrustedAttachmentPreview &&
+        info.MemberState != AttachmentMemberState.Trusted) return false;
+    return info.Kind == "image" ? autoPreviewImages : autoLoadAudio;
+}
+
+private void ToggleTrustedParticipant(string participant)
+{
+    var key = PrimaryParticipantKey(participant);
+    var state = MemberStateForParticipant(participant);
+    if (state == AttachmentMemberState.Trusted) {
+        trustedAttachmentMembers.Remove(key);
+    } else if (state == AttachmentMemberState.Verified) {
+        blockedAttachmentMembers.Remove(key);
+        trustedAttachmentMembers.Add(key);
+    }
+    RefreshParticipants();
+}
+
+private void ValidateImagePreview(string path, long sizeBytes)
+{
+    if (sizeBytes > MaxPreviewImageBytes) {
+        throw new InvalidDataException("image is too large for inline preview");
+    }
+    var image = ReadImagePreviewInfo(path);
+    if (image.Width > MaxPreviewImageDimension ||
+        image.Height > MaxPreviewImageDimension ||
+        (long)image.Width * image.Height > MaxPreviewImagePixels) {
+        throw new InvalidDataException("image exceeds preview limit");
+    }
+}
+
+private void ValidateWavPreview(string path, long sizeBytes)
+{
+    if (sizeBytes > MaxPreviewAudioBytes) {
+        throw new InvalidDataException("audio is too large for inline preview");
+    }
+    var wav = ReadWavPreviewInfo(path);
+    if (wav.Channels is not (1 or 2) ||
+        wav.SampleRate < 8000 || wav.SampleRate > 192000 ||
+        wav.DurationSeconds > MaxPreviewAudioSeconds) {
+        throw new InvalidDataException("unsupported WAV preview parameters");
+    }
+}
+\end{lstlisting}
+
 \subsection{阶段十安全测试设计}
 
 阶段十的测试分为本机可完成测试和需要服务器/抓包工具手动完成的测试。
@@ -619,12 +728,13 @@ build\_web.bat & Web UI 和 native core 构建通过，无错误。 & 已完成�
 WS 抓包 & 可见 join\_room 和房间密码，但不可见聊天明文和附件内容。 & 手动执行。\\
 WSS 抓包 & 只能看到 TLS record 和元数据，不能看到 WebSocket JSON。 & 手动执行。\\
 mTLS 准入 & 无客户端证书连接失败，有受信任证书连接成功。 & 手动执行。\\
-PKI publicKey 替换 & 未启用 PKI 可演示攻击；启用 PKI 后 Host 拒绝。 & 手动执行。\\
+PKI publicKey 替换 & 篡改 publicKey 或 identity 后 Host/Client 拒绝。 & 手动执行。\\
 附件安全 & 伪装文件、超大文件和路径穿越文件名被拒绝或净化。 & 手动执行。\\
+端口扫描和 TCP 半连接 & 公网只暴露必要端口；半连接防护由系统、云安全组和反向代理承担。 & 手动执行。\\
 \bottomrule
 \end{longtable}
 
-详细步骤已经整理在 phase10-security-tests.md 中。需要服务器和 Wireshark 的实验保留为手动步骤，是因为它们依赖真实网卡、云安全组、Nginx 证书和抓包截图。
+详细步骤已经整理在 security-tests.md 中。需要服务器和 Wireshark 的实验保留为手动步骤，是因为它们依赖真实网卡、云安全组、Nginx 证书和抓包截图。
 
 \section{项目开发总结}
 
@@ -655,7 +765,7 @@ PKI publicKey 替换 & 未启用 PKI 可演示攻击；启用 PKI 后 Host 拒�
 
 第三，Server 仍能观察元数据，包括 roomId、成员在线状态、消息大小、发送频率和转发时序。E2EE 保护内容机密性，但不隐藏通信模式。后续可以考虑 padding、批量发送或混淆转发时序，但会增加带宽和延迟成本。
 
-第四，附件安全仍不等于恶意文件防护。当前系统能检查大小、扩展名、文件头、文件名和缓存目录，但不能替代杀毒、沙箱和复杂文档解析隔离。
+第四，附件安全仍不等于恶意文件防护。当前系统能检查大小、扩展名、文件头、文件名和缓存目录，WinUI 也默认不自动预览未知成员附件，并在预览前检查图片尺寸、像素数和 WAV 结构；但这些措施不能替代杀毒、沙箱和复杂文档解析隔离。
 
 第五，当前 PKI 吊销使用本地受信任指纹列表。它简单可复现，但不是完整在线证书状态协议（Online Certificate Status Protocol, OCSP）或证书吊销列表（Certificate Revocation List, CRL）体系。正式部署可进一步接入自动化证书签发、吊销分发和密钥轮换流程。
 

@@ -4,6 +4,8 @@
 
 当前系统的安全主线是：Server 作为不可信协调者和密文 relay，Host/Client 使用 GKA v2 分发 room group key，并用 AES-256-GCM 加密文本和附件。下面的挑战用于验证这个模型能保护什么、不能保护什么。
 
+从安装、构建、启动到基础功能验收的主流程见 `README.md` 的“完整测试流程”；本文档只展开敌手挑战的攻击步骤、预期现象和留证方式。
+
 ## 测试范围
 
 ### 威胁模型
@@ -20,8 +22,8 @@
 - 机密性：文本和附件 metadata/chunk 使用应用层 AES-256-GCM encrypted relay；Server 只转发 ciphertext。
 - 完整性：文本和附件 metadata/chunk 使用 AES-256-GCM AEAD；room/sender metadata 由 Server 绑定到 WebSocket 会话状态。
 - 密钥协商：GKA v2 使用临时 X25519 public key、Host 分发 room group key、成员加入/离开后 key rotation。
-- 认证与访问控制：房间密码限制加入；WSS 提供 Server 证书校验；可选 mTLS 反向代理限制客户端连接准入；可选 PKI 成员身份认证把成员证书签名绑定到 `join_room` public key 和 `group_key` envelope。
-- 附件安全：大小限制、扩展名白名单、图片/语音文件头校验、文件名净化、固定缓存目录、缓存总量限制、不自动执行。
+- 认证与访问控制：房间密码限制加入；WSS 提供 Server 证书校验；可选 mTLS 反向代理限制客户端连接准入；PKI 成员身份认证强制把成员证书签名绑定到 `join_room` public key 和 `group_key` envelope。
+- 附件安全：大小限制、扩展名白名单、图片/语音文件头校验、文件名净化、固定缓存目录、缓存总量限制、不自动执行，WinUI 未知成员附件默认不自动预览。
 - 可用性：连接数和坏消息限制、连接超时、维护线程清理、daemon 脚本、可选 systemd 模板。
 - 部署卫生：默认不落盘日志、非 root guard、必要端口说明、安全组来源 IP 收敛步骤。
 - 隐私：GUI/Web 不显示底层 endpoint/log 噪声；Server 仍可见元数据。
@@ -29,8 +31,7 @@
 ### 已知限制
 
 - `ws://` 信令明文；公网应使用 `wss://`。
-- 未启用 PKI 时，GKA v2 使用会话临时成员 key，成员 public key 尚未绑定长期身份或证书。
-- 恶意或被攻破 Server 在没有可信 WSS/PKI 身份绑定时可能尝试 public key 替换攻击。
+- 恶意或被攻破 Server 仍可尝试 public key 替换攻击，但应被 PKI 签名绑定检测出来。
 - 成员退出后的 key rotation 只保护后续消息，不能撤回该成员曾持有 key 时可读的历史消息。
 - Server 仍可观察 room、sender、连接时间、ciphertext 大小、消息数量和转发时序等元数据。
 - 当前私发是 group key 下的定向投递，不提供独立私聊密钥隔离。
@@ -53,10 +54,10 @@
 - 附件缓存超限清理或拒绝。
 - 成员加入后收到 `group_key` 并可以发送消息。
 - 成员离开后 Host 轮换 group key，剩余成员继续通信。
-- 启用 PKI 后，无 `identity` 的 Client 被 Host 拒绝。
-- 启用 PKI 后，篡改 `join_room.publicKey` 或 `identity.signature` 会被 Host 拒绝。
-- 启用 PKI 后，篡改 `group_key.ciphertext`、`ephemeralPublicKey` 或 `identity.signature` 会被 Client 拒绝。
-- 启用 PKI 后，证书链中任一证书指纹进入 `SECURECHAT_PKI_REVOCATION_FILE` 时身份被拒绝。
+- 当前强制 PKI 下，无 `identity` 的 Client 被 Server/Host 拒绝。
+- 当前强制 PKI 下，篡改 `join_room.publicKey` 或 `identity.signature` 会被 Host 拒绝。
+- 当前强制 PKI 下，篡改 `group_key.ciphertext`、`ephemeralPublicKey` 或 `identity.signature` 会被 Client 拒绝。
+- 当前强制 PKI 下，证书链中任一证书指纹进入 `SECURECHAT_PKI_REVOCATION_FILE` 时身份被拒绝。
 - 启用 mTLS 反向代理后，无客户端证书连接被 Nginx 拒绝，有受信任客户端证书连接成功。
 - Host 断开后 room 关闭，Client 收到停止提示。
 - Server stop/SIGTERM 后释放 TCP `25566`。
@@ -160,7 +161,7 @@
 
 ### 攻击目标
 
-验证未启用 PKI 时，主动中间人或恶意 Server 可以替换 Client public key，诱导 Host 给攻击者封装 group key；启用 PKI 后，同样的替换应被成员身份签名检测出来。
+验证主动中间人或恶意 Server 替换 Client public key 时，Host 会因为 `join_room` identity 签名覆盖的 public key 不一致而拒绝该成员。
 
 ### 攻击模型
 
@@ -176,23 +177,19 @@ Host 用 A_pub 封装 room group key
 
 - 使用授权实验环境。
 - 攻击者能控制 Server，或能在未受 TLS 保护的 WS 路径上篡改信令。
-- 未启用 PKI 的对照组：Host 无法通过长期身份、证书或指纹校验确认 Client public key。
-- 启用 PKI 的验证组：Host 和 Client 均配置 `SECURECHAT_PKI_TRUST_STORE`、`SECURECHAT_IDENTITY_CERT_FILE` 和 `SECURECHAT_IDENTITY_KEY_FILE`。
+- Host 和 Client 均配置 `SECURECHAT_PKI_TRUST_STORE`、`SECURECHAT_IDENTITY_CERT_FILE` 和 `SECURECHAT_IDENTITY_KEY_FILE`。
 
 ### 实验步骤
 
-1. 未启用 PKI，设计一个“恶意 Server”或信令代理，只修改 `new_client.publicKey` 字段，不修改 roomId 和 clientId。
+1. 设计一个“恶意 Server”或信令代理，只修改 `new_client.publicKey` 字段，不修改 roomId、clientId 和原始 `identity`。
 2. Client 正常发送 `join_room`。
 3. 恶意 Server 把 Client 的 public key 替换成攻击者自己的 X25519 public key 后转发给 Host。
-4. Host 按协议发送 `group_key` envelope。
-5. 攻击者尝试用自己的 private key 解开该 envelope。
-6. 启用 PKI 后重复步骤 1 到 5，并保留 Client 的原始 `identity` 签名不变。
+4. Host 验证 `identity`。
+5. 攻击者尝试让 Host 继续发送 `group_key` envelope。
 
 ### 预期现象
 
-未启用 PKI 时，如果 Host 没有长期身份校验，攻击者可以获得当前 room group key，并解密后续文本和附件。
-
-启用 PKI 后，Host 验证 `join_room` identity 时会发现签名覆盖的 public key 与被替换后的 public key 不一致，拒绝该 Client，并通过 `reject_client` 让 Server 移除连接。若攻击者改动 `group_key` envelope，Client 会在解封装前验证 Host identity 失败。
+Host 验证 `join_room` identity 时会发现签名覆盖的 public key 与被替换后的 public key 不一致，拒绝该 Client，并通过 `reject_client` 让 Server 移除连接。若攻击者改动 `group_key` envelope，Client 会在解封装前验证 Host identity 失败。
 
 ### 系统缓解
 
@@ -200,7 +197,7 @@ Host 用 A_pub 封装 room group key
 
 - 公网应使用可信 `wss://`，降低路径中间人篡改 public key 的风险。
 - Server 不生成 group key，也不参与密钥语义。
-- 启用 PKI 时，成员身份签名绑定 `join_room` public key，Host 身份签名绑定 `group_key` envelope。
+- 成员身份签名绑定 `join_room` public key，Host 身份签名绑定 `group_key` envelope。
 
 当前不覆盖：
 
@@ -211,9 +208,8 @@ Host 用 A_pub 封装 room group key
 ### 验证证据
 
 - 恶意替换前后的 `publicKey` 对比。
-- 攻击者能否解开 `group_key` 的实验结果。
-- 启用 PKI 后 Host/Client 的 identity verification failed 或 reject_client 记录。
-- 说明该攻击依赖主动篡改；PKI 验证组应阻止静默 public key 替换。
+- Host/Client 的 identity verification failed 或 reject_client 记录。
+- 说明该攻击依赖主动篡改；当前强制 PKI 应阻止静默 public key 替换。
 
 ## 挑战 4：恶意 Server 读取应用明文失败
 
@@ -433,6 +429,7 @@ Server 不应可见：
 
 - 校验失败提示。
 - 接收端没有把伪装文件渲染为图片或音频。
+- WinUI 中攻击者不是 PKI Verified 成员，或虽 Verified 但未被当前房间临时标记为 Trusted 时，图片/音频只显示附件卡片，不自动进入图片或音频解码器。
 
 ## 挑战 10：超大附件和缓存消耗
 
@@ -541,6 +538,76 @@ Server 不应可见：
 
 - 不同消息/附件的 ciphertext 大小和时序对比。
 - “内容机密性”和“元数据隐私”分开论证。
+
+## 挑战 13：端口扫描和 TCP 半连接耗尽
+
+### 攻击目标
+
+验证公网部署只暴露必要端口，并说明 TCP 半连接耗尽属于可用性和部署安全问题，不属于 E2EE 密码学问题。
+
+### 前置条件
+
+- 只在本机、实验局域网或自己控制的云服务器上测试。
+- 云安全组、系统防火墙和 Nginx/Server 日志可观察。
+- 若测试 TCP SYN 半连接，使用低速、限量请求，不对第三方公网地址执行。
+
+### 实验步骤：端口扫描
+
+1. 在云服务器上启动 SecureChat Server 或 mTLS 反向代理入口。
+2. 从授权测试机扫描预期端口：
+   ```bash
+   nmap -Pn -p 22,80,443,25566,25567,5188 <your-server-ip-or-domain>
+   ```
+3. 对比云安全组和本机监听：
+   ```bash
+   ss -lntp
+   sudo ufw status
+   ```
+4. 如果使用 mTLS 反向代理，确认公网只暴露 Nginx 的 `25566`，后端 `25567` 只监听 `127.0.0.1`。
+
+### 预期现象：端口扫描
+
+- 普通公网聊天入口只应暴露 `25566`。
+- Web UI `5188` 不应直接暴露公网。
+- mTLS 部署中，公网应看到 Nginx `25566`，不应直接访问后端 `25567`。
+- Server 进程不是群成员，端口扫描只能证明服务暴露面，不能读取聊天明文。
+
+### 实验步骤：TCP 半连接
+
+1. 在云服务器上查看系统 SYN 防护状态：
+   ```bash
+   sysctl net.ipv4.tcp_syncookies
+   ss -ant state syn-recv
+   ```
+2. 在授权测试机上进行低速、限量 SYN 测试，例如使用 `nping`：
+   ```bash
+   sudo nping --tcp -S -p 25566 --rate 10 -c 100 <your-server-ip-or-domain>
+   ```
+3. 测试期间在服务器上观察半开连接数量：
+   ```bash
+   watch -n 1 "ss -ant state syn-recv | wc -l"
+   ```
+4. 观察 SecureChat Server 是否仍能接受正常 Host/Client 连接。
+
+### 预期现象：TCP 半连接
+
+- 低速、限量 SYN 测试不应导致 Server 长时间不可用。
+- 半连接防护主要由 Linux TCP 栈、SYN cookies、云安全组、反向代理和连接 backlog 处理。
+- SecureChat 应用层的连接超时、连接数限制、坏消息限制和维护清理只能处理 WebSocket 建立之后的资源消耗，不能单独抵抗高强度 SYN flood。
+
+### 系统缓解
+
+- 云安全组限制来源 IP 或来源 CIDR。
+- 公网部署优先使用 Nginx/mTLS 入口，由反向代理承接 TLS 和连接准入。
+- Linux 开启 SYN cookies，并使用云厂商 DDoS/安全组能力。
+- SecureChat Server 保持 `connectionTimeout`、连接数限制、坏消息限制和维护线程清理。
+
+### 验证证据
+
+- `nmap` 扫描结果。
+- `ss -lntp`、`ufw status`、云安全组截图。
+- `ss -ant state syn-recv` 在测试前后的数量变化。
+- 正常 Host/Client 在测试期间能否连接和发送消息。
 
 ## 建议的测试记录结构
 

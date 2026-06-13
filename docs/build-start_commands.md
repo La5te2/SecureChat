@@ -154,9 +154,9 @@ wss://chat.la5te2.online:25566
 
 Web Host 不再配置证书路径；WSS 证书属于独立 Server 进程。
 
-## 可选 PKI 成员身份认证
+## 必需 PKI 成员身份认证
 
-PKI 成员身份认证配置在 Host/Client/Web/WinUI 进程上，不配置在 Server 上。Server 只转发 `identity` 对象，不验证证书。
+PKI 成员身份认证配置在 Host/Client/Web/WinUI 进程上，不配置在 Server 上。Host/Client 没有完整 PKI 配置会启动失败；Server 只要求并转发 `identity` 对象，不验证证书。
 
 Windows PowerShell 示例：
 

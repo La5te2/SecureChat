@@ -8,7 +8,7 @@
 
 - 创建房间和加入房间请求；
 - room id、username 和房间密码；
-- 可选 PKI `identity` 对象；
+- 必填 PKI `identity` 对象；
 - 成员加入/离开状态；
 - Host 拒绝身份验证失败成员的 `reject_client`；
 - opaque `encrypted_relay` envelope。
@@ -48,7 +48,7 @@ SecureChat 保留 WS 作为明确标注的 insecure mode。它运行更简单，
 
 - WSS 不能替代端到端加密；它只保护信令 WebSocket 在网络传输中的机密性和完整性；
 - 文本和附件 metadata/chunk 现在已有应用层 encrypted relay，Server 不持有 room group key，不能解密应用内容；
-- 当前 GKA v2 已实现成员 public key、Host 分发 group key 和成员变化后的 key rotation；可选 PKI 模式已实现成员身份签名证书对 `join_room` public key 和 `group_key` envelope 的绑定；
+- 当前 GKA v2 已实现成员 public key、Host 分发 group key 和成员变化后的 key rotation；PKI 成员身份签名证书强制绑定 `join_room` public key 和 `group_key` envelope；
 - 服务器 IP、连接时间、流量大小等元数据仍可能被观察；
 - 自签名证书适合测试，但除非客户端显式信任，否则不能提供正常公网身份校验。
 
@@ -106,6 +106,6 @@ wss://chat.la5te2.online:25566
 
 GKA v2 不再要求成员手工配置共享 E2EE 口令。Client 加入时提交临时 X25519 public key，Host 生成并轮换 room group key，再通过 `group_key` envelope 分别封装给当前成员。Server 只转发这些 envelope，不创建群密钥，也不参与密钥协商语义。
 
-启用 PKI 身份认证后，Client 会在 `join_room` 中附带成员证书链和签名，Host 验证证书链、吊销列表和签名后才信任该临时 X25519 public key。Host 发送 `group_key` envelope 时也会附带 Host 身份签名，Client 验证通过后才解封装 room group key。Server 只校验 `identity` 字段结构和大小，不验证证书，不参与身份语义。
+Client 会在 `join_room` 中附带成员证书链和签名，Host 验证证书链、吊销列表和签名后才信任该临时 X25519 public key。Host 发送 `group_key` envelope 时也会附带 Host 身份签名，Client 验证通过后才解封装 room group key。Server 只要求 `join_room` 和 `group_key` 携带 `identity`，并校验字段结构和大小；证书链验证发生在 Host/Client 本地，Server 不参与身份语义。
 
-未启用 PKI 时，成员 public key 仍只是信令字段。公网部署应使用可信 `wss://`，否则路径上的主动攻击者或恶意 Server 可能替换 public key，诱导 Host 给攻击者封装 group key。
+这里的“Server 不验证证书”指 Server 不验证应用层成员身份证书链，即 `identity.certChainPem`。Server 不检查 CA、有效期、吊销列表或 identity 签名；这些都由 Host/Client 完成。mTLS 客户端 TLS 证书属于反向代理连接准入，由 Nginx 等入口组件验证，不属于 SecureChat Server 的应用层成员身份验证。

@@ -122,10 +122,8 @@ void ClientSessionCore::start() {
             {"password", mPassword},
             {"publicKey", mMemberKeys.publicKey}
         };
-        if (mIdentity.enabled()) {
-            chatEmit(mCallbacks.onStatus, "PKI identity ready: " + mIdentity.fingerprint());
-            msg["identity"] = mIdentity.signJoinRoom(mRoomId, mUsername, mMemberKeys.publicKey);
-        }
+        chatEmit(mCallbacks.onStatus, "PKI identity ready: " + mIdentity.fingerprint());
+        msg["identity"] = mIdentity.signJoinRoom(mRoomId, mUsername, mMemberKeys.publicKey);
         mWs->send(msg.dump());
         std::fill(mPassword.begin(), mPassword.end(), '\0');
         mPassword.clear();
@@ -292,6 +290,21 @@ std::string ClientSessionCore::resolveMemberId(const std::string& token) {
 void ClientSessionCore::handleRelayMessage(const Message& msg) {
     // All application data arrives after AES-GCM decryption. Text is rendered
     // directly; attachment metadata stages a receive slot; chunks append bytes.
+    if (msg.type == "member_identity") {
+        const auto relaySenderId = msg.payload.value("relaySenderId", "");
+        const auto relaySenderKind = msg.payload.value("relaySenderKind", "");
+        if (relaySenderId == chat::protocol::HostActorId &&
+            relaySenderKind == chat::protocol::HostActorKind) {
+            const auto memberId = msg.payload.value("memberId", "");
+            const auto displayName = msg.payload.value("displayName", memberId);
+            const auto fingerprint = msg.payload.value("fingerprint", "");
+            if (!memberId.empty() && !fingerprint.empty()) {
+                chatEmit(mCallbacks.onStatus, "PKI member verified: " + displayName + " / " + memberId + " / " + fingerprint);
+            }
+        }
+        return;
+    }
+
     if (msg.type == "text") {
         chatEmit(mCallbacks.onMessage, msg.toJson());
         return;
@@ -571,9 +584,19 @@ void ClientSessionCore::handleSignalingMessage(const std::string& s) {
             chatEmit(mCallbacks.onStatus, "Room members: " + members.str());
         }
         else if (type == chat::secure_relay::GroupKeyType) {
-            if (mIdentity.enabled()) {
-                mIdentity.verifyGroupKeyEnvelope(j);
+            const auto verified = mIdentity.verifyGroupKeyEnvelope(j);
+            std::string hostName = "Host";
+            {
+                std::lock_guard<std::mutex> lock(mMembersMutex);
+                const auto host = mMemberNamesById.find(chat::protocol::HostActorId);
+                if (host != mMemberNamesById.end() && !host->second.empty()) {
+                    hostName = host->second;
+                }
             }
+            chatEmit(
+                mCallbacks.onStatus,
+                std::string("PKI member verified: ") + hostName + " / " +
+                    chat::protocol::HostActorId + " / " + verified.fingerprint);
             mGroupKey = chat::secure_relay::decryptGroupKeyForMember(j, mRoomId, mClientId, mMemberKeys.privateKey);
             chatEmit(mCallbacks.onStatus, "Room group key ready");
         }

@@ -465,7 +465,7 @@ json IdentityContext::signJoinRoom(
         nonce);
 }
 
-void IdentityContext::verifyJoinRoom(
+VerifiedIdentity IdentityContext::verifyJoinRoom(
     const std::string& roomId,
     const std::string& username,
     const std::string& publicKey,
@@ -481,6 +481,10 @@ void IdentityContext::verifyJoinRoom(
     if (!verifyBytes(publicSigningKey.get(), canonicalJoinMessage(roomId, username, publicKey, nonce), signature)) {
         throw std::runtime_error("join_room identity signature verification failed");
     }
+    return {
+        certificateSubject(certs.front().get()),
+        certificateFingerprint(certs.front().get())
+    };
 }
 
 void IdentityContext::signGroupKeyEnvelope(json& envelope) const {
@@ -493,7 +497,7 @@ void IdentityContext::signGroupKeyEnvelope(json& envelope) const {
         nonce);
 }
 
-void IdentityContext::verifyGroupKeyEnvelope(const json& envelope) const {
+VerifiedIdentity IdentityContext::verifyGroupKeyEnvelope(const json& envelope) const {
     if (!mData) throw std::runtime_error("PKI identity is not configured");
     const auto it = envelope.find("identity");
     if (it == envelope.end()) throw std::runtime_error("group_key identity is missing");
@@ -508,6 +512,10 @@ void IdentityContext::verifyGroupKeyEnvelope(const json& envelope) const {
     if (!verifyBytes(publicSigningKey.get(), canonicalGroupKeyMessage(envelope, nonce), signature)) {
         throw std::runtime_error("group_key identity signature verification failed");
     }
+    return {
+        certificateSubject(certs.front().get()),
+        certificateFingerprint(certs.front().get())
+    };
 }
 
 IdentityContext loadFromEnvironment() {
@@ -517,16 +525,9 @@ IdentityContext loadFromEnvironment() {
     const auto keyPassword = envValue("SECURECHAT_IDENTITY_KEY_PASS");
     const auto revocationPath = envValue("SECURECHAT_PKI_REVOCATION_FILE");
 
-    const bool anyConfigured =
-        !trustStorePath.empty() ||
-        !certPath.empty() ||
-        !keyPath.empty() ||
-        !revocationPath.empty();
-    if (!anyConfigured) return {};
-
     if (trustStorePath.empty() || certPath.empty() || keyPath.empty()) {
         throw std::runtime_error(
-            "PKI mode requires SECURECHAT_PKI_TRUST_STORE, SECURECHAT_IDENTITY_CERT_FILE, and SECURECHAT_IDENTITY_KEY_FILE");
+            "SecureChat requires PKI: set SECURECHAT_PKI_TRUST_STORE, SECURECHAT_IDENTITY_CERT_FILE, and SECURECHAT_IDENTITY_KEY_FILE");
     }
 
     auto data = std::make_shared<IdentityContext::Data>();

@@ -5,6 +5,7 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
+using Microsoft.UI.Text;
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -13,6 +14,7 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
+using Windows.ApplicationModel.DataTransfer;
 using Windows.Storage.Pickers;
 using Windows.UI;
 using WinRT.Interop;
@@ -32,15 +34,22 @@ public sealed partial class MainWindow : Window
     private readonly DispatcherQueue dispatcherQueue;
     private readonly DispatcherTimer infoBarTimer = new();
     private readonly HashSet<string> participants = new(StringComparer.OrdinalIgnoreCase);
-    private readonly Dictionary<string, Queue<string>> pendingAttachmentSenders = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> trustedAttachmentMembers = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> blockedAttachmentMembers = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, VerifiedMemberInfo> verifiedAttachmentMembers = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, Queue<AttachmentSenderInfo>> pendingAttachmentSenders = new(StringComparer.OrdinalIgnoreCase);
     private SessionMode sessionMode = SessionMode.None;
     private bool sidebarVisible = true;
     private bool resizingSidebar;
     private bool settingsHiding;
     private bool showOnlyOwnMessages;
+    private bool autoPreviewImages = true;
+    private bool autoLoadAudio;
+    private bool onlyTrustedAttachmentPreview = true;
     private bool settingsReady;
     private bool refreshingLanguage;
     private bool infoBarFading;
+    private string pendingLocalIdentityFingerprint = "";
     private string currentTheme = "Light";
     private string uiLanguage = "Chinese";
     private string roomName = "-";
@@ -57,10 +66,38 @@ public sealed partial class MainWindow : Window
     private bool isClosing;
 
     private static readonly NativeMethods.ChatEventCallback NoOpCallback = (_, _, _) => { };
+    private enum AttachmentMemberState
+    {
+        Unknown,
+        Verified,
+        Trusted,
+        Blocked
+    }
     private sealed record BubbleVisibilityState(bool IsFilterable, bool IsOwn);
     private sealed record ChatDisplayLine(string Kind, string Sender, string Body, bool IsOwn, bool IsFilterable);
+    private sealed record AttachmentSenderInfo(string DisplayName, string ActorId, string FileName = "")
+    {
+        public static readonly AttachmentSenderInfo Empty = new("", "", "");
+    }
+    private sealed record VerifiedMemberInfo(string DisplayName, string Fingerprint, string Subject);
     private const int InitialWindowWidth = 1180;
     private const int InitialWindowHeight = 760;
+    // These caps only protect local WinUI preview/decoder paths. The protocol
+    // transfer limit remains SECURECHAT_ATTACHMENT_MAX_BYTES in the native core.
+    private const long MaxPreviewImageBytes = 15L * 1024 * 1024;
+    private const long MaxPreviewAudioBytes = 50L * 1024 * 1024;
+    private const int MaxPreviewImageDimension = 8192;
+    private const long MaxPreviewImagePixels = 24_000_000;
+    private const double MaxPreviewAudioSeconds = 600;
+    private sealed record AttachmentPreviewInfo(
+        string Kind,
+        string Path,
+        AttachmentSenderInfo Sender,
+        long SizeBytes,
+        bool IsOwnLocalAttachment,
+        AttachmentMemberState MemberState);
+    private sealed record ImagePreviewInfo(int Width, int Height);
+    private sealed record WavPreviewInfo(int Channels, int SampleRate, int BitsPerSample, double DurationSeconds);
 
     public MainWindow()
     {
@@ -151,6 +188,7 @@ public sealed partial class MainWindow : Window
             return;
         }
 
+        ClearAttachmentMemberStates();
         // Host is a participant now; only Server owns listening and TLS setup.
         var ok = NativeMethods.chat_host_start(
             serverUrl,
@@ -163,11 +201,13 @@ public sealed partial class MainWindow : Window
             participants.Clear();
             AddParticipant(HostUserBox.Text.Trim());
             SetSessionMode(SessionMode.Host);
+            MarkLocalIdentityIfPossible();
         }
     }
 
     private void Join_Click(object sender, RoutedEventArgs e)
     {
+        ClearAttachmentMemberStates();
         var ok = NativeMethods.chat_join_start(
             JoinUrlBox.Text.Trim(),
             JoinRoomBox.Text.Trim(),
@@ -179,6 +219,7 @@ public sealed partial class MainWindow : Window
             participants.Clear();
             AddParticipant(JoinUserBox.Text.Trim());
             SetSessionMode(SessionMode.Join);
+            MarkLocalIdentityIfPossible();
         }
     }
 
@@ -352,51 +393,209 @@ public sealed partial class MainWindow : Window
 
     private bool TryRenderAttachment(string kind, string path)
     {
-        if (kind == "image")
+        // Attachments are decrypted and cached by the native core before this
+        // callback. WinUI treats the cached file as untrusted UI input until
+        // preview policy and lightweight structure checks allow rendering.
+        if (kind is not ("image" or "voice" or "file"))
         {
-            var sender = TakeAttachmentSender(kind);
-            var image = new Image
-            {
-                Source = new BitmapImage(new Uri(path)),
-                Stretch = Stretch.Uniform,
-                MaxWidth = 360,
-                MaxHeight = 260
-            };
-            RenderBubble("image", sender, image, SenderOwnsAttachment(sender, path), true);
+            return false;
+        }
+
+        var sender = TakeAttachmentSender(kind);
+        var sizeBytes = File.Exists(path) ? new FileInfo(path).Length : 0;
+        var isOwnLocalAttachment = SenderOwnsAttachment(sender, path);
+        var previewInfo = new AttachmentPreviewInfo(
+            kind,
+            path,
+            sender,
+            sizeBytes,
+            isOwnLocalAttachment,
+            AttachmentMemberStateForSender(sender));
+
+        if (ShouldAutoPreviewAttachment(previewInfo) &&
+            TryCreateAttachmentPreview(previewInfo, out var preview, out _))
+        {
+            RenderBubble(kind, SenderLabel(sender), preview, isOwnLocalAttachment, true);
             return true;
         }
 
-        if (kind == "voice")
+        RenderBubble(kind, SenderLabel(sender), BuildAttachmentCard(previewInfo), isOwnLocalAttachment, true);
+        return true;
+    }
+
+    private bool SenderOwnsAttachment(AttachmentSenderInfo sender, string path)
+    {
+        return string.IsNullOrWhiteSpace(SenderLabel(sender))
+            ? IsOwnAttachmentPath(path)
+            : IsOwnSender(sender.DisplayName);
+    }
+
+    private bool ShouldAutoPreviewAttachment(AttachmentPreviewInfo info)
+    {
+        if (info.Kind == "file") return false;
+        if (info.IsOwnLocalAttachment) return info.Kind == "image" ? autoPreviewImages : autoLoadAudio;
+        if (info.MemberState is AttachmentMemberState.Unknown or AttachmentMemberState.Blocked) return false;
+        if (onlyTrustedAttachmentPreview && info.MemberState != AttachmentMemberState.Trusted) return false;
+        return info.Kind == "image" ? autoPreviewImages : autoLoadAudio;
+    }
+
+    private StackPanel BuildAttachmentCard(AttachmentPreviewInfo info)
+    {
+        var stack = new StackPanel
         {
-            var sender = TakeAttachmentSender(kind);
-            var player = new MediaPlayerElement
+            Spacing = 7,
+            MinWidth = 260,
+            MaxWidth = 560
+        };
+        stack.Children.Add(new TextBlock
+        {
+            Text = UiText("Attachment received", "附件已接收"),
+            FontWeight = FontWeights.SemiBold,
+            TextWrapping = TextWrapping.Wrap
+        });
+        stack.Children.Add(new TextBlock
+        {
+            Text = $"{UiText("Type", "类型")}: {AttachmentKindLabel(info.Kind)}",
+            TextWrapping = TextWrapping.Wrap
+        });
+        stack.Children.Add(new TextBlock
+        {
+            Text = $"{UiText("Source", "来源")}: {SenderLabel(info.Sender, UiText("Unknown member", "未知成员"))}",
+            TextWrapping = TextWrapping.Wrap
+        });
+        stack.Children.Add(new TextBlock
+        {
+            Text = $"{UiText("File", "文件")}: {AttachmentFileLabel(info)} ({FormatBytes(info.SizeBytes)})",
+            TextWrapping = TextWrapping.Wrap
+        });
+        stack.Children.Add(new TextBlock
+        {
+            Text = AttachmentTrustLabel(info),
+            Foreground = new SolidColorBrush(info.MemberState == AttachmentMemberState.Blocked
+                ? Color.FromArgb(255, 176, 32, 32)
+                : info.IsOwnLocalAttachment || info.MemberState is AttachmentMemberState.Verified or AttachmentMemberState.Trusted
+                    ? Color.FromArgb(255, 35, 112, 68)
+                    : Color.FromArgb(255, 160, 83, 28)),
+            TextWrapping = TextWrapping.Wrap
+        });
+
+        if (info.Kind is "image" or "voice")
+        {
+            var previewSlot = new StackPanel { Spacing = 7 };
+            var previewButton = new Button
             {
-                Source = Windows.Media.Core.MediaSource.CreateFromUri(new Uri(path)),
-                AreTransportControlsEnabled = true,
-                TransportControls = new MediaTransportControls
+                Content = UiText("Preview", "预览"),
+                HorizontalAlignment = HorizontalAlignment.Left
+            };
+            ToolTipService.SetToolTip(previewButton, UiText(
+                "Validate and preview this attachment locally.",
+                "先做本地校验，再在界面中预览该附件。"));
+            previewButton.Click += (_, _) =>
+            {
+                previewSlot.Children.Clear();
+                if (TryCreateAttachmentPreview(info, out var preview, out var error))
                 {
-                    IsSeekBarVisible = true,
-                    IsSeekEnabled = true
-                },
-                Width = 540,
-                Height = 110,
-                MinHeight = 110
+                    previewSlot.Children.Add(preview);
+                    return;
+                }
+
+                previewSlot.Children.Add(new TextBlock
+                {
+                    Text = $"{UiText("Preview blocked", "预览已阻止")}: {error}",
+                    Foreground = new SolidColorBrush(Color.FromArgb(255, 176, 32, 32)),
+                    TextWrapping = TextWrapping.Wrap
+                });
             };
-            RenderBubble("voice", sender, player, SenderOwnsAttachment(sender, path), true);
-            return true;
+            previewSlot.Children.Add(previewButton);
+            stack.Children.Add(previewSlot);
         }
 
-        return false;
+        return stack;
     }
 
-    private bool SenderOwnsAttachment(string sender, string path)
+    private bool TryCreateAttachmentPreview(AttachmentPreviewInfo info, out UIElement preview, out string error)
     {
-        return string.IsNullOrWhiteSpace(sender) ? IsOwnAttachmentPath(path) : IsOwnSender(sender);
+        preview = new TextBlock { Text = UiText("No preview", "无预览") };
+        error = "";
+        try
+        {
+            if (info.Kind == "image")
+            {
+                ValidateImagePreview(info.Path, info.SizeBytes);
+                preview = new Image
+                {
+                    Source = new BitmapImage(new Uri(info.Path)),
+                    Stretch = Stretch.Uniform,
+                    MaxWidth = 360,
+                    MaxHeight = 260
+                };
+                return true;
+            }
+
+            if (info.Kind == "voice")
+            {
+                ValidateWavPreview(info.Path, info.SizeBytes);
+                preview = new MediaPlayerElement
+                {
+                    Source = Windows.Media.Core.MediaSource.CreateFromUri(new Uri(info.Path)),
+                    AreTransportControlsEnabled = true,
+                    TransportControls = new MediaTransportControls
+                    {
+                        IsSeekBarVisible = true,
+                        IsSeekEnabled = true
+                    },
+                    Width = 540,
+                    Height = 110,
+                    MinHeight = 110
+                };
+                return true;
+            }
+
+            error = UiText("Generic files are not previewed.", "普通文件不在界面中预览。");
+            return false;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException or ArgumentException)
+        {
+            error = ex.Message;
+            return false;
+        }
     }
 
-    private void RememberAttachmentSender(string type, string sender)
+    private void ValidateImagePreview(string path, long sizeBytes)
     {
-        if (string.IsNullOrWhiteSpace(sender)) return;
+        if (sizeBytes <= 0) throw new InvalidDataException("empty image file");
+        if (sizeBytes > MaxPreviewImageBytes) throw new InvalidDataException("image is too large for inline preview");
+
+        var image = ReadImagePreviewInfo(path);
+        if (image.Width <= 0 || image.Height <= 0) throw new InvalidDataException("invalid image dimensions");
+        if (image.Width > MaxPreviewImageDimension || image.Height > MaxPreviewImageDimension)
+        {
+            throw new InvalidDataException("image dimensions exceed preview limit");
+        }
+        if ((long)image.Width * image.Height > MaxPreviewImagePixels)
+        {
+            throw new InvalidDataException("image pixel count exceeds preview limit");
+        }
+    }
+
+    private void ValidateWavPreview(string path, long sizeBytes)
+    {
+        if (sizeBytes <= 0) throw new InvalidDataException("empty audio file");
+        if (sizeBytes > MaxPreviewAudioBytes) throw new InvalidDataException("audio is too large for inline preview");
+
+        var wav = ReadWavPreviewInfo(path);
+        if (wav.Channels is not (1 or 2)) throw new InvalidDataException("unsupported WAV channel count");
+        if (wav.SampleRate < 8000 || wav.SampleRate > 192000) throw new InvalidDataException("unsupported WAV sample rate");
+        if (wav.BitsPerSample is not (8 or 16 or 24 or 32)) throw new InvalidDataException("unsupported WAV bit depth");
+        if (wav.DurationSeconds <= 0 || wav.DurationSeconds > MaxPreviewAudioSeconds)
+        {
+            throw new InvalidDataException("WAV duration exceeds preview limit");
+        }
+    }
+
+    private void RememberAttachmentSender(string type, AttachmentSenderInfo sender)
+    {
+        if (string.IsNullOrWhiteSpace(sender.DisplayName) && string.IsNullOrWhiteSpace(sender.ActorId)) return;
 
         var kind = type.ToLowerInvariant() switch
         {
@@ -409,17 +608,17 @@ public sealed partial class MainWindow : Window
 
         if (!pendingAttachmentSenders.TryGetValue(kind, out var queue))
         {
-            queue = new Queue<string>();
+            queue = new Queue<AttachmentSenderInfo>();
             pendingAttachmentSenders[kind] = queue;
         }
         queue.Enqueue(sender);
     }
 
-    private string TakeAttachmentSender(string kind)
+    private AttachmentSenderInfo TakeAttachmentSender(string kind)
     {
         if (!pendingAttachmentSenders.TryGetValue(kind, out var queue) || queue.Count == 0)
         {
-            return "";
+            return AttachmentSenderInfo.Empty;
         }
         return queue.Dequeue();
     }
@@ -428,6 +627,459 @@ public sealed partial class MainWindow : Window
     {
         return !path.Contains("\\logs\\", StringComparison.OrdinalIgnoreCase) &&
             !path.Contains("/logs/", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private AttachmentMemberState AttachmentMemberStateForSender(AttachmentSenderInfo sender)
+    {
+        var keys = AttachmentTrustKeys(sender).ToList();
+        if (keys.Any(key => blockedAttachmentMembers.Contains(key))) return AttachmentMemberState.Blocked;
+        var verified = keys.Any(key => verifiedAttachmentMembers.ContainsKey(key));
+        if (!verified) return AttachmentMemberState.Unknown;
+        return keys.Any(key => trustedAttachmentMembers.Contains(key))
+            ? AttachmentMemberState.Trusted
+            : AttachmentMemberState.Verified;
+    }
+
+    private IEnumerable<string> AttachmentTrustKeys(AttachmentSenderInfo sender)
+    {
+        if (!string.IsNullOrWhiteSpace(sender.ActorId)) yield return sender.ActorId.Trim();
+        if (!string.IsNullOrWhiteSpace(sender.DisplayName)) yield return sender.DisplayName.Trim();
+    }
+
+    private static string ParticipantTrustKey(string participant)
+    {
+        var parts = participant.Split(" / ", 2, StringSplitOptions.TrimEntries);
+        return parts.Length == 2 && parts[1].Length > 0 ? parts[1] : participant.Trim();
+    }
+
+    private static IEnumerable<string> ParticipantTrustKeys(string participant)
+    {
+        var displayName = ParticipantDisplayName(participant);
+        if (!string.IsNullOrWhiteSpace(displayName)) yield return displayName.Trim();
+
+        var stableKey = ParticipantTrustKey(participant);
+        if (!string.IsNullOrWhiteSpace(stableKey) &&
+            !string.Equals(stableKey, displayName, StringComparison.OrdinalIgnoreCase))
+        {
+            yield return stableKey;
+        }
+    }
+
+    private static string ParticipantLabel(string displayName, string memberId)
+    {
+        if (string.IsNullOrWhiteSpace(displayName)) return memberId.Trim();
+        if (string.IsNullOrWhiteSpace(memberId) ||
+            string.Equals(displayName.Trim(), memberId.Trim(), StringComparison.OrdinalIgnoreCase))
+        {
+            return displayName.Trim();
+        }
+        return $"{displayName.Trim()} / {memberId.Trim()}";
+    }
+
+    private static string ParticipantDisplayName(string participant)
+    {
+        return participant.Split(" / ", 2, StringSplitOptions.TrimEntries)[0];
+    }
+
+    private bool IsOwnParticipant(string participant)
+    {
+        return IsOwnSender(ParticipantDisplayName(participant));
+    }
+
+    private static string PrimaryParticipantKey(string participant)
+    {
+        return ParticipantTrustKey(participant);
+    }
+
+    private AttachmentMemberState MemberStateForParticipant(string participant)
+    {
+        var keys = ParticipantTrustKeys(participant).ToList();
+        if (keys.Any(key => blockedAttachmentMembers.Contains(key))) return AttachmentMemberState.Blocked;
+        var verified = keys.Any(key => verifiedAttachmentMembers.ContainsKey(key));
+        if (!verified) return AttachmentMemberState.Unknown;
+        return keys.Any(key => trustedAttachmentMembers.Contains(key))
+            ? AttachmentMemberState.Trusted
+            : AttachmentMemberState.Verified;
+    }
+
+    private VerifiedMemberInfo? VerifiedInfoForParticipant(string participant)
+    {
+        foreach (var key in ParticipantTrustKeys(participant))
+        {
+            if (verifiedAttachmentMembers.TryGetValue(key, out var info)) return info;
+        }
+        return null;
+    }
+
+    private void ToggleTrustedParticipant(string participant)
+    {
+        var key = PrimaryParticipantKey(participant);
+        if (key.Length == 0) return;
+
+        var state = MemberStateForParticipant(participant);
+        if (state == AttachmentMemberState.Trusted)
+        {
+            trustedAttachmentMembers.Remove(key);
+        }
+        else if (state == AttachmentMemberState.Verified)
+        {
+            blockedAttachmentMembers.Remove(key);
+            trustedAttachmentMembers.Add(key);
+        }
+        RefreshParticipants();
+    }
+
+    private void ToggleBlockedParticipant(string participant)
+    {
+        var key = PrimaryParticipantKey(participant);
+        if (key.Length == 0) return;
+
+        if (!blockedAttachmentMembers.Remove(key))
+        {
+            trustedAttachmentMembers.Remove(key);
+            blockedAttachmentMembers.Add(key);
+        }
+        RefreshParticipants();
+    }
+
+    private void MarkVerifiedMember(string displayName, string memberId, string fingerprint, string subject = "")
+    {
+        var normalizedId = memberId.Trim();
+        var normalizedName = displayName.Trim();
+        var normalizedFingerprint = fingerprint.Trim();
+        if (normalizedFingerprint.Length == 0) return;
+
+        var shownName = normalizedName.Length == 0 ? normalizedId : normalizedName;
+        var info = new VerifiedMemberInfo(shownName, normalizedFingerprint, subject.Trim());
+        if (normalizedId.Length > 0) verifiedAttachmentMembers[normalizedId] = info;
+        if (normalizedName.Length > 0) verifiedAttachmentMembers[normalizedName] = info;
+
+        // Replace older display-only rows with the stable "name / id" row once
+        // PKI has bound that room member to a certificate fingerprint.
+        RemoveParticipant(normalizedId);
+        RemoveParticipant(normalizedName);
+        var participant = ParticipantLabel(shownName, normalizedId);
+        if (participant.Length > 0) participants.Add(participant);
+        RefreshParticipants();
+    }
+
+    private bool TryMarkVerifiedMemberStatus(string message)
+    {
+        const string prefix = "PKI member verified: ";
+        if (!message.StartsWith(prefix, StringComparison.Ordinal)) return false;
+
+        var parts = message[prefix.Length..]
+            .Split(" / ", 4, StringSplitOptions.TrimEntries);
+        if (parts.Length < 3) return false;
+
+        MarkVerifiedMember(parts[0], parts[1], parts[2], parts.Length >= 4 ? parts[3] : "");
+        return true;
+    }
+
+    private bool TryRememberLocalIdentityStatus(string message)
+    {
+        const string prefix = "PKI identity ready: ";
+        if (!message.StartsWith(prefix, StringComparison.Ordinal)) return false;
+
+        pendingLocalIdentityFingerprint = message[prefix.Length..].Trim();
+        MarkLocalIdentityIfPossible();
+        return true;
+    }
+
+    private bool TryMarkJoinedLocalMemberStatus(string message)
+    {
+        const string prefix = "Joined room ";
+        if (!message.StartsWith(prefix, StringComparison.Ordinal)) return false;
+
+        var open = message.LastIndexOf(" (", StringComparison.Ordinal);
+        var close = message.EndsWith(")", StringComparison.Ordinal) ? message.Length - 1 : -1;
+        var asIndex = message.LastIndexOf(" as ", StringComparison.Ordinal);
+        if (asIndex < 0 || open <= asIndex || close <= open) return false;
+
+        var username = message[(asIndex + 4)..open].Trim();
+        var memberId = message[(open + 2)..close].Trim();
+        if (username.Length > 0 && memberId.Length > 0 && pendingLocalIdentityFingerprint.Length > 0)
+        {
+            MarkVerifiedMember(username, memberId, pendingLocalIdentityFingerprint);
+            return true;
+        }
+        return false;
+    }
+
+    private void MarkLocalIdentityIfPossible()
+    {
+        if (pendingLocalIdentityFingerprint.Length == 0) return;
+
+        if (sessionMode == SessionMode.Host)
+        {
+            var displayName = HostUserBox.Text.Trim();
+            MarkVerifiedMember(displayName.Length == 0 ? "host" : displayName, "host", pendingLocalIdentityFingerprint);
+            return;
+        }
+
+        var ownParticipant = participants.FirstOrDefault(IsOwnParticipant);
+        if (!string.IsNullOrWhiteSpace(ownParticipant))
+        {
+            var memberId = ParticipantTrustKey(ownParticipant);
+            if (!string.IsNullOrWhiteSpace(memberId) &&
+                !string.Equals(memberId, ParticipantDisplayName(ownParticipant), StringComparison.OrdinalIgnoreCase))
+            {
+                MarkVerifiedMember(ParticipantDisplayName(ownParticipant), memberId, pendingLocalIdentityFingerprint);
+            }
+        }
+    }
+
+    private void PruneAttachmentMemberStates()
+    {
+        var liveKeys = participants.SelectMany(ParticipantTrustKeys)
+            .Where(key => key.Length > 0)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        trustedAttachmentMembers.RemoveWhere(key => !liveKeys.Contains(key));
+        blockedAttachmentMembers.RemoveWhere(key => !liveKeys.Contains(key));
+        foreach (var key in verifiedAttachmentMembers.Keys.Where(key => !liveKeys.Contains(key)).ToList())
+        {
+            verifiedAttachmentMembers.Remove(key);
+        }
+    }
+
+    private static Color MemberStateBackground(AttachmentMemberState state)
+    {
+        return state switch
+        {
+            AttachmentMemberState.Verified or AttachmentMemberState.Trusted => Color.FromArgb(54, 28, 135, 73),
+            AttachmentMemberState.Blocked or AttachmentMemberState.Unknown => Color.FromArgb(54, 176, 32, 32),
+            _ => Color.FromArgb(20, 0, 0, 0)
+        };
+    }
+
+    private static Color MemberStateBorder(AttachmentMemberState state)
+    {
+        return state switch
+        {
+            AttachmentMemberState.Verified or AttachmentMemberState.Trusted => Color.FromArgb(190, 28, 135, 73),
+            AttachmentMemberState.Blocked or AttachmentMemberState.Unknown => Color.FromArgb(190, 176, 32, 32),
+            _ => Color.FromArgb(50, 0, 0, 0)
+        };
+    }
+
+    private void CopyParticipantFingerprint(string participant)
+    {
+        var info = VerifiedInfoForParticipant(participant);
+        if (info is null || string.IsNullOrWhiteSpace(info.Fingerprint))
+        {
+            ShowInfo(UiText("Fingerprint is not available", "指纹不可用"), InfoBarSeverity.Warning);
+            return;
+        }
+
+        var package = new DataPackage();
+        package.SetText(info.Fingerprint);
+        Clipboard.SetContent(package);
+        ShowInfo(UiText("Fingerprint copied", "指纹已复制"), InfoBarSeverity.Success);
+    }
+
+    private static string SenderLabel(AttachmentSenderInfo sender, string fallback = "")
+    {
+        if (!string.IsNullOrWhiteSpace(sender.DisplayName)) return sender.DisplayName.Trim();
+        if (!string.IsNullOrWhiteSpace(sender.ActorId)) return sender.ActorId.Trim();
+        return fallback;
+    }
+
+    private string AttachmentTrustLabel(AttachmentPreviewInfo info)
+    {
+        if (info.IsOwnLocalAttachment) return UiText("Local file selected by you", "你本地选择的文件");
+        return info.MemberState switch
+        {
+            AttachmentMemberState.Blocked => UiText("Blocked member: preview is disabled", "已阻止成员：禁用预览"),
+            AttachmentMemberState.Trusted => UiText("Trusted verified member: auto-preview may run", "已信任且已验证成员：可自动预览"),
+            AttachmentMemberState.Verified => onlyTrustedAttachmentPreview
+                ? UiText("Verified member: trust manually to allow auto-preview", "已验证成员：手动信任后才自动预览")
+                : UiText("Verified member: auto-preview may run", "已验证成员：可自动预览"),
+            _ => UiText("Unknown member: click Preview only if you trust the source", "未知成员：仅在信任来源时点击预览")
+        };
+    }
+
+    private string AttachmentKindLabel(string kind)
+    {
+        return kind switch
+        {
+            "image" => UiText("Image", "图片"),
+            "voice" => UiText("Audio", "音频"),
+            "file" => UiText("File", "文件"),
+            _ => kind
+        };
+    }
+
+    private static string AttachmentFileLabel(AttachmentPreviewInfo info)
+    {
+        var fileName = string.IsNullOrWhiteSpace(info.Sender.FileName)
+            ? Path.GetFileName(info.Path)
+            : Path.GetFileName(info.Sender.FileName);
+        return string.IsNullOrWhiteSpace(fileName) ? "attachment" : fileName;
+    }
+
+    private static string FormatBytes(long bytes)
+    {
+        if (bytes < 1024) return $"{bytes} B";
+        var units = new[] { "KB", "MB", "GB" };
+        var value = bytes / 1024.0;
+        var unit = 0;
+        while (value >= 1024 && unit < units.Length - 1)
+        {
+            value /= 1024;
+            unit++;
+        }
+        return $"{value:0.##} {units[unit]}";
+    }
+
+    private static ImagePreviewInfo ReadImagePreviewInfo(string path)
+    {
+        // Read only container dimensions before constructing BitmapImage so a
+        // huge or malformed file can be rejected before decoder allocation.
+        var bytes = File.ReadAllBytes(path);
+        if (bytes.Length >= 24 &&
+            bytes[0] == 0x89 && bytes[1] == 0x50 && bytes[2] == 0x4E && bytes[3] == 0x47 &&
+            bytes[12] == 0x49 && bytes[13] == 0x48 && bytes[14] == 0x44 && bytes[15] == 0x52)
+        {
+            return new ImagePreviewInfo((int)ReadUInt32BE(bytes, 16), (int)ReadUInt32BE(bytes, 20));
+        }
+
+        if (bytes.Length >= 26 && bytes[0] == 0x42 && bytes[1] == 0x4D)
+        {
+            var width = ReadInt32LE(bytes, 18);
+            var height = Math.Abs(ReadInt32LE(bytes, 22));
+            return new ImagePreviewInfo(width, height);
+        }
+
+        if (bytes.Length >= 4 && bytes[0] == 0xFF && bytes[1] == 0xD8)
+        {
+            return ReadJpegPreviewInfo(bytes);
+        }
+
+        throw new InvalidDataException("unsupported image header");
+    }
+
+    private static ImagePreviewInfo ReadJpegPreviewInfo(byte[] bytes)
+    {
+        var offset = 2;
+        while (offset + 3 < bytes.Length)
+        {
+            while (offset < bytes.Length && bytes[offset] != 0xFF) offset++;
+            while (offset < bytes.Length && bytes[offset] == 0xFF) offset++;
+            if (offset >= bytes.Length) break;
+
+            var marker = bytes[offset++];
+            if (marker is 0xD9 or 0xDA) break;
+            if (offset + 1 >= bytes.Length) break;
+
+            var segmentLength = ReadUInt16BE(bytes, offset);
+            offset += 2;
+            if (segmentLength < 2 || offset + segmentLength - 2 > bytes.Length)
+            {
+                throw new InvalidDataException("invalid JPEG segment");
+            }
+
+            if (IsJpegStartOfFrame(marker))
+            {
+                if (segmentLength < 7) throw new InvalidDataException("invalid JPEG frame");
+                var height = ReadUInt16BE(bytes, offset + 1);
+                var width = ReadUInt16BE(bytes, offset + 3);
+                return new ImagePreviewInfo(width, height);
+            }
+
+            offset += segmentLength - 2;
+        }
+
+        throw new InvalidDataException("JPEG dimensions not found");
+    }
+
+    private static bool IsJpegStartOfFrame(byte marker)
+    {
+        return marker is 0xC0 or 0xC1 or 0xC2 or 0xC3 or 0xC5 or 0xC6 or 0xC7 or
+            0xC9 or 0xCA or 0xCB or 0xCD or 0xCE or 0xCF;
+    }
+
+    private static WavPreviewInfo ReadWavPreviewInfo(string path)
+    {
+        // Validate the RIFF/WAVE chunk layout before MediaPlayerElement sees the
+        // file. This lowers accidental resource risk; it is not malware scanning.
+        using var stream = File.OpenRead(path);
+        using var reader = new BinaryReader(stream, Encoding.ASCII, leaveOpen: false);
+        if (stream.Length < 44) throw new InvalidDataException("WAV file is too short");
+        if (ReadFourCc(reader) != "RIFF") throw new InvalidDataException("missing RIFF header");
+        _ = reader.ReadUInt32();
+        if (ReadFourCc(reader) != "WAVE") throw new InvalidDataException("missing WAVE header");
+
+        var hasFormat = false;
+        var hasData = false;
+        ushort audioFormat = 0;
+        ushort channels = 0;
+        var sampleRate = 0;
+        uint byteRate = 0;
+        ushort bitsPerSample = 0;
+        uint dataBytes = 0;
+
+        while (stream.Position + 8 <= stream.Length)
+        {
+            var chunkId = ReadFourCc(reader);
+            var chunkSize = reader.ReadUInt32();
+            var chunkStart = stream.Position;
+            var chunkEnd = chunkStart + chunkSize;
+            if (chunkEnd > stream.Length) throw new InvalidDataException("WAV chunk exceeds file size");
+
+            if (chunkId == "fmt ")
+            {
+                if (chunkSize < 16) throw new InvalidDataException("invalid WAV fmt chunk");
+                audioFormat = reader.ReadUInt16();
+                channels = reader.ReadUInt16();
+                sampleRate = (int)reader.ReadUInt32();
+                byteRate = reader.ReadUInt32();
+                _ = reader.ReadUInt16();
+                bitsPerSample = reader.ReadUInt16();
+                hasFormat = true;
+            }
+            else if (chunkId == "data")
+            {
+                dataBytes = chunkSize;
+                hasData = true;
+            }
+
+            var nextChunk = chunkEnd + (chunkSize % 2);
+            if (nextChunk > stream.Length) throw new InvalidDataException("invalid WAV chunk padding");
+            stream.Position = nextChunk;
+        }
+
+        if (!hasFormat || !hasData) throw new InvalidDataException("WAV fmt/data chunk missing");
+        if (audioFormat != 1) throw new InvalidDataException("only PCM WAV preview is allowed");
+        if (byteRate == 0) throw new InvalidDataException("invalid WAV byte rate");
+        return new WavPreviewInfo(channels, sampleRate, bitsPerSample, dataBytes / (double)byteRate);
+    }
+
+    private static string ReadFourCc(BinaryReader reader)
+    {
+        var bytes = reader.ReadBytes(4);
+        if (bytes.Length != 4) throw new InvalidDataException("unexpected end of file");
+        return Encoding.ASCII.GetString(bytes);
+    }
+
+    private static ushort ReadUInt16BE(byte[] bytes, int offset)
+    {
+        return (ushort)((bytes[offset] << 8) | bytes[offset + 1]);
+    }
+
+    private static uint ReadUInt32BE(byte[] bytes, int offset)
+    {
+        return ((uint)bytes[offset] << 24) |
+            ((uint)bytes[offset + 1] << 16) |
+            ((uint)bytes[offset + 2] << 8) |
+            bytes[offset + 3];
+    }
+
+    private static int ReadInt32LE(byte[] bytes, int offset)
+    {
+        return bytes[offset] |
+            (bytes[offset + 1] << 8) |
+            (bytes[offset + 2] << 16) |
+            (bytes[offset + 3] << 24);
     }
 
     private void RenderBubble(string kind, string sender, UIElement content, bool isOwnSender, bool isFilterable)
@@ -505,11 +1157,47 @@ public sealed partial class MainWindow : Window
                 var root = document.RootElement;
                 var type = root.TryGetProperty("type", out var typeValue) ? typeValue.GetString() ?? "" : "";
                 var from = root.TryGetProperty("from", out var fromValue) ? fromValue.GetString() ?? "" : "";
+                var actorId = from;
                 if (root.TryGetProperty("payload", out var payload) &&
-                    payload.ValueKind == JsonValueKind.Object &&
-                    payload.TryGetProperty("displayName", out var displayName))
+                    payload.ValueKind == JsonValueKind.Object)
                 {
-                    from = displayName.GetString() ?? from;
+                    if (payload.TryGetProperty("actorId", out var actorIdValue))
+                    {
+                        actorId = actorIdValue.GetString() ?? actorId;
+                    }
+                    if (payload.TryGetProperty("displayName", out var displayName))
+                    {
+                        from = displayName.GetString() ?? from;
+                    }
+                }
+                if (type == "member_identity")
+                {
+                    // Member identity announcements are encrypted control messages.
+                    // Only Host-authored relay metadata is accepted as a PKI state update.
+                    if (root.TryGetProperty("payload", out var identityPayload) &&
+                        identityPayload.ValueKind == JsonValueKind.Object &&
+                        identityPayload.TryGetProperty("relaySenderId", out var relaySenderId) &&
+                        identityPayload.TryGetProperty("relaySenderKind", out var relaySenderKind) &&
+                        string.Equals(relaySenderId.GetString(), "host", StringComparison.OrdinalIgnoreCase) &&
+                        string.Equals(relaySenderKind.GetString(), "host", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var memberId = identityPayload.TryGetProperty("memberId", out var memberIdValue)
+                            ? memberIdValue.GetString() ?? ""
+                            : "";
+                        var memberName = identityPayload.TryGetProperty("displayName", out var memberNameValue)
+                            ? memberNameValue.GetString() ?? memberId
+                            : memberId;
+                        var fingerprint = identityPayload.TryGetProperty("fingerprint", out var fingerprintValue)
+                            ? fingerprintValue.GetString() ?? ""
+                            : "";
+                        var subject = identityPayload.TryGetProperty("subject", out var subjectValue)
+                            ? subjectValue.GetString() ?? ""
+                            : "";
+                        MarkVerifiedMember(memberName, memberId, fingerprint, subject);
+                    }
+                    body = "";
+                    displayKind = "status";
+                    return new ChatDisplayLine(displayKind, sender, body, false, false);
                 }
                 var privateTypeSuffix = root.TryGetProperty("payload", out var privatePayload) &&
                     privatePayload.ValueKind == JsonValueKind.Object &&
@@ -529,10 +1217,8 @@ public sealed partial class MainWindow : Window
                     var name = root.TryGetProperty("name", out var nameValue) ? nameValue.GetString() ?? "" : "";
                     sender = from;
                     displayKind = "message" + privateTypeSuffix;
-                    RememberAttachmentSender(type, sender);
-                    body = type == "file_meta"
-                        ? $"sent file {name}"
-                        : "";
+                    RememberAttachmentSender(type, new AttachmentSenderInfo(sender, actorId, name));
+                    body = "";
                 }
             }
             catch
@@ -648,6 +1334,10 @@ public sealed partial class MainWindow : Window
         // Entries are formatted as "name / id" so users can target private sends.
         if (kind != "status") return;
 
+        TryRememberLocalIdentityStatus(message);
+        TryMarkJoinedLocalMemberStatus(message);
+        if (TryMarkVerifiedMemberStatus(message)) return;
+
         const string membersPrefix = "Room members: ";
         if (message.StartsWith(membersPrefix, StringComparison.Ordinal))
         {
@@ -657,6 +1347,8 @@ public sealed partial class MainWindow : Window
             {
                 participants.Add(name);
             }
+            MarkLocalIdentityIfPossible();
+            PruneAttachmentMemberStates();
             RefreshParticipants();
             return;
         }
@@ -676,7 +1368,8 @@ public sealed partial class MainWindow : Window
     private void RemoveStatusName(string message, string prefix)
     {
         if (!message.StartsWith(prefix, StringComparison.Ordinal)) return;
-        participants.Remove(message[prefix.Length..].Trim());
+        RemoveParticipant(message[prefix.Length..].Trim());
+        PruneAttachmentMemberStates();
         RefreshParticipants();
     }
 
@@ -687,10 +1380,29 @@ public sealed partial class MainWindow : Window
         RefreshParticipants();
     }
 
+    private void RemoveParticipant(string name)
+    {
+        if (string.IsNullOrWhiteSpace(name)) return;
+        var normalized = name.Trim();
+        participants.RemoveWhere(participant =>
+            string.Equals(participant, normalized, StringComparison.OrdinalIgnoreCase) ||
+            ParticipantTrustKeys(participant).Any(key => string.Equals(key, normalized, StringComparison.OrdinalIgnoreCase)));
+    }
+
     private void ResetParticipants()
     {
         participants.Clear();
+        ClearAttachmentMemberStates();
         RefreshParticipants();
+    }
+
+    private void ClearAttachmentMemberStates()
+    {
+        trustedAttachmentMembers.Clear();
+        blockedAttachmentMembers.Clear();
+        verifiedAttachmentMembers.Clear();
+        pendingAttachmentSenders.Clear();
+        pendingLocalIdentityFingerprint = "";
     }
 
     private void RefreshParticipants()
@@ -715,16 +1427,82 @@ public sealed partial class MainWindow : Window
 
         foreach (var name in names)
         {
+            var state = MemberStateForParticipant(name);
+            var verifiedInfo = VerifiedInfoForParticipant(name);
+            var row = new Grid { ColumnSpacing = 8 };
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+            var identityBox = new Border
+            {
+                Padding = new Thickness(8, 5, 8, 5),
+                Background = new SolidColorBrush(MemberStateBackground(state)),
+                BorderBrush = new SolidColorBrush(MemberStateBorder(state)),
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(6),
+                Child = new TextBlock
+                {
+                    Text = name,
+                    TextWrapping = TextWrapping.Wrap,
+                    FontWeight = FontWeights.SemiBold,
+                    IsTextSelectionEnabled = false
+                }
+            };
+            ToolTipService.SetToolTip(identityBox, verifiedInfo is null
+                ? UiText("Fingerprint is not available", "指纹不可用")
+                : UiText("Click to copy certificate fingerprint", "点击复制证书指纹"));
+            identityBox.Tapped += (_, _) => CopyParticipantFingerprint(name);
+            row.Children.Add(identityBox);
+
+            if (!IsOwnParticipant(name))
+            {
+                var actions = new StackPanel
+                {
+                    Orientation = Orientation.Vertical,
+                    Spacing = 4,
+                    VerticalAlignment = VerticalAlignment.Center
+                };
+                if (state is AttachmentMemberState.Verified or AttachmentMemberState.Trusted)
+                {
+                    var trustButton = new Button
+                    {
+                        Content = state == AttachmentMemberState.Trusted
+                            ? UiText("Untrust", "取消信任")
+                            : UiText("Trust", "信任"),
+                        Padding = new Thickness(8, 3, 8, 3),
+                        MinWidth = 0
+                    };
+                    ToolTipService.SetToolTip(trustButton, UiText(
+                        "Trust only changes local auto-preview policy for this verified member.",
+                        "信任只改变该已验证成员在本机的自动预览策略。"));
+                    trustButton.Click += (_, _) => ToggleTrustedParticipant(name);
+                    actions.Children.Add(trustButton);
+                }
+
+                var blockButton = new Button
+                {
+                    Content = state == AttachmentMemberState.Blocked
+                        ? UiText("Unblock", "解除阻止")
+                        : UiText("Block", "阻止"),
+                    Padding = new Thickness(8, 3, 8, 3),
+                    MinWidth = 0
+                };
+                ToolTipService.SetToolTip(blockButton, UiText(
+                    "Blocked members never auto-preview attachments on this device.",
+                    "被阻止成员的附件不会在本机自动预览。"));
+                blockButton.Click += (_, _) => ToggleBlockedParticipant(name);
+                actions.Children.Add(blockButton);
+
+                Grid.SetColumn(actions, 1);
+                row.Children.Add(actions);
+            }
+
             RoomParticipantsPanel.Children.Add(new Border
             {
                 Padding = new Thickness(10, 7, 10, 7),
                 Background = new SolidColorBrush(Color.FromArgb(20, 0, 0, 0)),
                 CornerRadius = new CornerRadius(6),
-                Child = new TextBlock
-                {
-                    Text = name,
-                    TextWrapping = TextWrapping.Wrap
-                }
+                Child = row
             });
         }
         RefreshRoomPanel();
@@ -902,6 +1680,22 @@ public sealed partial class MainWindow : Window
     {
         showOnlyOwnMessages = ShowOnlyOwnToggleSwitch.IsOn;
         RefreshBubbleVisibility();
+        SaveAppConfigIfReady();
+    }
+
+    private void AttachmentPreviewSetting_Toggled(object sender, RoutedEventArgs e)
+    {
+        if (refreshingLanguage) return;
+        if (AutoPreviewImagesToggleSwitch is null ||
+            AutoLoadAudioToggleSwitch is null ||
+            TrustedMembersOnlyToggleSwitch is null)
+        {
+            return;
+        }
+
+        autoPreviewImages = AutoPreviewImagesToggleSwitch.IsOn;
+        autoLoadAudio = AutoLoadAudioToggleSwitch.IsOn;
+        onlyTrustedAttachmentPreview = TrustedMembersOnlyToggleSwitch.IsOn;
         SaveAppConfigIfReady();
     }
 
@@ -1212,6 +2006,16 @@ public sealed partial class MainWindow : Window
             ShowOnlyOwnToggleSwitch.Header = UiText("Only my messages", "只看自己");
             ShowOnlyOwnToggleSwitch.OnContent = UiText("On", "开");
             ShowOnlyOwnToggleSwitch.OffContent = UiText("Off", "关");
+            AttachmentSafetyHeaderText.Text = UiText("Attachment Safety", "附件安全");
+            AutoPreviewImagesToggleSwitch.Header = UiText("Auto preview images", "自动预览图片");
+            AutoPreviewImagesToggleSwitch.OnContent = UiText("On", "开");
+            AutoPreviewImagesToggleSwitch.OffContent = UiText("Off", "关");
+            AutoLoadAudioToggleSwitch.Header = UiText("Auto load audio", "自动加载音频");
+            AutoLoadAudioToggleSwitch.OnContent = UiText("On", "开");
+            AutoLoadAudioToggleSwitch.OffContent = UiText("Off", "关");
+            TrustedMembersOnlyToggleSwitch.Header = UiText("Only trusted members auto-preview", "仅信任成员自动预览");
+            TrustedMembersOnlyToggleSwitch.OnContent = UiText("On", "开");
+            TrustedMembersOnlyToggleSwitch.OffContent = UiText("Off", "关");
             ChatBackgroundHeaderText.Text = UiText("Chat Background", "聊天背景");
             ImportChatBackgroundButton.Content = UiText("Import Image", "导入图片");
             ClearChatBackgroundButton.Content = UiText("Clear Image", "清除图片");
@@ -1325,6 +2129,9 @@ public sealed partial class MainWindow : Window
             AppendYaml(builder, "infobar_seconds", NumberString(InfoBarSecondsSlider.Value));
             AppendYaml(builder, "settings_panel_opacity", NumberString(SettingsPanelOpacitySlider.Value));
             AppendYaml(builder, "show_only_own", showOnlyOwnMessages ? "true" : "false");
+            AppendYaml(builder, "auto_preview_images", autoPreviewImages ? "true" : "false");
+            AppendYaml(builder, "auto_load_audio", autoLoadAudio ? "true" : "false");
+            AppendYaml(builder, "only_trusted_attachment_preview", onlyTrustedAttachmentPreview ? "true" : "false");
             AppendYaml(builder, "host_server_url", HostServerUrlBox.Text.Trim());
             AppendYaml(builder, "chat_background_path", chatBackgroundPath ?? "");
             AppendYaml(builder, "chat_background_opacity", NumberString(BackgroundOpacitySlider.Value));
@@ -1363,6 +2170,12 @@ public sealed partial class MainWindow : Window
             SetSlider(SettingsPanelOpacitySlider, Value(chatValues, "settings_panel_opacity", "0.99"));
             showOnlyOwnMessages = Value(chatValues, "show_only_own", "false").Equals("true", StringComparison.OrdinalIgnoreCase);
             ShowOnlyOwnToggleSwitch.IsOn = showOnlyOwnMessages;
+            autoPreviewImages = Value(chatValues, "auto_preview_images", "true").Equals("true", StringComparison.OrdinalIgnoreCase);
+            autoLoadAudio = Value(chatValues, "auto_load_audio", "false").Equals("true", StringComparison.OrdinalIgnoreCase);
+            onlyTrustedAttachmentPreview = Value(chatValues, "only_trusted_attachment_preview", "true").Equals("true", StringComparison.OrdinalIgnoreCase);
+            AutoPreviewImagesToggleSwitch.IsOn = autoPreviewImages;
+            AutoLoadAudioToggleSwitch.IsOn = autoLoadAudio;
+            TrustedMembersOnlyToggleSwitch.IsOn = onlyTrustedAttachmentPreview;
             var hostServerUrl = Value(chatValues, "host_server_url", "");
             // Migrate the old built-in localhost default to an empty field; users
             // should choose the Server endpoint explicitly for each deployment.

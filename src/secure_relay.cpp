@@ -314,7 +314,15 @@ Message decryptMessageWithGroupKey(
     const auto senderKind = envelope.value("senderKind", "");
     const auto targetId = envelope.value("targetId", "");
     const auto plaintext = decryptWithAesGcm(envelope, key, aadForEnvelope(roomId, senderId, senderKind, targetId));
-    return Message::fromJson(plaintext);
+    auto message = Message::fromJson(plaintext);
+    // The relay metadata is authenticated by AES-GCM AAD and was bound by the
+    // Server to the WebSocket session. Copy it into payload so local handlers can
+    // distinguish Host-authored control messages from member-forged plaintext.
+    message.payload["relaySenderId"] = senderId;
+    message.payload["relaySenderKind"] = senderKind;
+    message.payload["relaySenderName"] = envelope.value("senderName", "");
+    message.payload["relayTargetId"] = targetId;
+    return message;
 }
 
 json encryptGroupKeyForMember(

@@ -255,6 +255,10 @@
                         <Slider x:Name="InfoBarSecondsSlider" Header="InfoBar seconds" Minimum="1" Maximum="15" Value="5" StepFrequency="1" ValueChanged="PersistedSetting_Changed" />
                         <Slider x:Name="SettingsPanelOpacitySlider" Header="Settings panel opacity" Minimum="0.86" Maximum="1" Value="0.99" StepFrequency="0.01" ValueChanged="SettingsPanelOpacitySlider_ValueChanged" />
                         <ToggleSwitch x:Name="ShowOnlyOwnToggleSwitch" Header="Only my messages" Toggled="ShowOnlyOwnToggleSwitch_Toggled" />
+                        <TextBlock x:Name="AttachmentSafetyHeaderText" Text="Attachment Safety" FontWeight="SemiBold" />
+                        <ToggleSwitch x:Name="AutoPreviewImagesToggleSwitch" Header="Auto preview images" IsOn="True" Toggled="AttachmentPreviewSetting_Toggled" />
+                        <ToggleSwitch x:Name="AutoLoadAudioToggleSwitch" Header="Auto load audio" Toggled="AttachmentPreviewSetting_Toggled" />
+                        <ToggleSwitch x:Name="TrustedMembersOnlyToggleSwitch" Header="Only trusted members auto-preview" IsOn="True" Toggled="AttachmentPreviewSetting_Toggled" />
                         <TextBlock x:Name="ChatBackgroundHeaderText" Text="Chat Background" FontWeight="SemiBold" />
                         <Grid ColumnSpacing="8">
                             <Grid.ColumnDefinitions>

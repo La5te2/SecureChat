@@ -2,6 +2,8 @@
 
 本文档用于阶段 10：敌手测试和显式安全性验证。所有测试只在本地环境、受控实验网络或自己控制的云服务器上执行。
 
+测试前的安装、编译、运行、PKI 和反向代理入口见 `README.md` 的“完整测试流程”；本文档记录阶段 10 需要执行或手动复现的安全实验步骤。
+
 ## 已完成的本机验证
 
 ### 构建验证
@@ -236,7 +238,7 @@ export SECURECHAT_MTLS_CLIENT_KEY_FILE=certs/pki/alice-key.pem
 
 ## 手动实验 4：PKI public key 替换验证
 
-目的：证明启用 PKI 后，篡改 `join_room.publicKey` 会被 Host 拒绝。
+目的：证明强制 PKI 下，篡改 `join_room.publicKey` 会被 Host 拒绝。
 
 ### 步骤
 
@@ -302,13 +304,58 @@ grep -R "secret-message-123\|secret-plan.txt" server.log logs || true
 - 把文本文件改名为 `.png` 后用 `/image` 发送：文件头校验失败；
 - 把非 WAV 文件改名为 `.wav` 后用 `/voice` 发送：RIFF/WAVE 校验失败；
 - 发送名为 `../../evil.txt` 的附件：接收端文件名被净化，只落在 `logs/files`；
-- 设置 `SECURECHAT_LOGS_MAX_BYTES=1048576` 后连续发送多个附件：缓存目录清理旧文件或拒绝新附件。
+- 设置 `SECURECHAT_LOGS_MAX_BYTES=1048576` 后连续发送多个附件：缓存目录清理旧文件或拒绝新附件；
+- WinUI 中发送者是 Unknown 或 Blocked 时接收图片/音频：界面只显示“附件已接收”，不会自动预览；
+- WinUI 中 PKI Verified 成员被当前房间临时标记为 Trusted 后接收图片：若“自动预览图片”和“仅信任成员自动预览”开启，图片通过尺寸和像素校验后自动预览；
+- WinUI 中接收异常大尺寸图片或异常 WAV：附件卡片存在，但点击预览时显示“预览已阻止”。
 
 截图建议：
 
 - 拒绝提示；
 - 接收端最终保存路径；
 - 缓存清理前后目录大小。
+
+## 手动实验 7：端口扫描和 TCP 半连接
+
+目的：验证公网部署只暴露必要端口，并说明 TCP 半连接攻击主要由系统、云安全组和反向代理层缓解。
+
+### 端口扫描步骤
+
+在授权测试机上扫描自己的服务器：
+
+```bash
+nmap -Pn -p 22,80,443,25566,25567,5188 <your-server-ip-or-domain>
+```
+
+在服务器上对照监听和防火墙：
+
+```bash
+ss -lntp
+sudo ufw status
+```
+
+### 端口扫描预期现象
+
+- 普通公网 Server 部署只需要暴露 TCP `25566`。
+- Web UI `5188` 不应直接暴露公网。
+- mTLS 反向代理部署中，公网只暴露 Nginx `25566`，SecureChat backend `25567` 只监听 `127.0.0.1`。
+
+### TCP 半连接步骤
+
+只在自己控制的服务器上做低速、限量测试：
+
+```bash
+sysctl net.ipv4.tcp_syncookies
+ss -ant state syn-recv
+sudo nping --tcp -S -p 25566 --rate 10 -c 100 <your-server-ip-or-domain>
+watch -n 1 "ss -ant state syn-recv | wc -l"
+```
+
+### TCP 半连接预期现象
+
+- 低速、限量 SYN 测试不应导致正常 Host/Client 长时间不可用。
+- 半连接防护主要来自 Linux TCP 栈、SYN cookies、云安全组、Nginx 和连接 backlog。
+- SecureChat 应用层连接超时、连接数限制和坏消息限制只处理 WebSocket 建立之后的资源消耗。
 
 ## 结论记录模板
 

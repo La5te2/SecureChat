@@ -107,7 +107,7 @@ void requireFieldsForType(const json& data, const std::string& type) {
         stringField(data, "username", 64, true);
         stringField(data, "password", maxPasswordBytes, true);
         stringField(data, "publicKey", maxPublicKeyBytes, true);
-        identityField(data, false);
+        identityField(data, true);
     }
     else if (type == "group_key") {
         if (!hasOnlyFields(data, {
@@ -137,7 +137,7 @@ void requireFieldsForType(const json& data, const std::string& type) {
         stringField(data, "nonce", 64, true);
         stringField(data, "ciphertext", 256, true);
         stringField(data, "tag", 64, true);
-        identityField(data, false);
+        identityField(data, true);
     }
     else if (type == "reject_client") {
         if (!hasOnlyFields(data, {"type", "roomId", "targetId", "reason"})) {
