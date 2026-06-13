@@ -64,6 +64,66 @@ ss -lntp | grep ':25566' || echo '25566 released'
 
 模板包含 `Restart=on-failure`、`RestartSec=3`、`NoNewPrivileges=true`，并使用专用 `securechat` 用户。systemd 只改善进程监督和权限边界，不能替代 WSS 或应用层 E2EE。
 
+## 可选 mTLS 反向代理
+
+当前 libdatachannel 的 `WebSocketServer` 只暴露服务器证书配置，不暴露 TLS 握手阶段的客户端证书校验接口。因此 SecureChat 的 mTLS 部署通过 Nginx 反向代理实现：
+
+```text
+Host/Client -- mTLS WSS --> Nginx :25566 -- local WS --> SecureChat Server 127.0.0.1:25567
+```
+
+这种模式下，Nginx 在 TLS 握手阶段要求客户端证书，并用 `ssl_client_certificate` 指向的 CA 验证证书链。SecureChat Server 只监听本机地址，继续负责房间注册、成员状态和 encrypted relay，不参与 TLS 客户端证书语义。
+
+复制模板：
+
+```bash
+sudo cp /opt/SecureChat/deploy/securechat-nginx-mtls.conf /etc/nginx/conf.d/securechat-mtls.conf
+sudo nginx -t
+sudo systemctl reload nginx
+```
+
+启动本机 backend：
+
+```bash
+sudo cp /opt/SecureChat/deploy/securechat-server-mtls-backend.service /etc/systemd/system/securechat-server.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now securechat-server.service
+```
+
+手动启动等价命令：
+
+```bash
+sudo -u securechat -H bash -lc 'cd /opt/SecureChat && SECURECHAT_BIND_ADDRESS=127.0.0.1 SECURECHAT_PORT=25567 ./start_server.sh --mode ws'
+```
+
+验证监听面：
+
+```bash
+ss -lntp | grep -E ':(25566|25567)'
+```
+
+预期现象：
+
+- `25566` 由 Nginx 对公网监听；
+- `25567` 只绑定 `127.0.0.1`；
+- 没有客户端证书时，TLS 握手失败；
+- 带受信任客户端证书时，WebSocket upgrade 成功；
+- 聊天内容仍由应用层 GKA v2/AES-256-GCM 保护，mTLS 不替代成员身份 PKI。
+
+Host/Client 连接 mTLS 入口前需要提供客户端证书：
+
+```bash
+export SECURECHAT_MTLS_CLIENT_CERT_FILE=certs/pki/alice-chain.pem
+export SECURECHAT_MTLS_CLIENT_KEY_FILE=certs/pki/alice-key.pem
+./start_client.sh --server wss://chat.la5te2.online:25566
+```
+
+如果 `chat.la5te2.online` 的服务器证书由私有 CA 或自签名证书签发，再额外设置：
+
+```bash
+export SECURECHAT_TLS_CA_FILE=certs/pki/root-ca.pem
+```
+
 ## 网络暴露面
 
 当前聊天只需要开放 Server WebSocket 端口：

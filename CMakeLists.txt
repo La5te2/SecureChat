@@ -15,11 +15,13 @@ add_library(core STATIC
     src/attachment_transfer.cpp
     src/auth_service.cpp
     src/console_utils.cpp
+    src/identity_pki.cpp
     src/host_session_core.cpp
     src/client_session_core.cpp
     src/room_registry.cpp
     src/secure_relay.cpp
     src/signaling_server.cpp
+    src/websocket_config.cpp
 )
 set_target_properties(core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_link_libraries(core PUBLIC

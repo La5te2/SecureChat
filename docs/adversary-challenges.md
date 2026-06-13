@@ -9,7 +9,7 @@
 ### 威胁模型
 
 - 局域网被动监听者：可能观察 `ws://` 明文信令和流量元数据。
-- 局域网主动攻击者：可能篡改未受 TLS 保护的信令，尝试 public key 替换或连接干扰。
+- 局域网主动攻击者：可能篡改未受 TLS 保护的信令，尝试 public key 替换、identity 替换或连接干扰。
 - 公网扫描者：可能探测 TCP `25566`，触发无效连接或弱密码尝试。
 - 恶意房间成员：加入后可读取当前 group key 下的群消息和附件。
 - 被攻破的不可信 Server：可观察 room、sender、时序和 ciphertext 大小，但不应获得 room group key 或应用明文。
@@ -20,7 +20,7 @@
 - 机密性：文本和附件 metadata/chunk 使用应用层 AES-256-GCM encrypted relay；Server 只转发 ciphertext。
 - 完整性：文本和附件 metadata/chunk 使用 AES-256-GCM AEAD；room/sender metadata 由 Server 绑定到 WebSocket 会话状态。
 - 密钥协商：GKA v2 使用临时 X25519 public key、Host 分发 room group key、成员加入/离开后 key rotation。
-- 认证与访问控制：房间密码限制加入；WSS 提供 Server 证书校验；GKA v2 的成员 public key 由信令携带。
+- 认证与访问控制：房间密码限制加入；WSS 提供 Server 证书校验；可选 mTLS 反向代理限制客户端连接准入；可选 PKI 成员身份认证把成员证书签名绑定到 `join_room` public key 和 `group_key` envelope。
 - 附件安全：大小限制、扩展名白名单、图片/语音文件头校验、文件名净化、固定缓存目录、缓存总量限制、不自动执行。
 - 可用性：连接数和坏消息限制、连接超时、维护线程清理、daemon 脚本、可选 systemd 模板。
 - 部署卫生：默认不落盘日志、非 root guard、必要端口说明、安全组来源 IP 收敛步骤。
@@ -29,8 +29,8 @@
 ### 已知限制
 
 - `ws://` 信令明文；公网应使用 `wss://`。
-- GKA v2 使用会话临时成员 key，成员 public key 尚未绑定长期身份或证书。
-- 恶意或被攻破 Server 在没有可信 WSS/身份绑定时可能尝试 public key 替换攻击。
+- 未启用 PKI 时，GKA v2 使用会话临时成员 key，成员 public key 尚未绑定长期身份或证书。
+- 恶意或被攻破 Server 在没有可信 WSS/PKI 身份绑定时可能尝试 public key 替换攻击。
 - 成员退出后的 key rotation 只保护后续消息，不能撤回该成员曾持有 key 时可读的历史消息。
 - Server 仍可观察 room、sender、连接时间、ciphertext 大小、消息数量和转发时序等元数据。
 - 当前私发是 group key 下的定向投递，不提供独立私聊密钥隔离。
@@ -53,6 +53,11 @@
 - 附件缓存超限清理或拒绝。
 - 成员加入后收到 `group_key` 并可以发送消息。
 - 成员离开后 Host 轮换 group key，剩余成员继续通信。
+- 启用 PKI 后，无 `identity` 的 Client 被 Host 拒绝。
+- 启用 PKI 后，篡改 `join_room.publicKey` 或 `identity.signature` 会被 Host 拒绝。
+- 启用 PKI 后，篡改 `group_key.ciphertext`、`ephemeralPublicKey` 或 `identity.signature` 会被 Client 拒绝。
+- 启用 PKI 后，证书链中任一证书指纹进入 `SECURECHAT_PKI_REVOCATION_FILE` 时身份被拒绝。
+- 启用 mTLS 反向代理后，无客户端证书连接被 Nginx 拒绝，有受信任客户端证书连接成功。
 - Host 断开后 room 关闭，Client 收到停止提示。
 - Server stop/SIGTERM 后释放 TCP `25566`。
 
@@ -155,7 +160,7 @@
 
 ### 攻击目标
 
-验证当前 GKA v2 尚未绑定长期身份时，主动中间人或恶意 Server 理论上可以替换 Client public key，诱导 Host 给攻击者封装 group key。
+验证未启用 PKI 时，主动中间人或恶意 Server 可以替换 Client public key，诱导 Host 给攻击者封装 group key；启用 PKI 后，同样的替换应被成员身份签名检测出来。
 
 ### 攻击模型
 
@@ -171,20 +176,23 @@ Host 用 A_pub 封装 room group key
 
 - 使用授权实验环境。
 - 攻击者能控制 Server，或能在未受 TLS 保护的 WS 路径上篡改信令。
-- Host 无法通过长期身份、证书或指纹校验确认 Client public key。
+- 未启用 PKI 的对照组：Host 无法通过长期身份、证书或指纹校验确认 Client public key。
+- 启用 PKI 的验证组：Host 和 Client 均配置 `SECURECHAT_PKI_TRUST_STORE`、`SECURECHAT_IDENTITY_CERT_FILE` 和 `SECURECHAT_IDENTITY_KEY_FILE`。
 
 ### 实验步骤
 
-1. 设计一个“恶意 Server”或信令代理，只修改 `new_client.publicKey` 字段，不修改 roomId 和 clientId。
+1. 未启用 PKI，设计一个“恶意 Server”或信令代理，只修改 `new_client.publicKey` 字段，不修改 roomId 和 clientId。
 2. Client 正常发送 `join_room`。
 3. 恶意 Server 把 Client 的 public key 替换成攻击者自己的 X25519 public key 后转发给 Host。
 4. Host 按协议发送 `group_key` envelope。
 5. 攻击者尝试用自己的 private key 解开该 envelope。
-6. 攻击者继续观察后续 `encrypted_relay`，尝试解密消息。
+6. 启用 PKI 后重复步骤 1 到 5，并保留 Client 的原始 `identity` 签名不变。
 
 ### 预期现象
 
-如果 Host 没有长期身份校验，攻击者可以获得当前 room group key，并解密后续文本和附件。这个挑战说明：GKA v2 已实现密钥分发和 Server 不直接持有 group key，但还不等于完整强身份 E2EE。
+未启用 PKI 时，如果 Host 没有长期身份校验，攻击者可以获得当前 room group key，并解密后续文本和附件。
+
+启用 PKI 后，Host 验证 `join_room` identity 时会发现签名覆盖的 public key 与被替换后的 public key 不一致，拒绝该 Client，并通过 `reject_client` 让 Server 移除连接。若攻击者改动 `group_key` envelope，Client 会在解封装前验证 Host identity 失败。
 
 ### 系统缓解
 
@@ -192,18 +200,20 @@ Host 用 A_pub 封装 room group key
 
 - 公网应使用可信 `wss://`，降低路径中间人篡改 public key 的风险。
 - Server 不生成 group key，也不参与密钥语义。
+- 启用 PKI 时，成员身份签名绑定 `join_room` public key，Host 身份签名绑定 `group_key` envelope。
 
 当前不覆盖：
 
-- 成员长期身份与临时 X25519 public key 的密码学绑定；
-- Host/Client 对成员身份和 key 的持久绑定记录；
-- 基于证书或签名的成员身份验证。
+- 成员设备被攻破后的本地私钥泄露；
+- 已被 CA 签发且未被吊销的恶意成员证书；
+- 接收成员拿到明文后的截图、复制或二次转发。
 
 ### 验证证据
 
 - 恶意替换前后的 `publicKey` 对比。
 - 攻击者能否解开 `group_key` 的实验结果。
-- 说明该攻击依赖主动篡改和缺少长期身份绑定，不是被动监听即可完成。
+- 启用 PKI 后 Host/Client 的 identity verification failed 或 reject_client 记录。
+- 说明该攻击依赖主动篡改；PKI 验证组应阻止静默 public key 替换。
 
 ## 挑战 4：恶意 Server 读取应用明文失败
 

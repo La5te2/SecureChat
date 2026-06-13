@@ -3,7 +3,9 @@
 #include "attachment_transfer.hpp"
 #include "common.hpp"
 #include "events.hpp"
+#include "identity_pki.hpp"
 #include "secure_relay.hpp"
+#include "websocket_config.hpp"
 
 #include <rtc/rtc.hpp>
 
@@ -77,6 +79,8 @@ private:
     std::string displayNameForClient(const std::string& id);
     // Resolves a command token to a client id.
     std::string resolveClientId(const std::string& token);
+    // Asks Server to remove a Client that failed Host-side identity checks.
+    void rejectClient(const std::string& clientId, const std::string& reason);
 
 private:
     std::string mWsUrl;
@@ -90,6 +94,7 @@ private:
     std::mutex mClientsMutex;
     std::unordered_map<std::string, std::string> mClientNames;
     std::unordered_map<std::string, std::string> mClientPublicKeys;
+    chat::identity_pki::IdentityContext mIdentity;
     std::vector<unsigned char> mGroupKey;
     // Core attachment receive state, keyed by encrypted relay sender actor id.
     chat::attachment::ReceiveStore mPendingTransfers;

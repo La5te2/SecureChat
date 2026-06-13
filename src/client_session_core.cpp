@@ -87,12 +87,16 @@ ClientSessionCore::ClientSessionCore(
     std::string url,
     std::string room,
     std::string username,
-    std::string password)
+    std::string password,
+    rtc::WebSocket::Configuration wsConfig)
     : mWsUrl(std::move(url)),
       mRoomId(std::move(room)),
       mUsername(std::move(username)),
-      mPassword(std::move(password)) {
+      mPassword(std::move(password)),
+      mWsConfig(std::move(wsConfig)) {
     mMemberKeys = chat::secure_relay::generateMemberKeyPair();
+    chat::websocket_config::applyClientTlsFromEnvironment(mWsConfig);
+    mIdentity = chat::identity_pki::loadFromEnvironment();
 }
 
 ClientSessionCore::~ClientSessionCore() = default;
@@ -104,10 +108,13 @@ void ClientSessionCore::setCallbacks(ChatCallbacks callbacks) {
 
 // Opens the signaling WebSocket and requests to join the configured room.
 void ClientSessionCore::start() {
-    mWs = std::make_shared<rtc::WebSocket>();
+    mWs = std::make_shared<rtc::WebSocket>(mWsConfig);
 
     mWs->onOpen([this]() {
         chatEmit(mCallbacks.onStatus, "Signaling connected");
+        if (chat::websocket_config::hasClientCertificate(mWsConfig)) {
+            chatEmit(mCallbacks.onStatus, "mTLS client certificate ready");
+        }
         json msg = {
             {"type", "join_room"},
             {"roomId", mRoomId},
@@ -115,6 +122,10 @@ void ClientSessionCore::start() {
             {"password", mPassword},
             {"publicKey", mMemberKeys.publicKey}
         };
+        if (mIdentity.enabled()) {
+            chatEmit(mCallbacks.onStatus, "PKI identity ready: " + mIdentity.fingerprint());
+            msg["identity"] = mIdentity.signJoinRoom(mRoomId, mUsername, mMemberKeys.publicKey);
+        }
         mWs->send(msg.dump());
         std::fill(mPassword.begin(), mPassword.end(), '\0');
         mPassword.clear();
@@ -560,6 +571,9 @@ void ClientSessionCore::handleSignalingMessage(const std::string& s) {
             chatEmit(mCallbacks.onStatus, "Room members: " + members.str());
         }
         else if (type == chat::secure_relay::GroupKeyType) {
+            if (mIdentity.enabled()) {
+                mIdentity.verifyGroupKeyEnvelope(j);
+            }
             mGroupKey = chat::secure_relay::decryptGroupKeyForMember(j, mRoomId, mClientId, mMemberKeys.privateKey);
             chatEmit(mCallbacks.onStatus, "Room group key ready");
         }

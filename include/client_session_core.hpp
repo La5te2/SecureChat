@@ -3,7 +3,9 @@
 #include "attachment_transfer.hpp"
 #include "common.hpp"
 #include "events.hpp"
+#include "identity_pki.hpp"
 #include "secure_relay.hpp"
+#include "websocket_config.hpp"
 
 #include <rtc/rtc.hpp>
 
@@ -18,7 +20,12 @@
 class ClientSessionCore {
 public:
     // Creates a client session bound to one signaling URL and room identity.
-    ClientSessionCore(std::string url, std::string room, std::string username, std::string password);
+    ClientSessionCore(
+        std::string url,
+        std::string room,
+        std::string username,
+        std::string password,
+        rtc::WebSocket::Configuration wsConfig = {});
     ~ClientSessionCore();
 
     // Installs UI or console callbacks used for events and logs.
@@ -72,7 +79,9 @@ private:
     std::unordered_map<std::string, std::string> mMemberNamesById;
     ChatCallbacks mCallbacks;
     std::shared_ptr<rtc::WebSocket> mWs;
+    rtc::WebSocket::Configuration mWsConfig;
     chat::secure_relay::MemberKeyPair mMemberKeys;
+    chat::identity_pki::IdentityContext mIdentity;
     std::vector<unsigned char> mGroupKey;
     std::atomic_bool mShutdownRequested = false;
     std::atomic_bool mStopped = false;

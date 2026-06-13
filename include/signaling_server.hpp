@@ -63,6 +63,8 @@ private:
     void handleCreateRoom(rtc::WebSocket* key, const json& data);
     // Lets a Client member join an existing room and publish its GKA public key.
     void handleJoinRoom(rtc::WebSocket* key, const json& data);
+    // Lets Host remove a Client that failed local identity verification.
+    void handleRejectClient(rtc::WebSocket* key, const json& data);
     // Forwards an encrypted group-key envelope from Host to exactly one Client.
     void relayGroupKey(rtc::WebSocket* key, const json& data);
     // Relays authenticated chat ciphertext to the room or to one target member.

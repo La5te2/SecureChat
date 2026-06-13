@@ -28,11 +28,13 @@ SecureChat 当前定位为课程/论文实验系统；公网运行时应按本�
 - 信令支持 `ws://` insecure mode 和 `wss://` secure mode。`ws://` 配置简单、便于本地或无证书场景使用，但传输不加密；真实公网部署应使用 `wss://`。
 - 文本消息和附件 metadata/chunk 已走应用层 AES-256-GCM encrypted relay：Server 只转发 opaque envelope，不能解密应用内容。
 - Host/Client 使用 GKA v2：Client 加入时提交临时 X25519 public key，Host 生成 room group key，并为每个成员封装分发；文本和附件使用该 group key 做 AES-256-GCM。
-- 成员加入或离开时，Host 会轮换新的 room group key 并重新分发给当前成员。GKA v2 的成员公钥由信令消息携带；如果信令被篡改，恶意或被攻破的 Server 可能尝试公钥替换攻击。
+- 成员加入或离开时，Host 会轮换新的 room group key 并重新分发给当前成员。未启用 PKI 时，GKA v2 的成员公钥只由信令消息携带；如果信令被篡改，恶意或被攻破的 Server 可能尝试公钥替换攻击。
+- 可选 PKI 身份认证已实现：Client 可以用成员身份私钥签名 `join_room`，把成员证书绑定到临时 X25519 public key；Host 可以签名 `group_key` envelope，Client 验证 Host 证书和签名后才解封装 group key。
+- 可选 mTLS 部署已提供：Nginx 在公网入口要求 TLS 客户端证书，SecureChat Server 作为本机 WebSocket backend 运行。模板见 `deploy/securechat-nginx-mtls.conf` 和 `deploy/securechat-server-mtls-backend.service`。
 - 房间密码能阻止普通误入，但不能替代 TLS、限速、防火墙和强认证。
 - 能限制安全组来源 IP 时，不建议长期使用 `0.0.0.0/0`。
 - 不建议把 Web UI 端口 `5188` 直接暴露到公网。
-- 长期运行时应使用普通用户，不要用 `root`；`start_server.sh` 默认拒绝 root 运行，临时诊断才可设置 `SECURECHAT_ALLOW_ROOT=1`。部署步骤见 `docs/deployment-hardening.md`，环境变量参考见 `docs/environment-variables.md`，敌手挑战设计见 `docs/adversary-challenges.md`。
+- 长期运行时应使用普通用户，不要用 `root`；`start_server.sh` 默认拒绝 root 运行，临时诊断才可设置 `SECURECHAT_ALLOW_ROOT=1`。部署步骤见 `docs/deployment-hardening.md`，环境变量参考见 `docs/environment-variables.md`，成员身份 PKI 见 `docs/pki-identity.md`，敌手挑战设计见 `docs/adversary-challenges.md`。
 - `start_server.sh` 默认把 Server 作为 daemon 常驻，且默认不保存 `server.log`。日志可能包含 room id、用户名和连接状态，只在临时排障时显式启用。
 - `start_host.sh` 和 `start_client.sh` 默认前台运行；只有显式 `--daemon` 时才后台运行，并通过短生命周期本地管道传递房间密码。
 - 接收附件会写入 `logs/`，需要定期清理并避免直接信任未知文件。
@@ -42,6 +44,7 @@ SecureChat 当前定位为课程/论文实验系统；公网运行时应按本�
 ```text
 docs/signaling-security.md
 docs/relay-attachment-security.md
+docs/pki-identity.md
 ```
 
 ## GKA v2 原理与安全边界
@@ -54,7 +57,7 @@ docs/relay-attachment-security.md
 
 X25519 是基于 Curve25519 的椭圆曲线 Diffie-Hellman 密钥交换函数。它的作用是：双方各自持有私钥，交换公钥后，在不发送私钥的情况下计算出同一个共享秘密 `S`。这个共享秘密通常不会直接当作 AES 密钥使用，而是先经过 HKDF 派生成固定长度、带上下文绑定的密钥。
 
-X25519 只解决“被动窃听者算不出共享秘密”的问题，不解决“这个公钥到底属于谁”的认证问题。因此在当前代码中，如果信令层公钥被替换，X25519 本身不会检测出该攻击。
+X25519 只解决“被动窃听者算不出共享秘密”的问题，不解决“这个公钥到底属于谁”的认证问题。因此如果未启用 PKI 身份认证，信令层公钥被替换时，X25519 本身不会检测出该攻击。启用 PKI 后，Client 会对 `roomId || username || publicKey || nonce` 签名，Host 验证成员证书链和签名后才信任该 public key。
 
 数学流程如下。设 X25519 基点为 `G`：
 
@@ -178,9 +181,10 @@ std::vector<unsigned char> decryptGroupKeyForMember(
 安全边界：
 
 - 如果没有中间人攻击且 Host 可信，则不可信 Server 和网络旁路看不到聊天/附件明文。
+- 启用 PKI 身份认证后，恶意 Server 不能在不破坏成员身份签名的情况下静默替换 Client 的临时 X25519 public key，也不能在不破坏 Host 签名的情况下替换 `group_key` envelope。
 - 其他合法群成员会持有同一个 `K_G`，因此群聊内容对群成员本身不保密。恶意成员可以保存、截图或转发自己收到的明文。
 - 当前私发是定向投递：Server 只把密文转发给目标成员，但密文仍使用 room group key，而不是独立点对点私聊密钥。因此它不是密码学意义上的成员专属私聊。
-- 当前 GKA v2 的成员公钥由信令消息携带；恶意 Server 或网络中间人如果能篡改信令，可能实施公钥替换攻击。
+- 未启用 PKI 身份认证时，GKA v2 的成员公钥仍只由信令消息携带；恶意 Server 或网络中间人如果能篡改信令，可能实施公钥替换攻击。
 
 典型中间人攻击是公钥替换：
 
@@ -192,6 +196,76 @@ std::vector<unsigned char> decryptGroupKeyForMember(
 5. MITM 再用真正的 c_pub 重新封装 group key 发给 Client。
 6. Client 正常进入房间，但 MITM 也已经获得 group key。
 ```
+
+## PKI 身份认证
+
+PKI 身份认证是可选模式。不配置 PKI 环境变量时，系统仍按房间密码 + GKA v2 工作；配置后，Host/Client 会加载本机成员证书链、成员身份私钥和受信任 CA bundle。
+
+```bash
+export SECURECHAT_PKI_TRUST_STORE=certs/pki/root-ca.pem
+export SECURECHAT_IDENTITY_CERT_FILE=certs/pki/member-chain.pem
+export SECURECHAT_IDENTITY_KEY_FILE=certs/pki/member-key.pem
+```
+
+私钥加密时再设置：
+
+```bash
+export SECURECHAT_IDENTITY_KEY_PASS='key-password'
+```
+
+本地吊销列表可选：
+
+```bash
+export SECURECHAT_PKI_REVOCATION_FILE=certs/pki/revoked.txt
+```
+
+当前实现会验证证书链、有效期、Key Usage `digitalSignature`、本地 SHA-256 指纹吊销列表、签名算法一致性和签名内容。Server 只检查 `identity` 字段结构和大小，然后转发；证书验证发生在 Host/Client 本地。
+
+PKI 模式下：
+
+- Client 在 `join_room` 中签名 `roomId`、`username`、临时 X25519 `publicKey` 和 `nonce`。
+- Host 验证 Client 身份后才记录 public key、轮换 group key，并为成员封装 group key。
+- Host 在 `group_key` envelope 中签名 room、target、ephemeralPublicKey、ciphertext、tag 和 nonce。
+- Client 验证 Host 身份后才解封装 room group key。
+
+详细字段见 `docs/pki-identity.md`。
+
+## mTLS 反向代理部署
+
+当前 libdatachannel 的 WebSocketServer 不暴露 TLS 客户端证书校验接口，因此 mTLS 在反向代理层实现：
+
+```text
+Host/Client -- mTLS WSS --> Nginx :25566 -- local WS --> SecureChat Server 127.0.0.1:25567
+```
+
+SecureChat Server backend 启动：
+
+```bash
+SECURECHAT_BIND_ADDRESS=127.0.0.1 SECURECHAT_PORT=25567 ./start_server.sh --mode ws
+```
+
+Host/Client 连接 mTLS 入口前配置客户端证书：
+
+```bash
+export SECURECHAT_MTLS_CLIENT_CERT_FILE=certs/pki/member-chain.pem
+export SECURECHAT_MTLS_CLIENT_KEY_FILE=certs/pki/member-key.pem
+```
+
+如果 mTLS 入口服务器证书是私有 CA 或自签名证书，再额外设置 `SECURECHAT_TLS_CA_FILE`；使用 Let's Encrypt 等系统已信任 CA 时通常不需要。
+
+Nginx 模板：
+
+```text
+deploy/securechat-nginx-mtls.conf
+```
+
+systemd backend 模板：
+
+```text
+deploy/securechat-server-mtls-backend.service
+```
+
+mTLS 只限制“谁能建立到 Server 的 TLS 连接”。应用层消息机密性仍由 GKA v2 和 AES-256-GCM 提供，成员身份与临时 X25519 key 的绑定仍由 PKI 身份认证提供。
 
 ## Windows 构建
 

@@ -97,6 +97,8 @@ HostSessionCore::HostSessionCore(
       mWsConfig(std::move(wsConfig)) {
     const auto groupKey = chat::secure_relay::generateGroupKey();
     mGroupKey.assign(groupKey.begin(), groupKey.end());
+    chat::websocket_config::applyClientTlsFromEnvironment(mWsConfig);
+    mIdentity = chat::identity_pki::loadFromEnvironment();
 }
 
 HostSessionCore::~HostSessionCore() = default;
@@ -113,6 +115,12 @@ void HostSessionCore::start() {
 
     mWs->onOpen([this]() {
         chatEmit(mCallbacks.onStatus, "Signaling connected");
+        if (chat::websocket_config::hasClientCertificate(mWsConfig)) {
+            chatEmit(mCallbacks.onStatus, "mTLS client certificate ready");
+        }
+        if (mIdentity.enabled()) {
+            chatEmit(mCallbacks.onStatus, "PKI identity ready: " + mIdentity.fingerprint());
+        }
         json msg = {
             {"type", "create_room"},
             {"roomId", mRoomId},
@@ -322,11 +330,14 @@ bool HostSessionCore::sendGroupKeyToClient(const std::string& clientId, const st
         return false;
     }
 
-    const auto envelope = chat::secure_relay::encryptGroupKeyForMember(
+    auto envelope = chat::secure_relay::encryptGroupKeyForMember(
         mGroupKey,
         mRoomId,
         clientId,
         clientPublicKey);
+    if (mIdentity.enabled()) {
+        mIdentity.signGroupKeyEnvelope(envelope);
+    }
     mWs->send(envelope.dump());
     chatEmit(mCallbacks.onStatus, "Group key sent to " + displayNameForClient(clientId));
     return true;
@@ -455,6 +466,24 @@ void HostSessionCore::handleSignalingMessage(const std::string& s) {
             std::string clientId = j.value("clientId", "");
             std::string username = j.value("username", clientId);
             std::string publicKey = j.value("publicKey", "");
+            if (!clientId.empty() && publicKey.empty()) {
+                chatEmit(mCallbacks.onError, "Client public key is missing: " + username);
+                rejectClient(clientId, "client public key is missing");
+                return;
+            }
+            if (!clientId.empty() && mIdentity.enabled()) {
+                try {
+                    auto identity = j.find("identity");
+                    if (identity == j.end()) throw std::runtime_error("client identity is missing");
+                    mIdentity.verifyJoinRoom(mRoomId, username, publicKey, *identity);
+                    chatEmit(mCallbacks.onStatus, "Client identity verified: " + username);
+                }
+                catch (const std::exception& e) {
+                    chatEmit(mCallbacks.onError, "Client identity rejected: " + username + ": " + e.what());
+                    rejectClient(clientId, "client identity verification failed");
+                    return;
+                }
+            }
             {
                 std::lock_guard<std::mutex> lock(mClientsMutex);
                 mClientNames[clientId] = username;
@@ -462,12 +491,7 @@ void HostSessionCore::handleSignalingMessage(const std::string& s) {
             }
             if (!clientId.empty()) {
                 chatEmit(mCallbacks.onStatus, "Client joined: " + username);
-                if (publicKey.empty()) {
-                    chatEmit(mCallbacks.onError, "Client public key is missing: " + username);
-                }
-                else {
-                    rotateGroupKey("member joined");
-                }
+                rotateGroupKey("member joined");
             }
         }
         else if (type == "client_left") {
@@ -623,4 +647,15 @@ std::string HostSessionCore::resolveClientId(const std::string& token) {
         if (name == token) return id;
     }
     return token;
+}
+
+void HostSessionCore::rejectClient(const std::string& clientId, const std::string& reason) {
+    if (clientId.empty() || !mWs || mWs->isClosed()) return;
+    json msg = {
+        {"type", "reject_client"},
+        {"roomId", mRoomId},
+        {"targetId", clientId},
+        {"reason", reason}
+    };
+    mWs->send(msg.dump());
 }

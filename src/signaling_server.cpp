@@ -14,6 +14,8 @@ constexpr std::size_t maxBadMessagesPerClient = 4;
 constexpr std::size_t maxPasswordBytes = 256;
 constexpr std::size_t maxRelayFieldBytes = 512 * 1024;
 constexpr std::size_t maxPublicKeyBytes = 128;
+constexpr std::size_t maxIdentityCertChainBytes = 128 * 1024;
+constexpr std::size_t maxIdentitySignatureBytes = 4096;
 constexpr auto maintenanceInterval = std::chrono::seconds(15);
 constexpr auto healthLogInterval = std::chrono::minutes(1);
 
@@ -66,6 +68,26 @@ std::string stringField(const json& data, const char* key, std::size_t maxLength
     return value;
 }
 
+void identityField(const json& data, bool required) {
+    auto it = data.find("identity");
+    if (it == data.end()) {
+        if (required) throw std::runtime_error("missing identity");
+        return;
+    }
+    if (!it->is_object()) throw std::runtime_error("identity must be an object");
+    const auto& identity = *it;
+    if (!hasOnlyFields(identity, {"version", "certChainPem", "nonce", "signatureAlg", "signature"})) {
+        throw std::runtime_error("identity has unknown field");
+    }
+    if (!identity.contains("version") || !identity["version"].is_number_integer()) {
+        throw std::runtime_error("identity version must be an integer");
+    }
+    stringField(identity, "certChainPem", maxIdentityCertChainBytes, true);
+    stringField(identity, "nonce", 64, true);
+    stringField(identity, "signatureAlg", 32, true);
+    stringField(identity, "signature", maxIdentitySignatureBytes, true);
+}
+
 void requireFieldsForType(const json& data, const std::string& type) {
     // Signaling is public network input. Keep a per-type schema so unknown
     // fields cannot become accidental protocol extensions or spoofing channels.
@@ -78,13 +100,14 @@ void requireFieldsForType(const json& data, const std::string& type) {
         stringField(data, "password", maxPasswordBytes, true);
     }
     else if (type == "join_room") {
-        if (!hasOnlyFields(data, {"type", "roomId", "username", "password", "publicKey"})) {
+        if (!hasOnlyFields(data, {"type", "roomId", "username", "password", "publicKey", "identity"})) {
             throw std::runtime_error("join_room has unknown field");
         }
         stringField(data, "roomId", 64, true);
         stringField(data, "username", 64, true);
         stringField(data, "password", maxPasswordBytes, true);
         stringField(data, "publicKey", maxPublicKeyBytes, true);
+        identityField(data, false);
     }
     else if (type == "group_key") {
         if (!hasOnlyFields(data, {
@@ -98,7 +121,8 @@ void requireFieldsForType(const json& data, const std::string& type) {
                 "ephemeralPublicKey",
                 "nonce",
                 "ciphertext",
-                "tag"})) {
+                "tag",
+                "identity"})) {
             throw std::runtime_error("group_key has unknown field");
         }
         if (!data.contains("version") || !data["version"].is_number_integer()) {
@@ -113,6 +137,15 @@ void requireFieldsForType(const json& data, const std::string& type) {
         stringField(data, "nonce", 64, true);
         stringField(data, "ciphertext", 256, true);
         stringField(data, "tag", 64, true);
+        identityField(data, false);
+    }
+    else if (type == "reject_client") {
+        if (!hasOnlyFields(data, {"type", "roomId", "targetId", "reason"})) {
+            throw std::runtime_error("reject_client has unknown field");
+        }
+        stringField(data, "roomId", 64, true);
+        stringField(data, "targetId", 64, true);
+        stringField(data, "reason", 256, true);
     }
     else if (type == "encrypted_relay") {
         if (!hasOnlyFields(data, {
@@ -158,7 +191,11 @@ void validateIncomingSignaling(const json& data) {
 SignalingServer::SignalingServer(uint16_t port) {
     rtc::WebSocketServer::Configuration config;
     config.port = port;
-    config.bindAddress = "0.0.0.0";
+    // Normal standalone mode listens on all interfaces. Reverse-proxy mTLS
+    // deployments set SECURECHAT_BIND_ADDRESS=127.0.0.1 so only Nginx/Caddy can
+    // reach the plain backend WebSocket.
+    const auto bindAddress = envValue("SECURECHAT_BIND_ADDRESS");
+    config.bindAddress = bindAddress.empty() ? "0.0.0.0" : bindAddress;
     // Do not let half-open or abandoned WebSocket handshakes keep the public
     // signaling port alive but unable to accept fresh clients.
     config.connectionTimeout = std::chrono::seconds(15);
@@ -184,7 +221,8 @@ SignalingServer::SignalingServer(uint16_t port) {
         addClient(std::move(ws));
     });
 
-    std::cout << "[signal] server running on " << mUrlScheme << "://0.0.0.0:" << mServer->port() << std::endl;
+    std::cout << "[signal] server running on " << mUrlScheme << "://"
+              << *config.bindAddress << ":" << mServer->port() << std::endl;
     mMaintenanceThread = std::thread([this]() {
         maintenanceLoop();
     });
@@ -275,6 +313,9 @@ void SignalingServer::handleMessage(rtc::WebSocket* key, const std::string& payl
         }
         else if (type == "join_room") {
             handleJoinRoom(key, data);
+        }
+        else if (type == "reject_client") {
+            handleRejectClient(key, data);
         }
         else if (type == "encrypted_relay") {
             relayEncrypted(key, data);
@@ -429,22 +470,86 @@ void SignalingServer::handleJoinRoom(rtc::WebSocket* key, const json& data) {
     }
 
     std::cout << "[signal] " << account.username << " joined " << roomId << " as " << clientId << std::endl;
-    safeSend(clientWs, {
+    json joined = {
         {"type", "joined"},
         {"roomId", roomId},
         {"clientId", clientId},
         {"userId", account.userId},
         {"username", account.username},
         {"publicKey", publicKey}
-    });
-    safeSend(hostWs, {
+    };
+    if (data.contains("identity")) joined["identity"] = data["identity"];
+    safeSend(clientWs, joined);
+
+    json newClient = {
         {"type", "new_client"},
         {"clientId", clientId},
         {"userId", account.userId},
         {"username", account.username},
         {"publicKey", publicKey}
-    });
+    };
+    if (data.contains("identity")) newClient["identity"] = data["identity"];
+    safeSend(hostWs, newClient);
     broadcastRoomMembers(roomId);
+}
+
+void SignalingServer::handleRejectClient(rtc::WebSocket* key, const json& data) {
+    std::shared_ptr<rtc::WebSocket> senderWs;
+    std::shared_ptr<rtc::WebSocket> targetWs;
+    std::string roomId;
+    std::string targetId;
+    std::string reason = data.value("reason", "identity verification failed");
+    std::string errorMessage;
+
+    {
+        std::lock_guard<std::mutex> lock(mMutex);
+        auto sender = findClient(key);
+        senderWs = sender ? sender->ws : nullptr;
+        if (!sender || sender->role != "host" || sender->roomId.empty() || sender->roomId != data.value("roomId", "")) {
+            errorMessage = "invalid reject sender";
+        }
+        else {
+            auto room = findRoom(sender->roomId, sender);
+            roomId = sender->roomId;
+            targetId = data.value("targetId", "");
+            if (!room) {
+                errorMessage = "room not found";
+            }
+            else {
+                auto target = room->clients.find(targetId);
+                if (target == room->clients.end() || !target->second) {
+                    errorMessage = "target client not found";
+                }
+                else {
+                    targetWs = target->second;
+                    room->clients.erase(target);
+                    for (auto it = mClients.begin(); it != mClients.end(); ++it) {
+                        if (it->second.ws == targetWs) {
+                            mRegistry.markOffline(roomId, it->second.userId);
+                            mClients.erase(it);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (!errorMessage.empty()) {
+        safeSend(senderWs, {{"type", "error"}, {"message", errorMessage}});
+        return;
+    }
+
+    safeSend(targetWs, {{"type", "error"}, {"message", reason}});
+    if (targetWs && !targetWs->isClosed()) {
+        try {
+            targetWs->close();
+        }
+        catch (const std::exception&) {
+        }
+    }
+    if (!roomId.empty()) broadcastRoomMembers(roomId);
+    std::cout << "[signal] host rejected " << targetId << " from " << roomId << ": " << reason << std::endl;
 }
 
 void SignalingServer::relayGroupKey(rtc::WebSocket* key, const json& data) {

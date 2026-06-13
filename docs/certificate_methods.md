@@ -14,6 +14,8 @@ certs/privkey.pem
 
 项目里的 `certs/` 是推荐的本地证书放置目录，方便 Linux 和 Windows 的独立 Server 使用同一套路径。`certs/` 已在 `.gitignore` 中，不应提交证书和私钥。
 
+本文件主要讲 WSS 服务器证书。阶段 9 的 Host/Client 成员身份签名证书使用 `SECURECHAT_PKI_TRUST_STORE`、`SECURECHAT_IDENTITY_CERT_FILE` 和 `SECURECHAT_IDENTITY_KEY_FILE`，说明见 `docs/pki-identity.md`。mTLS 入口的 TLS 客户端证书由 Nginx 验证，模板见 `deploy/securechat-nginx-mtls.conf`。这些证书可以都放在 `certs/` 下，但用途不同，不能混用。
+
 ## 域名要求
 
 公网 WSS 推荐使用域名，例如：

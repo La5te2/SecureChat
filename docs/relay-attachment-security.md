@@ -39,12 +39,12 @@ Server 会校验 WebSocket 会话所属 room 和 sender identity，然后转发 
 当前 GKA v2 是 Host 协调的 group key 分发模型：
 
 1. Client 本地生成临时 X25519 key pair。
-2. Client 在 `join_room` 中提交 public key。
+2. Client 在 `join_room` 中提交 public key；启用 PKI 时同时提交成员身份签名。
 3. Server 校验房间密码和成员状态，只把 public key 作为成员元数据转交给 Host。
 4. Host 生成 32-byte room group key。
 5. Host 为每个 Client public key 生成临时 X25519 key pair，通过 X25519 + HKDF-SHA256 派生 wrapping key。
-6. Host 用 AES-256-GCM 把 room group key 封装成 `group_key` envelope，经 Server 转发给目标 Client。
-7. Client 用自己的 X25519 private key 解开 `group_key` envelope，得到当前 room group key。
+6. Host 用 AES-256-GCM 把 room group key 封装成 `group_key` envelope；启用 PKI 时同时附加 Host 身份签名，经 Server 转发给目标 Client。
+7. Client 启用 PKI 时先验证 Host 身份签名，再用自己的 X25519 private key 解开 `group_key` envelope，得到当前 room group key。
 8. 文本和附件都用 room group key 做 AES-256-GCM。
 
 成员变化时：
@@ -92,11 +92,20 @@ Host 发给单个 Client 的 group key envelope：
   "ephemeralPublicKey": "base64",
   "nonce": "base64",
   "ciphertext": "base64",
-  "tag": "base64"
+  "tag": "base64",
+  "identity": {
+    "version": 1,
+    "certChainPem": "pem",
+    "nonce": "base64",
+    "signatureAlg": "Ed25519",
+    "signature": "base64"
+  }
 }
 ```
 
-Server 转发前会用 WebSocket 会话状态覆盖 `roomId`、`senderId`、`senderName` 和 `senderKind`，避免发送方伪造这些明文 metadata。私发时 Server 使用 `targetId` 做成员存在性校验和定向转发。AAD 不作为 JSON 字段传输，而是在 Host/Client 本地按固定格式重新构造。
+`identity` 只在启用 PKI 身份认证时出现。Server 转发 `group_key` 前会用 WebSocket 会话状态覆盖 `roomId`、`senderId` 和 `targetId`，避免发送方伪造这些明文 metadata。转发 `encrypted_relay` 时，Server 会覆盖 `senderId`、`senderName` 和 `senderKind`。私发时 Server 使用 `targetId` 做成员存在性校验和定向转发。AAD 不作为 JSON 字段传输，而是在 Host/Client 本地按固定格式重新构造。
+
+Client 加入时的 `join_room` 也可以携带同形状的 `identity` 对象。Server 只校验字段结构和大小；Host/Client 本地完成证书链、吊销列表、签名算法和签名内容验证。
 
 ## Server 可见与不可见内容
 
@@ -155,6 +164,7 @@ export SECURECHAT_LOGS_MAX_BYTES=1073741824
 
 当前仍需诚实说明的限制：
 
-- 当前 X25519 member key 是会话临时 key，尚未绑定长期身份、证书或可人工核验的指纹。
-- 如果不使用可信 `wss://`，路径上的主动攻击者或恶意 Server 可能替换 Client public key，诱导 Host 给攻击者封装 group key。
+- 未启用 PKI 身份认证时，X25519 member key 是会话临时 key，尚未绑定长期身份、证书或可人工核验的指纹。
+- 未启用 PKI 且不使用可信 `wss://` 时，路径上的主动攻击者或恶意 Server 可能替换 Client public key，诱导 Host 给攻击者封装 group key。
+- 启用 PKI 后，成员身份证书链和签名可以绑定 `join_room` public key 与 `group_key` envelope；Server 仍不参与证书验证。
 - Server 仍可观察 room、sender、连接时间、ciphertext 大小和消息时序等元数据。

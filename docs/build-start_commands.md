@@ -154,6 +154,74 @@ wss://chat.la5te2.online:25566
 
 Web Host 不再配置证书路径；WSS 证书属于独立 Server 进程。
 
+## 可选 PKI 成员身份认证
+
+PKI 成员身份认证配置在 Host/Client/Web/WinUI 进程上，不配置在 Server 上。Server 只转发 `identity` 对象，不验证证书。
+
+Windows PowerShell 示例：
+
+```powershell
+$env:SECURECHAT_PKI_TRUST_STORE="certs\pki\root-ca.pem"
+$env:SECURECHAT_IDENTITY_CERT_FILE="certs\pki\alice-chain.pem"
+$env:SECURECHAT_IDENTITY_KEY_FILE="certs\pki\alice-key.pem"
+$env:SECURECHAT_PKI_REVOCATION_FILE="certs\pki\revoked.txt"
+```
+
+Linux 示例：
+
+```bash
+export SECURECHAT_PKI_TRUST_STORE=certs/pki/root-ca.pem
+export SECURECHAT_IDENTITY_CERT_FILE=certs/pki/alice-chain.pem
+export SECURECHAT_IDENTITY_KEY_FILE=certs/pki/alice-key.pem
+export SECURECHAT_PKI_REVOCATION_FILE=certs/pki/revoked.txt
+```
+
+每个成员机器使用自己的 `SECURECHAT_IDENTITY_CERT_FILE` 和 `SECURECHAT_IDENTITY_KEY_FILE`。同一房间内的成员应信任同一个 CA bundle。详细证书生成和字段说明见 `docs/pki-identity.md`。
+
+## 可选 mTLS 反向代理启动
+
+mTLS 由 Nginx 处理，SecureChat Server 作为本机 backend 运行。公网只暴露 Nginx 的 `25566`，backend 只监听本机 `25567`。
+
+启动 backend：
+
+```bash
+cd /opt/SecureChat
+SECURECHAT_BIND_ADDRESS=127.0.0.1 SECURECHAT_PORT=25567 ./start_server.sh --mode ws
+```
+
+安装 Nginx 配置：
+
+```bash
+sudo cp /opt/SecureChat/deploy/securechat-nginx-mtls.conf /etc/nginx/conf.d/securechat-mtls.conf
+sudo nginx -t
+sudo systemctl reload nginx
+```
+
+使用 systemd backend 模板：
+
+```bash
+sudo cp /opt/SecureChat/deploy/securechat-server-mtls-backend.service /etc/systemd/system/securechat-server.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now securechat-server.service
+```
+
+Host/Client 连接外部入口：
+
+```bash
+export SECURECHAT_MTLS_CLIENT_CERT_FILE=certs/pki/alice-chain.pem
+export SECURECHAT_MTLS_CLIENT_KEY_FILE=certs/pki/alice-key.pem
+```
+
+如果入口服务器证书不是系统信任 CA 签发，再设置：
+
+```bash
+export SECURECHAT_TLS_CA_FILE=certs/pki/root-ca.pem
+```
+
+```text
+wss://chat.la5te2.online:25566
+```
+
 ## Linux C++
 
 脚本构建：

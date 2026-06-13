@@ -20,6 +20,7 @@ void handleStopSignal(int) {
 void printUsage() {
     std::cerr << "Usage: server <port>\n";
     std::cerr << "Environment: SECURECHAT_SIGNALING_TLS=1 plus SECURECHAT_TLS_CERT_FILE and SECURECHAT_TLS_KEY_FILE enables WSS.\n";
+    std::cerr << "Environment: SECURECHAT_BIND_ADDRESS=127.0.0.1 keeps a reverse-proxy backend local.\n";
 }
 }
 
@@ -39,7 +40,7 @@ int main(int argc, char** argv) {
         std::signal(SIGTERM, handleStopSignal);
 
         std::cout << "SecureChat Server running on "
-                  << signaling.urlScheme() << "://0.0.0.0:" << signaling.port() << std::endl;
+                  << signaling.urlScheme() << "://<configured-bind-address>:" << signaling.port() << std::endl;
         std::cout << "This process is an untrusted signaling coordinator, not a visible room member." << std::endl;
         std::cout << "Stop with SIGTERM, SIGINT, or Ctrl+C." << std::endl;
 
