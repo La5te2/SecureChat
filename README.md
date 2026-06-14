@@ -27,6 +27,7 @@ SecureChat 当前定位为课程/论文实验系统；公网运行时应按本�
 
 - 信令支持 `ws://` insecure mode 和 `wss://` secure mode。`ws://` 配置简单、便于本地或无证书场景使用，但传输不加密；真实公网部署应使用 `wss://`。
 - 文本消息和附件 metadata/chunk 已走应用层 AES-256-GCM encrypted relay：Server 只转发 opaque envelope，不能解密应用内容。
+- 普通 Client 的 `clientId` 是 SHA-256 派生的 opaque id，Server 日志不输出成员 display name，避免出现 `user_bob` 这类可读成员标识。
 - Host/Client 使用贡献式 GKA v3：每个成员为当前 epoch 生成并签名随机贡献，Host 只负责发起 epoch、汇总贡献集合和关闭房间；最终 room group key 由成员本地从贡献集合导出。
 - 成员加入或离开时，Host 会发起新的 GKA epoch；离开成员不再收到后续贡献集合，因此不能导出新的 room group key。
 - 私发文本和私发附件使用双层加密：外层仍走 room group key 保护 relay envelope，但 Server 不再按目标定向投递，而是广播外层密文；内层使用发送者临时 X25519 和目标成员已验证 public key 派生 pairwise key。没有目标成员私钥的 Server、Host 或其他 Client 不能解内层私发内容。
@@ -314,7 +315,7 @@ json encryptGroupStateForMember(
 - Host 仍是群成员和房间生命周期管理者，因此可以读取群聊内容、驱逐成员或关闭房间；但当前 `K_G` 不再由 Host 单方随机生成，而是由签名贡献集合导出。
 - 恶意成员可以拒绝提交 GKA contribution，这属于可用性攻击；Host 会在 10 秒 GKA 超时后自动驱逐仍未提交贡献的成员，并只用剩余成员重新发起 epoch。
 - 私发是广播外层 relay 加内层 pairwise 加密：Host/Client 会在解密外层后检查 `relayTargetId`。内层 pairwise key 由发送者临时 X25519 private key 和目标成员已验证 public key 派生，不从 room group key 派生，因此其他成员即使持有当前 `K_G` 也不能解开私发正文或私发附件 chunk。
-- Server 仍可见 metadata，包括 room token、连接 id、ciphertext 长度和时序。这会泄露活跃时间和大致内容大小；WSS、默认少日志和部署最小暴露只能降低风险，不能隐藏这些模式。
+- Server 仍可见 metadata，包括 room token、opaque 连接 id、ciphertext 长度和时序。普通 Client id 不再包含 display name，Server 日志也不输出 display name；但这仍会泄露活跃时间和大致内容大小。WSS、默认少日志和部署最小暴露只能降低风险，不能隐藏这些模式。
 - 接收端维护 relay nonce/tag replay cache；Client 还检查递增的 group key epoch，拒绝重放或过期 `group_key`。这能阻止常见 Server 重放旧 envelope，但不能阻止 Server 直接断连或丢弃新消息。
 典型中间人攻击是公钥替换：
 

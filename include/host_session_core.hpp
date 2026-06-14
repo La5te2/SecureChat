@@ -63,6 +63,12 @@ public:
 private:
     // Handles Host-only room moderation commands typed into the normal input box.
     bool handleHostCommand(const std::string& line);
+    // Moves raw WebSocket frames off the libdatachannel callback thread.
+    void enqueueSignalingMessage(std::string payload);
+    // Serial protocol worker; does JSON parsing, PKI verification, and GKA work.
+    void signalingWorkerLoop();
+    // Stops and joins the protocol worker without touching the WebSocket.
+    void stopSignalingWorker();
     // Dispatches room creation, membership, encrypted relay, and error events.
     void handleSignalingMessage(const std::string& s);
     // Removes a client member and updates local room state.
@@ -157,6 +163,11 @@ private:
     std::unordered_set<std::string> mBannedIdentityFingerprints;
     std::unordered_set<std::string> mRecentRelayIds;
     std::deque<std::string> mRecentRelayOrder;
+    std::mutex mSignalingQueueMutex;
+    std::condition_variable mSignalingQueueCv;
+    std::deque<std::string> mSignalingQueue;
+    std::thread mSignalingThread;
+    std::atomic_bool mSignalingWorkerStopping = false;
     chat::secure_relay::MemberKeyPair mMemberKeys;
     chat::identity_pki::IdentityContext mIdentity;
     std::vector<unsigned char> mGroupKey;

@@ -1,8 +1,35 @@
 // Process-local user account implementation for SignalingServer membership ids.
 #include "auth_service.hpp"
 
+#include <openssl/evp.h>
+
+#include <iomanip>
 #include <functional>
+#include <memory>
+#include <sstream>
 #include <stdexcept>
+
+namespace {
+std::string sha256Hex(const std::string& value) {
+    unsigned char digest[EVP_MAX_MD_SIZE] = {};
+    unsigned int digestLength = 0;
+    using CtxPtr = std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)>;
+    CtxPtr ctx(EVP_MD_CTX_new(), EVP_MD_CTX_free);
+    if (!ctx) throw std::runtime_error("could not create user id hash context");
+    if (EVP_DigestInit_ex(ctx.get(), EVP_sha256(), nullptr) != 1 ||
+        EVP_DigestUpdate(ctx.get(), value.data(), value.size()) != 1 ||
+        EVP_DigestFinal_ex(ctx.get(), digest, &digestLength) != 1) {
+        throw std::runtime_error("could not hash user id");
+    }
+
+    std::ostringstream out;
+    out << std::hex << std::setfill('0');
+    for (unsigned int i = 0; i < digestLength; ++i) {
+        out << std::setw(2) << static_cast<int>(digest[i]);
+    }
+    return out.str();
+}
+}
 
 UserAccount AuthService::registerOrLogin(const std::string& username, const std::string& password) {
     // This helper gives Server a stable userId for routing. It is intentionally
@@ -112,5 +139,6 @@ std::size_t AuthService::hashPassword(const std::string& username, const std::st
 
 std::string AuthService::makeUserId(const std::string& username) {
     // Server exposes this id for room membership and private-message targeting.
-    return "user_" + username;
+    // Keep it opaque so logs and member ids do not reveal the display name.
+    return "user_" + sha256Hex("securechat-user-id-v2:" + username).substr(0, 24);
 }

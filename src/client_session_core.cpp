@@ -409,8 +409,13 @@ void ClientSessionCore::sendGkaContribution(std::uint64_t epoch) {
         mClientId,
         hostPublicKey,
         epoch);
-    mWs->send(envelope.dump());
-    chatEmit(mCallbacks.onStatus, "GKA contribution sent");
+    const auto serialized = envelope.dump();
+    const auto queued = mWs->send(serialized);
+    chatEmit(
+        mCallbacks.onStatus,
+        std::string("GKA contribution ") + (queued ? "sent" : "send failed") +
+            ": epoch " + std::to_string(epoch) +
+            ", bytes " + std::to_string(serialized.size()));
 }
 
 bool ClientSessionCore::installGroupState(const json& groupState, std::uint64_t epoch) {
@@ -1007,6 +1012,20 @@ void ClientSessionCore::handleSignalingMessage(const std::string& s) {
             }
             for (const auto& member : identityCandidates) {
                 const auto id = member.value("id", "");
+                if (id != chat::protocol::HostActorId) {
+                    // Non-Host member identities are announced again through
+                    // encrypted member_identity control messages after the GKA
+                    // epoch commits. Deferring them keeps room_members light so
+                    // a freshly joined Client can answer gka_request before the
+                    // Host-side contribution deadline.
+                    continue;
+                }
+                {
+                    std::lock_guard<std::mutex> lock(mMembersMutex);
+                    if (mMemberPublicKeysById.find(id) != mMemberPublicKeysById.end()) {
+                        continue;
+                    }
+                }
                 const auto username = member.value("username", id);
                 const auto publicKey = member.value("publicKey", "");
                 const auto identity = member.find("identity");

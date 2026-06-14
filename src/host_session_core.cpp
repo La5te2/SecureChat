@@ -119,6 +119,7 @@ HostSessionCore::~HostSessionCore() {
     // Destruction may happen during UI shutdown. Close transports and join the
     // watchdog without emitting another user-facing "Session stopped" event.
     mStopped.store(true);
+    stopSignalingWorker();
     stopGkaTimeoutWorker();
     if (mWs && !mWs->isClosed()) {
         mWs->close();
@@ -133,6 +134,12 @@ void HostSessionCore::setCallbacks(ChatCallbacks callbacks) {
 // Opens the signaling WebSocket and creates the chat room.
 void HostSessionCore::start() {
     mStopped.store(false);
+    mSignalingWorkerStopping.store(false);
+    if (!mSignalingThread.joinable()) {
+        mSignalingThread = std::thread([this]() {
+            signalingWorkerLoop();
+        });
+    }
     startGkaTimeoutWorker();
     mWs = std::make_shared<rtc::WebSocket>(mWsConfig);
 
@@ -154,7 +161,7 @@ void HostSessionCore::start() {
     });
 
     mWs->onMessage([this](rtc::message_variant data) {
-        handleSignalingMessage(rtcMessageToString(data));
+        enqueueSignalingMessage(rtcMessageToString(data));
     });
 
     mWs->onClosed([this]() {
@@ -185,6 +192,7 @@ void HostSessionCore::start() {
 // Closes all host-owned transports and marks the session stopped.
 void HostSessionCore::stop() {
     if (mStopped.exchange(true)) return;
+    stopSignalingWorker();
     stopGkaTimeoutWorker();
     if (mWs && !mWs->isClosed()) {
         mWs->close();
@@ -196,6 +204,47 @@ void HostSessionCore::stop() {
 // Reports whether the outer CLI/API loop should stop polling this session.
 bool HostSessionCore::shouldStop() const {
     return mStopped.load() || (mWs && mWs->isClosed());
+}
+
+void HostSessionCore::enqueueSignalingMessage(std::string payload) {
+    {
+        std::lock_guard<std::mutex> lock(mSignalingQueueMutex);
+        if (mSignalingWorkerStopping.load()) return;
+        mSignalingQueue.push_back(std::move(payload));
+    }
+    mSignalingQueueCv.notify_one();
+}
+
+void HostSessionCore::signalingWorkerLoop() {
+    while (true) {
+        std::string payload;
+        {
+            std::unique_lock<std::mutex> lock(mSignalingQueueMutex);
+            mSignalingQueueCv.wait(lock, [this]() {
+                return mSignalingWorkerStopping.load() || !mSignalingQueue.empty();
+            });
+            if (mSignalingWorkerStopping.load() && mSignalingQueue.empty()) {
+                break;
+            }
+            payload = std::move(mSignalingQueue.front());
+            mSignalingQueue.pop_front();
+        }
+
+        // Host-side message handling verifies member PKI, decrypts GKA
+        // contributions, and may commit a new group key. Keep that work off the
+        // libdatachannel WSS callback thread so consecutive contribution frames
+        // are not blocked by certificate verification.
+        handleSignalingMessage(payload);
+    }
+}
+
+void HostSessionCore::stopSignalingWorker() {
+    mSignalingWorkerStopping.store(true);
+    mSignalingQueueCv.notify_all();
+    if (mSignalingThread.joinable() &&
+        mSignalingThread.get_id() != std::this_thread::get_id()) {
+        mSignalingThread.join();
+    }
 }
 
 // Parses one host input line and sends chat, commands, or attachments.

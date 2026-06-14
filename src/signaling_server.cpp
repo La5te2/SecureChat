@@ -592,7 +592,7 @@ void SignalingServer::handleJoinRoom(rtc::WebSocket* key, const json& data) {
         return;
     }
 
-    std::cout << "[signal] " << account.username << " joined " << roomId << " as " << clientId << std::endl;
+    std::cout << "[signal] member joined " << roomId << " as " << clientId << std::endl;
     json joined = {
         {"type", "joined"},
         {"roomId", roomId},
@@ -784,6 +784,11 @@ void SignalingServer::relayGkaContribution(rtc::WebSocket* key, const json& data
     std::string roomId;
     std::string senderId;
     std::string errorMessage;
+
+    std::cout << "[signal] received gka_contribution frame epoch="
+              << data.value("epoch", 0ULL)
+              << " bytes=" << data.dump().size()
+              << std::endl;
 
     {
         std::lock_guard<std::mutex> lock(mMutex);
