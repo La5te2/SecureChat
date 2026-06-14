@@ -162,10 +162,19 @@ void HostSessionCore::start() {
 
     mWs->onClosed([this]() {
         chatEmit(mCallbacks.onStatus, "Signaling closed");
+        // Host connection attempts can fail asynchronously after the UI has
+        // entered "hosting" state. Mirror Client shutdown events so frontends
+        // can restore their controls when the signaling channel disappears.
+        if (!mStopped.exchange(true)) {
+            chatEmit(mCallbacks.onStatus, "Signaling connection ended");
+        }
     });
 
     mWs->onError([this](std::string error) {
         chatEmit(mCallbacks.onError, "Signaling error: " + error);
+        if (!mStopped.exchange(true)) {
+            chatEmit(mCallbacks.onStatus, "Signaling failed");
+        }
     });
 
     mWs->open(mWsUrl);

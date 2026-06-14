@@ -21,6 +21,11 @@ internal static class NativeMethods
     internal static extern void chat_set_event_callback(ChatEventCallback callback, IntPtr userData);
 
     [DllImport("native.dll", CallingConvention = CallingConvention.StdCall)]
+    internal static extern int chat_set_environment_variable(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string name,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string value);
+
+    [DllImport("native.dll", CallingConvention = CallingConvention.StdCall)]
     internal static extern int chat_host_start(
         [MarshalAs(UnmanagedType.LPUTF8Str)] string serverUrl,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string roomId,

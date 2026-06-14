@@ -277,6 +277,25 @@ void CHAT_CALL chat_set_event_callback(chat_event_callback callback, void* user_
     gUserData = user_data;
 }
 
+// Updates the environment table used by the native CRT. C# Environment APIs do
+// not reliably update std::getenv's copy on Windows, so WinUI calls this for
+// PKI, TLS, and mTLS settings before creating HostSessionCore/ClientSessionCore.
+int CHAT_CALL chat_set_environment_variable(const char* name, const char* value) {
+    installNativeCrashHandlersOnce();
+    const auto key = safeString(name);
+    const auto next = safeString(value);
+    if (key.empty()) return 0;
+
+#ifdef _WIN32
+    return _putenv_s(key.c_str(), next.c_str()) == 0 ? 1 : 0;
+#else
+    if (next.empty()) {
+        return unsetenv(key.c_str()) == 0 ? 1 : 0;
+    }
+    return setenv(key.c_str(), next.c_str(), 1) == 0 ? 1 : 0;
+#endif
+}
+
 // Starts a Host participant against an already-running Server.
 // Server is the only long-lived listener; Host remains a room member and should
 // not open its own signaling listen port.

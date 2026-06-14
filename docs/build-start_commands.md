@@ -84,7 +84,7 @@ cmake --build out\build\x64-release --config Release
 dotnet build app\chat\chat.csproj -c Release -p:Platform=x64
 ```
 
-启动 WinUI Chat：
+启动 WinUI Chat。普通用户可以在文件资源管理器里双击这个 exe；下面的命令只是等价的命令行启动方式：
 
 ```bat
 app\chat\bin\x64\Release\net10.0-windows10.0.19041.0\win-x64\SecureChat.exe
@@ -93,14 +93,16 @@ app\chat\bin\x64\Release\net10.0-windows10.0.19041.0\win-x64\SecureChat.exe
 WinUI Host/Client 连接 WSS Server：
 
 1. 先独立启动 Server，并在 Server 进程上配置 WSS 证书。
-2. 启动 WinUI；GKA v3 会在 Host/Client 加入房间时自动协商 room group key，不需要设置共享 E2EE 口令。
+2. 双击启动 WinUI，点击右侧齿轮，在“成员 PKI”区域选择信任根、成员证书链、成员私钥和可选吊销列表。
 3. 在 Host 或 Join 页的 Server URL 中填写：
 
 ```text
 wss://chat.la5te2.online:25566
 ```
 
-证书 PEM 和私钥 PEM 不再由 Host UI 配置；Host 现在只是连接外部 Server 的可见群成员。
+GKA v3 会在 Host/Client 加入房间时自动协商 room group key，不需要设置共享 E2EE 口令。
+
+Server 的 TLS 证书和私钥不在 WinUI 中配置；WinUI 只配置当前聊天成员自己的应用层 PKI 身份。Host 现在只是连接外部 Server 的可见群成员和房间管理者。
 
 ## Windows Web
 

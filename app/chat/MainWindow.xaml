@@ -259,6 +259,66 @@
                         <ToggleSwitch x:Name="AutoPreviewImagesToggleSwitch" Header="Auto preview images" IsOn="True" Toggled="AttachmentPreviewSetting_Toggled" />
                         <ToggleSwitch x:Name="AutoLoadAudioToggleSwitch" Header="Auto load audio" Toggled="AttachmentPreviewSetting_Toggled" />
                         <ToggleSwitch x:Name="TrustedMembersOnlyToggleSwitch" Header="Only trusted members auto-preview" IsOn="True" Toggled="AttachmentPreviewSetting_Toggled" />
+                        <TextBlock x:Name="PkiHeaderText" Text="Member PKI" FontWeight="SemiBold" />
+                        <Grid ColumnSpacing="8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="88" />
+                            </Grid.ColumnDefinitions>
+                            <TextBox x:Name="PkiTrustStoreBox" Header="Trust store" TextChanged="PersistedSetting_Changed" />
+                            <Button x:Name="BrowsePkiTrustStoreButton" Grid.Column="1" Content="Browse" Click="BrowsePkiTrustStore_Click" HorizontalAlignment="Stretch" VerticalAlignment="Bottom" />
+                        </Grid>
+                        <Grid ColumnSpacing="8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="88" />
+                            </Grid.ColumnDefinitions>
+                            <TextBox x:Name="PkiIdentityCertBox" Header="Identity cert chain" TextChanged="PersistedSetting_Changed" />
+                            <Button x:Name="BrowsePkiIdentityCertButton" Grid.Column="1" Content="Browse" Click="BrowsePkiIdentityCert_Click" HorizontalAlignment="Stretch" VerticalAlignment="Bottom" />
+                        </Grid>
+                        <Grid ColumnSpacing="8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="88" />
+                            </Grid.ColumnDefinitions>
+                            <TextBox x:Name="PkiIdentityKeyBox" Header="Identity private key" TextChanged="PersistedSetting_Changed" />
+                            <Button x:Name="BrowsePkiIdentityKeyButton" Grid.Column="1" Content="Browse" Click="BrowsePkiIdentityKey_Click" HorizontalAlignment="Stretch" VerticalAlignment="Bottom" />
+                        </Grid>
+                        <Grid ColumnSpacing="8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="88" />
+                            </Grid.ColumnDefinitions>
+                            <TextBox x:Name="PkiRevocationFileBox" Header="Revocation list" TextChanged="PersistedSetting_Changed" />
+                            <Button x:Name="BrowsePkiRevocationFileButton" Grid.Column="1" Content="Browse" Click="BrowsePkiRevocationFile_Click" HorizontalAlignment="Stretch" VerticalAlignment="Bottom" />
+                        </Grid>
+                        <PasswordBox x:Name="PkiIdentityKeyPassBox" Header="Identity key passphrase" />
+                        <TextBlock x:Name="MtlsHeaderText" Text="mTLS / WSS" FontWeight="SemiBold" />
+                        <Grid ColumnSpacing="8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="88" />
+                            </Grid.ColumnDefinitions>
+                            <TextBox x:Name="TlsCaFileBox" Header="Server TLS CA file" TextChanged="PersistedSetting_Changed" />
+                            <Button x:Name="BrowseTlsCaFileButton" Grid.Column="1" Content="Browse" Click="BrowseTlsCaFile_Click" HorizontalAlignment="Stretch" VerticalAlignment="Bottom" />
+                        </Grid>
+                        <Grid ColumnSpacing="8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="88" />
+                            </Grid.ColumnDefinitions>
+                            <TextBox x:Name="MtlsClientCertBox" Header="mTLS client cert chain" TextChanged="PersistedSetting_Changed" />
+                            <Button x:Name="BrowseMtlsClientCertButton" Grid.Column="1" Content="Browse" Click="BrowseMtlsClientCert_Click" HorizontalAlignment="Stretch" VerticalAlignment="Bottom" />
+                        </Grid>
+                        <Grid ColumnSpacing="8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="88" />
+                            </Grid.ColumnDefinitions>
+                            <TextBox x:Name="MtlsClientKeyBox" Header="mTLS client private key" TextChanged="PersistedSetting_Changed" />
+                            <Button x:Name="BrowseMtlsClientKeyButton" Grid.Column="1" Content="Browse" Click="BrowseMtlsClientKey_Click" HorizontalAlignment="Stretch" VerticalAlignment="Bottom" />
+                        </Grid>
+                        <PasswordBox x:Name="MtlsClientKeyPassBox" Header="mTLS key passphrase" />
                         <TextBlock x:Name="ChatBackgroundHeaderText" Text="Chat Background" FontWeight="SemiBold" />
                         <Grid ColumnSpacing="8">
                             <Grid.ColumnDefinitions>

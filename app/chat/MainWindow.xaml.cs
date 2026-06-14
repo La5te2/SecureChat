@@ -204,6 +204,11 @@ public sealed partial class MainWindow : Window
             return;
         }
 
+        if (!ApplySessionEnvironment())
+        {
+            return;
+        }
+
         ClearAttachmentMemberStates();
         // Host 只是第一个聊天成员/房间管理者，不负责监听端口。
         // 监听、TLS/WSS 和 relay 都由外部 Server 进程处理。
@@ -224,6 +229,11 @@ public sealed partial class MainWindow : Window
 
     private void Join_Click(object sender, RoutedEventArgs e)
     {
+        if (!ApplySessionEnvironment())
+        {
+            return;
+        }
+
         ClearAttachmentMemberStates();
         // Join 和 Host 都调用 native.dll。C# 只负责收集 UI 输入，
         // PKI、GKA、WebSocket 和 encrypted relay 都在 C++ core 中执行。
@@ -410,6 +420,15 @@ public sealed partial class MainWindow : Window
         return message.StartsWith("client ws://", StringComparison.OrdinalIgnoreCase) ||
             message.StartsWith("client wss://", StringComparison.OrdinalIgnoreCase) ||
             message.StartsWith("Clients can join with:", StringComparison.OrdinalIgnoreCase) ||
+            message.StartsWith("PKI identity ready:", StringComparison.OrdinalIgnoreCase) ||
+            message.StartsWith("PKI member verified:", StringComparison.OrdinalIgnoreCase) ||
+            message.StartsWith("GKA contribution verified:", StringComparison.OrdinalIgnoreCase) ||
+            message.StartsWith("Room members:", StringComparison.OrdinalIgnoreCase) ||
+            message == "Waiting for room group key" ||
+            message == "Room group key ready" ||
+            message == "Signaling connected" ||
+            message == "Signaling closed" ||
+            message == "mTLS client certificate ready" ||
             message.Contains("endpoint", StringComparison.OrdinalIgnoreCase);
     }
 
@@ -1323,6 +1342,7 @@ public sealed partial class MainWindow : Window
         if (message == "Session stopped" ||
             message == "Stopped" ||
             message == "Room is no longer available" ||
+            message == "Signaling closed" ||
             message == "Signaling connection ended" ||
             message == "Signaling failed" ||
             message == "Username already in room")
@@ -1649,6 +1669,120 @@ public sealed partial class MainWindow : Window
         if (SettingsPanel is null) return;
         SettingsPanel.Opacity = e.NewValue;
         SaveAppConfigIfReady();
+    }
+
+    private async void BrowsePkiTrustStore_Click(object sender, RoutedEventArgs e)
+    {
+        await PickPkiFileIntoAsync(PkiTrustStoreBox);
+    }
+
+    private async void BrowsePkiIdentityCert_Click(object sender, RoutedEventArgs e)
+    {
+        await PickPkiFileIntoAsync(PkiIdentityCertBox);
+    }
+
+    private async void BrowsePkiIdentityKey_Click(object sender, RoutedEventArgs e)
+    {
+        await PickPkiFileIntoAsync(PkiIdentityKeyBox);
+    }
+
+    private async void BrowsePkiRevocationFile_Click(object sender, RoutedEventArgs e)
+    {
+        await PickPkiFileIntoAsync(PkiRevocationFileBox);
+    }
+
+    private async void BrowseTlsCaFile_Click(object sender, RoutedEventArgs e)
+    {
+        await PickPkiFileIntoAsync(TlsCaFileBox);
+    }
+
+    private async void BrowseMtlsClientCert_Click(object sender, RoutedEventArgs e)
+    {
+        await PickPkiFileIntoAsync(MtlsClientCertBox);
+    }
+
+    private async void BrowseMtlsClientKey_Click(object sender, RoutedEventArgs e)
+    {
+        await PickPkiFileIntoAsync(MtlsClientKeyBox);
+    }
+
+    private async System.Threading.Tasks.Task PickPkiFileIntoAsync(TextBox target)
+    {
+        var picker = new FileOpenPicker();
+        picker.FileTypeFilter.Add(".pem");
+        picker.FileTypeFilter.Add(".crt");
+        picker.FileTypeFilter.Add(".cer");
+        picker.FileTypeFilter.Add(".key");
+        picker.FileTypeFilter.Add(".txt");
+        InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(this));
+
+        var file = await picker.PickSingleFileAsync();
+        if (file is null) return;
+
+        target.Text = file.Path;
+        SaveAppConfigIfReady();
+    }
+
+    private bool ApplySessionEnvironment()
+    {
+        if (!ApplyOptionalTlsEnvironment()) return false;
+        return ApplyMemberPkiEnvironment();
+    }
+
+    private bool ApplyOptionalTlsEnvironment()
+    {
+        // mTLS/WSS settings are optional. When present, native.dll uses them
+        // during the TLS handshake before the application-layer PKI runs.
+        return
+            SetProcessEnvironmentFromBox("SECURECHAT_TLS_CA_FILE", TlsCaFileBox) &&
+            SetProcessEnvironmentFromBox("SECURECHAT_MTLS_CLIENT_CERT_FILE", MtlsClientCertBox) &&
+            SetProcessEnvironmentFromBox("SECURECHAT_MTLS_CLIENT_KEY_FILE", MtlsClientKeyBox) &&
+            SetProcessEnvironmentValue("SECURECHAT_MTLS_CLIENT_KEY_PASS", MtlsClientKeyPassBox.Password);
+    }
+
+    private bool ApplyMemberPkiEnvironment()
+    {
+        // native.dll 读取的是 SECURECHAT_PKI_* 环境变量。WinUI 用户通常
+        // 通过双击 exe 启动，所以这里把设置面板中的路径写入当前进程环境。
+        if (!SetProcessEnvironmentFromBox("SECURECHAT_PKI_TRUST_STORE", PkiTrustStoreBox) ||
+            !SetProcessEnvironmentFromBox("SECURECHAT_IDENTITY_CERT_FILE", PkiIdentityCertBox) ||
+            !SetProcessEnvironmentFromBox("SECURECHAT_IDENTITY_KEY_FILE", PkiIdentityKeyBox) ||
+            !SetProcessEnvironmentFromBox("SECURECHAT_PKI_REVOCATION_FILE", PkiRevocationFileBox) ||
+            !SetProcessEnvironmentValue("SECURECHAT_IDENTITY_KEY_PASS", PkiIdentityKeyPassBox.Password))
+        {
+            return false;
+        }
+
+        var missing = new[]
+            {
+                ("SECURECHAT_PKI_TRUST_STORE", UiText("trust store", "信任根")),
+                ("SECURECHAT_IDENTITY_CERT_FILE", UiText("identity cert chain", "成员证书链")),
+                ("SECURECHAT_IDENTITY_KEY_FILE", UiText("identity private key", "成员私钥"))
+            }
+            .Where(item => string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(item.Item1)))
+            .Select(item => item.Item2)
+            .ToList();
+        if (missing.Count == 0) return true;
+
+        AddLine("error", UiText(
+            "Member PKI is required. Open Settings and choose: ",
+            "必须配置成员 PKI。请打开设置并选择：") + string.Join(", ", missing));
+        return false;
+    }
+
+    private bool SetProcessEnvironmentFromBox(string name, TextBox textBox)
+    {
+        return SetProcessEnvironmentValue(name, textBox.Text.Trim());
+    }
+
+    private bool SetProcessEnvironmentValue(string name, string value)
+    {
+        var normalized = value.Trim();
+        Environment.SetEnvironmentVariable(name, normalized.Length == 0 ? null : normalized);
+        if (NativeMethods.chat_set_environment_variable(name, normalized) != 0) return true;
+
+        AddLine("error", UiText("Failed to set native environment variable: ", "设置 native 环境变量失败：") + name);
+        return false;
     }
 
     private async void ImportChatBackground_Click(object sender, RoutedEventArgs e)
@@ -2060,6 +2194,24 @@ public sealed partial class MainWindow : Window
             TrustedMembersOnlyToggleSwitch.Header = UiText("Only trusted members auto-preview", "仅信任成员自动预览");
             TrustedMembersOnlyToggleSwitch.OnContent = UiText("On", "开");
             TrustedMembersOnlyToggleSwitch.OffContent = UiText("Off", "关");
+            PkiHeaderText.Text = UiText("Member PKI", "成员 PKI");
+            PkiTrustStoreBox.Header = UiText("Trust store", "信任根");
+            PkiIdentityCertBox.Header = UiText("Identity cert chain", "成员证书链");
+            PkiIdentityKeyBox.Header = UiText("Identity private key", "成员私钥");
+            PkiRevocationFileBox.Header = UiText("Revocation list", "吊销列表");
+            PkiIdentityKeyPassBox.Header = UiText("Identity key passphrase", "成员私钥口令");
+            BrowsePkiTrustStoreButton.Content = UiText("Browse", "选择");
+            BrowsePkiIdentityCertButton.Content = UiText("Browse", "选择");
+            BrowsePkiIdentityKeyButton.Content = UiText("Browse", "选择");
+            BrowsePkiRevocationFileButton.Content = UiText("Browse", "选择");
+            MtlsHeaderText.Text = UiText("mTLS / WSS", "mTLS / WSS");
+            TlsCaFileBox.Header = UiText("Server TLS CA file", "服务器 TLS CA 文件");
+            MtlsClientCertBox.Header = UiText("mTLS client cert chain", "mTLS 客户端证书链");
+            MtlsClientKeyBox.Header = UiText("mTLS client private key", "mTLS 客户端私钥");
+            MtlsClientKeyPassBox.Header = UiText("mTLS key passphrase", "mTLS 私钥口令");
+            BrowseTlsCaFileButton.Content = UiText("Browse", "选择");
+            BrowseMtlsClientCertButton.Content = UiText("Browse", "选择");
+            BrowseMtlsClientKeyButton.Content = UiText("Browse", "选择");
             ChatBackgroundHeaderText.Text = UiText("Chat Background", "聊天背景");
             ImportChatBackgroundButton.Content = UiText("Import Image", "导入图片");
             ClearChatBackgroundButton.Content = UiText("Clear Image", "清除图片");
@@ -2176,7 +2328,13 @@ public sealed partial class MainWindow : Window
             AppendYaml(builder, "auto_preview_images", autoPreviewImages ? "true" : "false");
             AppendYaml(builder, "auto_load_audio", autoLoadAudio ? "true" : "false");
             AppendYaml(builder, "only_trusted_attachment_preview", onlyTrustedAttachmentPreview ? "true" : "false");
-            AppendYaml(builder, "host_server_url", HostServerUrlBox.Text.Trim());
+            AppendYaml(builder, "pki_trust_store", PkiTrustStoreBox.Text.Trim());
+            AppendYaml(builder, "pki_identity_cert", PkiIdentityCertBox.Text.Trim());
+            AppendYaml(builder, "pki_identity_key", PkiIdentityKeyBox.Text.Trim());
+            AppendYaml(builder, "pki_revocation_file", PkiRevocationFileBox.Text.Trim());
+            AppendYaml(builder, "tls_ca_file", TlsCaFileBox.Text.Trim());
+            AppendYaml(builder, "mtls_client_cert", MtlsClientCertBox.Text.Trim());
+            AppendYaml(builder, "mtls_client_key", MtlsClientKeyBox.Text.Trim());
             AppendYaml(builder, "chat_background_path", chatBackgroundPath ?? "");
             AppendYaml(builder, "chat_background_opacity", NumberString(BackgroundOpacitySlider.Value));
             AppendYaml(builder, "chat_background_crop_x", ComboTag(BackgroundHorizontalComboBox));
@@ -2220,12 +2378,17 @@ public sealed partial class MainWindow : Window
             AutoPreviewImagesToggleSwitch.IsOn = autoPreviewImages;
             AutoLoadAudioToggleSwitch.IsOn = autoLoadAudio;
             TrustedMembersOnlyToggleSwitch.IsOn = onlyTrustedAttachmentPreview;
-            var hostServerUrl = Value(chatValues, "host_server_url", "");
-            // Migrate the old built-in localhost default to an empty field; users
-            // should choose the Server endpoint explicitly for each deployment.
-            HostServerUrlBox.Text = string.Equals(hostServerUrl, "ws://127.0.0.1:25566", StringComparison.OrdinalIgnoreCase)
-                ? ""
-                : hostServerUrl;
+            // Server URL is intentionally not restored from config. It is a
+            // per-session endpoint choice, so stale or sensitive endpoints
+            // should not silently appear after a restart.
+            HostServerUrlBox.Text = "";
+            PkiTrustStoreBox.Text = Value(chatValues, "pki_trust_store", "");
+            PkiIdentityCertBox.Text = Value(chatValues, "pki_identity_cert", "");
+            PkiIdentityKeyBox.Text = Value(chatValues, "pki_identity_key", "");
+            PkiRevocationFileBox.Text = Value(chatValues, "pki_revocation_file", "");
+            TlsCaFileBox.Text = Value(chatValues, "tls_ca_file", "");
+            MtlsClientCertBox.Text = Value(chatValues, "mtls_client_cert", "");
+            MtlsClientKeyBox.Text = Value(chatValues, "mtls_client_key", "");
             SetSlider(BackgroundOpacitySlider, Value(chatValues, "chat_background_opacity", "0.28"));
             SetComboByTag(BackgroundHorizontalComboBox, Value(chatValues, "chat_background_crop_x", "Center"));
             SetComboByTag(BackgroundVerticalComboBox, Value(chatValues, "chat_background_crop_y", "Center"));

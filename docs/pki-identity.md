@@ -38,63 +38,246 @@ Host 和 Client 都使用同一组变量名。实际部署时，每个成员机�
 
 成员证书的 Key Usage 如果存在，必须允许 `digitalSignature`。代码不会用 X25519 做身份认证；X25519 只用于 ECDH、GKA contribution/state 封装和 pairwise 私发，身份认证由证书里的签名公钥完成。
 
-## 最小证书生成示例
+## 证书生成：Windows PowerShell
 
-下面示例适合本地实验。正式部署时，Root CA 私钥应离线保存，并用 Intermediate CA 签发成员证书。
+本节生成一套实验用 PKI：Root CA 只签 Intermediate CA，成员证书由 Intermediate CA 签发。SecureChat 运行时信任 `root-ca.pem`，成员证书链文件应包含“成员叶子证书 + Intermediate CA 证书”。
 
-生成测试 Root CA：
+在项目根目录打开 PowerShell：
+
+```powershell
+New-Item -ItemType Directory -Force certs\pki
+Set-Location certs\pki
+```
+
+生成 Root CA。Root CA 是信任根，真实部署时应离线保存 `root-ca-key.pem`：
+
+```powershell
+openssl genpkey -algorithm ED25519 -out root-ca-key.pem
+
+openssl req -x509 -new -key root-ca-key.pem `
+  -out root-ca.pem `
+  -days 3650 `
+  -subj "/CN=SecureChat Test Root CA" `
+  -addext "basicConstraints=critical,CA:TRUE,pathlen:1" `
+  -addext "keyUsage=critical,keyCertSign,cRLSign" `
+  -addext "subjectKeyIdentifier=hash"
+```
+
+生成 Intermediate CA，并由 Root CA 签发：
+
+```powershell
+openssl genpkey -algorithm ED25519 -out intermediate-ca-key.pem
+
+openssl req -new -key intermediate-ca-key.pem `
+  -out intermediate-ca.csr `
+  -subj "/CN=SecureChat Test Intermediate CA"
+
+@"
+basicConstraints=critical,CA:TRUE,pathlen:0
+keyUsage=critical,keyCertSign,cRLSign
+subjectKeyIdentifier=hash
+authorityKeyIdentifier=keyid,issuer
+"@ | Set-Content -Encoding ascii intermediate-ca.ext
+
+openssl x509 -req -in intermediate-ca.csr `
+  -CA root-ca.pem -CAkey root-ca-key.pem -CAcreateserial `
+  -out intermediate-ca.pem `
+  -days 1825 `
+  -extfile intermediate-ca.ext
+```
+
+准备成员证书扩展。成员证书只允许做数字签名，不是 CA：
+
+```powershell
+@"
+basicConstraints=critical,CA:FALSE
+keyUsage=critical,digitalSignature
+subjectKeyIdentifier=hash
+authorityKeyIdentifier=keyid,issuer
+"@ | Set-Content -Encoding ascii member.ext
+```
+
+生成 Host/Alice 的成员身份私钥和证书，并把叶子证书与 Intermediate CA 合成证书链：
+
+```powershell
+openssl genpkey -algorithm ED25519 -out alice-key.pem
+
+openssl req -new -key alice-key.pem `
+  -out alice.csr `
+  -subj "/CN=alice"
+
+openssl x509 -req -in alice.csr `
+  -CA intermediate-ca.pem -CAkey intermediate-ca-key.pem -CAcreateserial `
+  -out alice-cert.pem `
+  -days 365 `
+  -extfile member.ext
+
+Get-Content .\alice-cert.pem, .\intermediate-ca.pem |
+  Set-Content -Encoding ascii .\alice-chain.pem
+```
+
+生成 Client/Bob 的成员身份私钥和证书：
+
+```powershell
+openssl genpkey -algorithm ED25519 -out bob-key.pem
+
+openssl req -new -key bob-key.pem `
+  -out bob.csr `
+  -subj "/CN=bob"
+
+openssl x509 -req -in bob.csr `
+  -CA intermediate-ca.pem -CAkey intermediate-ca-key.pem -CAcreateserial `
+  -out bob-cert.pem `
+  -days 365 `
+  -extfile member.ext
+
+Get-Content .\bob-cert.pem, .\intermediate-ca.pem |
+  Set-Content -Encoding ascii .\bob-chain.pem
+```
+
+创建空吊销列表并回到项目根目录：
+
+```powershell
+New-Item -ItemType File -Force revoked.txt
+Set-Location ..\..
+```
+
+Windows CLI 使用 Alice 证书时：
+
+```powershell
+$env:SECURECHAT_PKI_TRUST_STORE="certs\pki\root-ca.pem"
+$env:SECURECHAT_IDENTITY_CERT_FILE="certs\pki\alice-chain.pem"
+$env:SECURECHAT_IDENTITY_KEY_FILE="certs\pki\alice-key.pem"
+$env:SECURECHAT_PKI_REVOCATION_FILE="certs\pki\revoked.txt"
+```
+
+WinUI 中填写同样的四个文件路径即可。Bob 把 `alice-chain.pem` 和 `alice-key.pem` 换成 `bob-chain.pem` 和 `bob-key.pem`。
+
+## 证书生成：Linux Bash
+
+在项目根目录执行：
 
 ```bash
 mkdir -p certs/pki
+```
+
+生成 Root CA：
+
+```bash
 openssl genpkey -algorithm ED25519 -out certs/pki/root-ca-key.pem
+
 openssl req -x509 -new -key certs/pki/root-ca-key.pem \
   -out certs/pki/root-ca.pem \
   -days 3650 \
   -subj "/CN=SecureChat Test Root CA" \
   -addext "basicConstraints=critical,CA:TRUE,pathlen:1" \
-  -addext "keyUsage=critical,keyCertSign,cRLSign"
+  -addext "keyUsage=critical,keyCertSign,cRLSign" \
+  -addext "subjectKeyIdentifier=hash"
 ```
 
-生成一个成员身份密钥和证书：
+生成 Intermediate CA，并由 Root CA 签发：
 
 ```bash
-openssl genpkey -algorithm ED25519 -out certs/pki/alice-key.pem
-openssl req -new -key certs/pki/alice-key.pem \
-  -out certs/pki/alice.csr \
-  -subj "/CN=alice"
+openssl genpkey -algorithm ED25519 -out certs/pki/intermediate-ca-key.pem
 
+openssl req -new -key certs/pki/intermediate-ca-key.pem \
+  -out certs/pki/intermediate-ca.csr \
+  -subj "/CN=SecureChat Test Intermediate CA"
+
+cat > certs/pki/intermediate-ca.ext <<'EOF'
+basicConstraints=critical,CA:TRUE,pathlen:0
+keyUsage=critical,keyCertSign,cRLSign
+subjectKeyIdentifier=hash
+authorityKeyIdentifier=keyid,issuer
+EOF
+
+openssl x509 -req \
+  -in certs/pki/intermediate-ca.csr \
+  -CA certs/pki/root-ca.pem \
+  -CAkey certs/pki/root-ca-key.pem \
+  -CAcreateserial \
+  -out certs/pki/intermediate-ca.pem \
+  -days 1825 \
+  -extfile certs/pki/intermediate-ca.ext
+```
+
+准备成员证书扩展：
+
+```bash
 cat > certs/pki/member.ext <<'EOF'
 basicConstraints=critical,CA:FALSE
 keyUsage=critical,digitalSignature
 subjectKeyIdentifier=hash
 authorityKeyIdentifier=keyid,issuer
 EOF
+```
+
+生成 Host/Alice 成员证书：
+
+```bash
+openssl genpkey -algorithm ED25519 -out certs/pki/alice-key.pem
+
+openssl req -new -key certs/pki/alice-key.pem \
+  -out certs/pki/alice.csr \
+  -subj "/CN=alice"
 
 openssl x509 -req \
   -in certs/pki/alice.csr \
-  -CA certs/pki/root-ca.pem \
-  -CAkey certs/pki/root-ca-key.pem \
+  -CA certs/pki/intermediate-ca.pem \
+  -CAkey certs/pki/intermediate-ca-key.pem \
   -CAcreateserial \
-  -out certs/pki/alice-chain.pem \
+  -out certs/pki/alice-cert.pem \
   -days 365 \
   -extfile certs/pki/member.ext
+
+cat certs/pki/alice-cert.pem certs/pki/intermediate-ca.pem > certs/pki/alice-chain.pem
 ```
 
-启动 Alice 这个成员时：
+生成 Client/Bob 成员证书：
+
+```bash
+openssl genpkey -algorithm ED25519 -out certs/pki/bob-key.pem
+
+openssl req -new -key certs/pki/bob-key.pem \
+  -out certs/pki/bob.csr \
+  -subj "/CN=bob"
+
+openssl x509 -req \
+  -in certs/pki/bob.csr \
+  -CA certs/pki/intermediate-ca.pem \
+  -CAkey certs/pki/intermediate-ca-key.pem \
+  -CAcreateserial \
+  -out certs/pki/bob-cert.pem \
+  -days 365 \
+  -extfile certs/pki/member.ext
+
+cat certs/pki/bob-cert.pem certs/pki/intermediate-ca.pem > certs/pki/bob-chain.pem
+```
+
+创建空吊销列表：
+
+```bash
+: > certs/pki/revoked.txt
+```
+
+Linux CLI 使用 Alice 证书时：
 
 ```bash
 export SECURECHAT_PKI_TRUST_STORE=certs/pki/root-ca.pem
 export SECURECHAT_IDENTITY_CERT_FILE=certs/pki/alice-chain.pem
 export SECURECHAT_IDENTITY_KEY_FILE=certs/pki/alice-key.pem
+export SECURECHAT_PKI_REVOCATION_FILE=certs/pki/revoked.txt
 ```
 
-查看证书 SHA-256 指纹：
+Bob 把 `alice-chain.pem` 和 `alice-key.pem` 换成 `bob-chain.pem` 和 `bob-key.pem`。
+
+查看成员证书 SHA-256 指纹：
 
 ```bash
-openssl x509 -in certs/pki/alice-chain.pem -noout -fingerprint -sha256
+openssl x509 -in certs/pki/alice-cert.pem -noout -fingerprint -sha256
 ```
 
-需要吊销该证书时，把输出中的十六进制指纹写入 `SECURECHAT_PKI_REVOCATION_FILE` 指向的文本文件。
+需要长期吊销该证书时，把输出中的十六进制指纹写入 `SECURECHAT_PKI_REVOCATION_FILE` 指向的文本文件。房间内 `/ban` 或 `/evict` 不会写入这个文件。
 
 ## join_room 绑定
 

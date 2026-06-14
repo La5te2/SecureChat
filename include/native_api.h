@@ -22,6 +22,10 @@ typedef void(CHAT_CALL* chat_event_callback)(const char* kind, const char* messa
 
 // Registers the process-wide callback used by WinUI/Web wrappers to receive native events.
 CHAT_API void CHAT_CALL chat_set_event_callback(chat_event_callback callback, void* user_data);
+// Sets or clears a process environment variable inside the native runtime.
+// WinUI uses this before starting a session so std::getenv-based C++ code sees
+// settings entered in the GUI instead of requiring a PowerShell-launched process.
+CHAT_API int CHAT_CALL chat_set_environment_variable(const char* name, const char* value);
 // Starts a Host member and creates room_id on an already running Server.
 CHAT_API int CHAT_CALL chat_host_start(const char* server_url, const char* room_id, const char* username, const char* password);
 // Starts a Client member and joins room_id through an already running Server.

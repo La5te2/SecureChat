@@ -113,18 +113,70 @@ mTLS 部署会同时出现三类证书，作用不同：
 
 服务器 TLS 证书可以用 Let's Encrypt/Certbot 获取，步骤见 `docs/certificate_methods.md`。如果已有云厂商或其他 CA 签发的 PEM 证书，也可以直接放到上述路径。
 
-下面是本地实验用的 mTLS 客户端证书生成示例。它复用 `docs/pki-identity.md` 中的测试 Root CA；真实部署建议给 mTLS 和应用层成员身份使用不同用途的证书。
+下面是本地实验用的 mTLS 客户端证书生成示例。它复用 `docs/pki-identity.md` 中的测试 Root CA 和 Intermediate CA；真实部署建议给 mTLS 和应用层成员身份使用不同用途的 CA 或证书。客户端证书链文件应包含“mTLS 客户端叶子证书 + Intermediate CA 证书”，这样 Nginx 可以从客户端证书链验证到 `ssl_client_certificate` 指定的 Root CA。
 
-```bash
-cd /opt/SecureChat
-mkdir -p certs/pki
+#### Windows PowerShell
 
-# 如果还没有测试 Root CA，先按 docs/pki-identity.md 生成 root-ca.pem 和 root-ca-key.pem。
-openssl genpkey -algorithm ED25519 -out certs/pki/alice-mtls-key.pem
-openssl req -new -key certs/pki/alice-mtls-key.pem \
-  -out certs/pki/alice-mtls.csr \
+在项目根目录执行；如果还没有 `root-ca.pem`、`intermediate-ca.pem` 和 `intermediate-ca-key.pem`，先按 `docs/pki-identity.md` 生成：
+
+```powershell
+Set-Location certs\pki
+
+@"
+basicConstraints=critical,CA:FALSE
+keyUsage=critical,digitalSignature
+extendedKeyUsage=clientAuth
+subjectKeyIdentifier=hash
+authorityKeyIdentifier=keyid,issuer
+"@ | Set-Content -Encoding ascii mtls-client.ext
+
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out alice-mtls-key.pem
+
+openssl req -new -key alice-mtls-key.pem `
+  -out alice-mtls.csr `
   -subj "/CN=alice-mtls"
 
+openssl x509 -req -in alice-mtls.csr `
+  -CA intermediate-ca.pem -CAkey intermediate-ca-key.pem -CAcreateserial `
+  -out alice-mtls-cert.pem `
+  -days 365 `
+  -extfile mtls-client.ext
+
+Get-Content .\alice-mtls-cert.pem, .\intermediate-ca.pem |
+  Set-Content -Encoding ascii .\alice-mtls-chain.pem
+
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out bob-mtls-key.pem
+
+openssl req -new -key bob-mtls-key.pem `
+  -out bob-mtls.csr `
+  -subj "/CN=bob-mtls"
+
+openssl x509 -req -in bob-mtls.csr `
+  -CA intermediate-ca.pem -CAkey intermediate-ca-key.pem -CAcreateserial `
+  -out bob-mtls-cert.pem `
+  -days 365 `
+  -extfile mtls-client.ext
+
+Get-Content .\bob-mtls-cert.pem, .\intermediate-ca.pem |
+  Set-Content -Encoding ascii .\bob-mtls-chain.pem
+
+Set-Location ..\..
+```
+
+Windows CLI Host/Client 使用 Alice 的 mTLS 客户端证书时：
+
+```powershell
+$env:SECURECHAT_MTLS_CLIENT_CERT_FILE="certs\pki\alice-mtls-chain.pem"
+$env:SECURECHAT_MTLS_CLIENT_KEY_FILE="certs\pki\alice-mtls-key.pem"
+```
+
+Windows WinUI 使用 mTLS 时，在设置面板的“mTLS / WSS”区域选择同样的客户端证书链和客户端私钥；如果入口服务器证书不是系统信任 CA 签发，再选择 `SECURECHAT_TLS_CA_FILE` 对应的 CA 文件。WinUI 会在 Host/Join 前把这些设置写入当前进程环境变量。
+
+#### Linux Bash
+
+在项目根目录执行；如果还没有 `root-ca.pem`、`intermediate-ca.pem` 和 `intermediate-ca-key.pem`，先按 `docs/pki-identity.md` 生成：
+
+```bash
 cat > certs/pki/mtls-client.ext <<'EOF'
 basicConstraints=critical,CA:FALSE
 keyUsage=critical,digitalSignature
@@ -133,17 +185,42 @@ subjectKeyIdentifier=hash
 authorityKeyIdentifier=keyid,issuer
 EOF
 
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out certs/pki/alice-mtls-key.pem
+
+openssl req -new -key certs/pki/alice-mtls-key.pem \
+  -out certs/pki/alice-mtls.csr \
+  -subj "/CN=alice-mtls"
+
 openssl x509 -req \
   -in certs/pki/alice-mtls.csr \
-  -CA certs/pki/root-ca.pem \
-  -CAkey certs/pki/root-ca-key.pem \
+  -CA certs/pki/intermediate-ca.pem \
+  -CAkey certs/pki/intermediate-ca-key.pem \
   -CAcreateserial \
-  -out certs/pki/alice-mtls-chain.pem \
+  -out certs/pki/alice-mtls-cert.pem \
   -days 365 \
   -extfile certs/pki/mtls-client.ext
+
+cat certs/pki/alice-mtls-cert.pem certs/pki/intermediate-ca.pem > certs/pki/alice-mtls-chain.pem
+
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out certs/pki/bob-mtls-key.pem
+
+openssl req -new -key certs/pki/bob-mtls-key.pem \
+  -out certs/pki/bob-mtls.csr \
+  -subj "/CN=bob-mtls"
+
+openssl x509 -req \
+  -in certs/pki/bob-mtls.csr \
+  -CA certs/pki/intermediate-ca.pem \
+  -CAkey certs/pki/intermediate-ca-key.pem \
+  -CAcreateserial \
+  -out certs/pki/bob-mtls-cert.pem \
+  -days 365 \
+  -extfile certs/pki/mtls-client.ext
+
+cat certs/pki/bob-mtls-cert.pem certs/pki/intermediate-ca.pem > certs/pki/bob-mtls-chain.pem
 ```
 
-Nginx 使用 `ssl_client_certificate /opt/SecureChat/certs/pki/root-ca.pem;` 来验证这些客户端 TLS 证书。Host/Client 使用：
+Nginx 使用 `ssl_client_certificate /opt/SecureChat/certs/pki/root-ca.pem;` 和 `ssl_verify_depth 2;` 来验证这些客户端 TLS 证书。Linux Host/Client 使用 Alice 的 mTLS 客户端证书时：
 
 ```bash
 export SECURECHAT_MTLS_CLIENT_CERT_FILE=certs/pki/alice-mtls-chain.pem

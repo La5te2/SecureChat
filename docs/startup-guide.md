@@ -1,6 +1,6 @@
 # SecureChat 启动手册
 
-本文档只回答一件事：在 Windows 和 Linux 上怎样启动 Server、Host、Client。
+本文档回答：在 Windows 和 Linux 上怎样启动 Server、Host、Client。
 
 ## 角色说明
 
@@ -13,7 +13,7 @@
 - Server URL，例如 `ws://127.0.0.1:25566`；
 - Room，例如 `secure-room`；
 - Room password，在程序提示 `Room password:` 时输入；
-- PKI 信任根，也就是同一个 `root-ca.pem`。
+- PKI 信任根，也就是同一个 `root-ca.pem`。证书生成步骤见 `docs/pki-identity.md`，其中已经分别给出 Windows PowerShell 和 Linux Bash 命令，并使用 Intermediate CA 签发成员证书。
 
 ## Windows：准备工作
 
@@ -139,16 +139,36 @@ out\build\x64-release\client.exe wss://chat.la5te2.online:25566 secure-room bob
 
 ## Windows：WinUI
 
-先在启动 WinUI 的 PowerShell 里配置成员 PKI：
+WinUI 是桌面客户端，普通用户直接双击运行即可。可执行文件位置：
 
-```powershell
-$env:SECURECHAT_PKI_TRUST_STORE="certs\pki\root-ca.pem"
-$env:SECURECHAT_IDENTITY_CERT_FILE="certs\pki\alice-chain.pem"
-$env:SECURECHAT_IDENTITY_KEY_FILE="certs\pki\alice-key.pem"
-$env:SECURECHAT_PKI_REVOCATION_FILE="certs\pki\revoked.txt"
-
+```text
 app\chat\bin\x64\Release\net10.0-windows10.0.19041.0\win-x64\SecureChat.exe
 ```
+
+WinUI 不启动 Server。使用 WinUI 前，必须先有一个正在监听的 Server，例如在 PowerShell 中启动本机 Server：
+
+```powershell
+out\build\x64-release\server.exe 25566
+```
+
+第一次使用 WinUI 时，先点右侧齿轮进入设置面板，在“成员 PKI”区域选择当前成员的身份文件：
+
+- Trust store / 信任根：选择 `root-ca.pem`；
+- Identity cert chain / 成员证书链：Host 选择 `alice-chain.pem`，Client 选择 `bob-chain.pem`；
+- Identity private key / 成员私钥：Host 选择 `alice-key.pem`，Client 选择 `bob-key.pem`；
+- Revocation list / 吊销列表：可选；这是长期证书吊销列表，不是房间内 `/ban` 或 `/evict` 的记录文件。普通房间封禁只保存在当前 Host 进程内存中，不会写入这个文件；
+- Identity key passphrase / 成员私钥口令：如果私钥加密，启动本次会话前填写；这个口令不会保存到配置文件。
+
+这些路径会保存到 WinUI 同目录的 `config.yml`。Host 和 Join 启动前，WinUI 会把这些设置写入当前进程的 `SECURECHAT_PKI_TRUST_STORE`、`SECURECHAT_IDENTITY_CERT_FILE`、`SECURECHAT_IDENTITY_KEY_FILE` 和 `SECURECHAT_PKI_REVOCATION_FILE`，因此不需要为了普通双击启动而提前打开 PowerShell 设置临时环境变量。
+
+如果连接的是要求 mTLS 的 `wss://` Nginx 入口，再在同一个设置面板的“mTLS / WSS”区域填写：
+
+- Server TLS CA file / 服务器 TLS CA 文件：可选。入口服务器证书由私有 CA 或自签名 CA 签发时，选择对应 CA，例如 `root-ca.pem`；使用系统信任的公网证书时可留空；
+- mTLS client cert chain / mTLS 客户端证书链：选择当前成员的 mTLS 客户端证书链，例如 Host 选择 `alice-mtls-chain.pem`，Client 选择 `bob-mtls-chain.pem`；
+- mTLS client private key / mTLS 客户端私钥：选择对应私钥，例如 `alice-mtls-key.pem` 或 `bob-mtls-key.pem`；
+- mTLS key passphrase / mTLS 私钥口令：如果 mTLS 私钥加密，启动本次会话前填写；这个口令不会保存到配置文件。
+
+Host 和 Join 启动前，WinUI 会把这些可选项写入当前进程的 `SECURECHAT_TLS_CA_FILE`、`SECURECHAT_MTLS_CLIENT_CERT_FILE`、`SECURECHAT_MTLS_CLIENT_KEY_FILE` 和 `SECURECHAT_MTLS_CLIENT_KEY_PASS`。本地 `ws://127.0.0.1:25566` 或普通 `wss://` 不要求 mTLS 客户端证书时，这一栏可以留空。
 
 Host 页：
 
@@ -166,13 +186,7 @@ Join 页：
 - Password：填写同一个房间密码；
 - 点击 Join。
 
-WinUI 不启动 Server。使用 WinUI 前，必须先有一个正在监听的 Server，例如：
-
-```powershell
-out\build\x64-release\server.exe 25566
-```
-
-如果要在同一台 Windows 机器上测试两个 WinUI 成员，可以打开两个 PowerShell 窗口，分别设置不同的 `SECURECHAT_IDENTITY_CERT_FILE` 和 `SECURECHAT_IDENTITY_KEY_FILE`，再各自启动一个 WinUI 实例。
+如果要在同一台 Windows 机器上测试两个 WinUI 成员，可以复制一份 WinUI 输出目录，或者分别在两份运行目录的设置面板里选择不同的成员证书和私钥。单个 WinUI 进程一次只代表一个成员身份。
 
 ## Windows：Web UI
 

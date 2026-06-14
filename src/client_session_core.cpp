@@ -856,6 +856,13 @@ void ClientSessionCore::handleSignalingMessage(const std::string& s) {
             // Server-assigned clientId becomes the routing id for future private
             // relay and group-key envelopes.
             mClientId = j.value("clientId", "");
+            // Use the Server-accepted display name for all later signed GKA
+            // contributions. Host verifies this field against its member table,
+            // so keeping the local copy in sync prevents avoidable GKA rejection.
+            const auto acceptedUsername = j.value("username", mUsername);
+            if (!acceptedUsername.empty()) {
+                mUsername = acceptedUsername;
+            }
             const auto hostPublicKey = j.value("hostPublicKey", "");
             const auto hostUsername = j.value("hostUsername", chat::protocol::HostActorId);
             const auto hostIdentity = j.find("hostIdentity");
@@ -871,8 +878,7 @@ void ClientSessionCore::handleSignalingMessage(const std::string& s) {
             chatEmit(mCallbacks.onLog, "own_actor_id " + mClientId);
             chatEmit(
                 mCallbacks.onStatus,
-                "Joined room " + mRoomId + " as " + j.value("username", mClientId) +
-                    " (" + mClientId + ")");
+                "Joined room " + mRoomId + " as " + mUsername + " (" + mClientId + ")");
             chatEmit(mCallbacks.onStatus, "Waiting for room group key");
         }
         else if (type == "room_members") {
@@ -1040,6 +1046,17 @@ void ClientSessionCore::handleSignalingMessage(const std::string& s) {
             }
             else if (message == "member is silenced") {
                 chatEmit(mCallbacks.onError, "Signaling server error: " + message);
+            }
+            else if (message == "client public key is missing" ||
+                     message == "client identity verification failed" ||
+                     message == "member certificate is banned" ||
+                     message == "GKA contribution timeout" ||
+                     message == "member evicted by host") {
+                // These errors are Host decisions that the Server forwards before
+                // closing this Client's socket. Treat them as terminal so the UI
+                // shows the real reason instead of only "Signaling connection ended".
+                chatEmit(mCallbacks.onError, "Host rejected client: " + message);
+                requestShutdown("Host rejected client: " + message);
             }
             else {
                 // Non-admission relay errors are not trusted as terminal. A malicious

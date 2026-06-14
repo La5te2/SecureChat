@@ -401,6 +401,8 @@ export SECURECHAT_MTLS_CLIENT_CERT_FILE=certs/pki/alice-mtls-chain.pem
 export SECURECHAT_MTLS_CLIENT_KEY_FILE=certs/pki/alice-mtls-key.pem
 ```
 
+WinUI 使用 mTLS 时，不需要从 PowerShell 启动；在设置面板的“mTLS / WSS”区域选择客户端证书链、客户端私钥和可选服务器 TLS CA 文件即可。完整 Windows/Linux/WinUI/Web 启动步骤见 `docs/startup-guide.md`。
+
 如果 mTLS 入口服务器证书是私有 CA 或自签名证书，再额外设置 `SECURECHAT_TLS_CA_FILE`；使用 Let's Encrypt 等系统已信任 CA 时通常不需要。
 
 Nginx 模板：
@@ -538,8 +540,8 @@ docs/startup-guide.md
 最小顺序永远是：
 
 1. 启动 Server，监听 `25566`。
-2. 在 Host 进程配置成员 PKI，然后创建房间。
-3. 在 Client 进程配置成员 PKI，然后加入同一个房间。
+2. 在 Host 进程配置成员 PKI，或者在 WinUI 设置面板选择成员 PKI 文件，然后创建房间。
+3. 在 Client 进程配置成员 PKI，或者在 WinUI 设置面板选择成员 PKI 文件，然后加入同一个房间。
 
 Server 不是群成员，不需要房间密码，也不配置成员 PKI。Host 和 Client 都是群成员，必须配置成员 PKI，并在启动后输入相同的房间密码。
 
@@ -559,7 +561,7 @@ Linux 本机 WS 示例：
 ./out/build/x64-linux-release/client ws://127.0.0.1:25566 secure-room bob
 ```
 
-上面两组命令为了展示参数写在一起。实际运行时应打开三个终端：Server 一个，Host 一个，Client 一个。Host/Client 终端还要先设置 `SECURECHAT_PKI_TRUST_STORE`、`SECURECHAT_IDENTITY_CERT_FILE`、`SECURECHAT_IDENTITY_KEY_FILE`。WinUI 和 Web UI 的输入框填写步骤也在 `docs/startup-guide.md`。
+上面两组命令为了展示参数写在一起。实际运行时应打开三个终端：Server 一个，Host 一个，Client 一个。CLI Host/Client 终端还要先设置 `SECURECHAT_PKI_TRUST_STORE`、`SECURECHAT_IDENTITY_CERT_FILE`、`SECURECHAT_IDENTITY_KEY_FILE`。WinUI 可直接双击启动，并在设置面板选择成员 PKI 文件；Web UI 仍由承载它的 Web 进程环境变量提供成员 PKI。完整步骤见 `docs/startup-guide.md`。
 
 ## 公网云服务器部署
 
