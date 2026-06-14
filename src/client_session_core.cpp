@@ -108,7 +108,9 @@ ClientSessionCore::ClientSessionCore(
     mIdentity = chat::identity_pki::loadFromEnvironment();
 }
 
-ClientSessionCore::~ClientSessionCore() = default;
+ClientSessionCore::~ClientSessionCore() {
+    stopSignalingWorker();
+}
 
 // Replaces UI/CLI event callbacks used by the session.
 void ClientSessionCore::setCallbacks(ChatCallbacks callbacks) {
@@ -117,6 +119,13 @@ void ClientSessionCore::setCallbacks(ChatCallbacks callbacks) {
 
 // Opens the signaling WebSocket and requests to join the configured room.
 void ClientSessionCore::start() {
+    mSignalingWorkerStopping.store(false);
+    if (!mSignalingThread.joinable()) {
+        mSignalingThread = std::thread([this]() {
+            signalingWorkerLoop();
+        });
+    }
+
     mWs = std::make_shared<rtc::WebSocket>(mWsConfig);
 
     mWs->onOpen([this]() {
@@ -139,7 +148,7 @@ void ClientSessionCore::start() {
     });
 
     mWs->onMessage([this](rtc::message_variant data) {
-        handleSignalingMessage(rtcMessageToString(data));
+        enqueueSignalingMessage(rtcMessageToString(data));
     });
 
     mWs->onClosed([this]() {
@@ -170,6 +179,7 @@ void ClientSessionCore::stop() {
     if (mWs && !mWs->isClosed()) {
         mWs->close();
     }
+    stopSignalingWorker();
     requestShutdown("Stopped");
 }
 
@@ -844,7 +854,50 @@ void ClientSessionCore::requestShutdown(const std::string& reason) {
         if (mWs && !mWs->isClosed()) {
             mWs->close();
         }
+        mSignalingWorkerStopping.store(true);
+        mSignalingQueueCv.notify_all();
         chatEmit(mCallbacks.onStatus, reason);
+    }
+}
+
+void ClientSessionCore::enqueueSignalingMessage(std::string payload) {
+    {
+        std::lock_guard<std::mutex> lock(mSignalingQueueMutex);
+        if (mSignalingWorkerStopping.load()) return;
+        mSignalingQueue.push_back(std::move(payload));
+    }
+    mSignalingQueueCv.notify_one();
+}
+
+void ClientSessionCore::signalingWorkerLoop() {
+    while (true) {
+        std::string payload;
+        {
+            std::unique_lock<std::mutex> lock(mSignalingQueueMutex);
+            mSignalingQueueCv.wait(lock, [this]() {
+                return mSignalingWorkerStopping.load() || !mSignalingQueue.empty();
+            });
+            if (mSignalingWorkerStopping.load() && mSignalingQueue.empty()) {
+                break;
+            }
+            payload = std::move(mSignalingQueue.front());
+            mSignalingQueue.pop_front();
+        }
+
+        // JSON parsing, PKI certificate verification, and GKA contribution
+        // generation can be relatively heavy. Keeping them off the WSS callback
+        // thread prevents libdatachannel from closing a TLS socket while the
+        // application is still authenticating the previous frame.
+        handleSignalingMessage(payload);
+    }
+}
+
+void ClientSessionCore::stopSignalingWorker() {
+    mSignalingWorkerStopping.store(true);
+    mSignalingQueueCv.notify_all();
+    if (mSignalingThread.joinable() &&
+        mSignalingThread.get_id() != std::this_thread::get_id()) {
+        mSignalingThread.join();
     }
 }
 

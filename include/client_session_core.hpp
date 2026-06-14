@@ -12,12 +12,14 @@
 #include <rtc/rtc.hpp>
 
 #include <atomic>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -62,6 +64,12 @@ public:
 private:
     // Queues a local shutdown with a user-visible reason.
     void requestShutdown(const std::string& reason);
+    // Moves raw WebSocket frames off the libdatachannel callback thread.
+    void enqueueSignalingMessage(std::string payload);
+    // Serial protocol worker; does JSON parsing, PKI verification, and GKA work.
+    void signalingWorkerLoop();
+    // Stops and joins the protocol worker without touching the WebSocket.
+    void stopSignalingWorker();
     // Dispatches joined, room membership, encrypted relay, and error events.
     void handleSignalingMessage(const std::string& s);
     // Sends one encrypted relay message through the untrusted Server.
@@ -117,6 +125,11 @@ private:
     chat::identity_pki::IdentityContext mIdentity;
     std::vector<unsigned char> mGroupKey;
     std::uint64_t mGroupKeyEpoch = 0;
+    std::mutex mSignalingQueueMutex;
+    std::condition_variable mSignalingQueueCv;
+    std::deque<std::string> mSignalingQueue;
+    std::thread mSignalingThread;
+    std::atomic_bool mSignalingWorkerStopping = false;
     // True only after the Server accepts join_room and assigns a clientId.
     // A close before this point is an admission/connect failure, not a chat drop.
     std::atomic_bool mJoinedRoom = false;
