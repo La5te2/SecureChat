@@ -1344,6 +1344,7 @@ public sealed partial class MainWindow : Window
             message == "Signaling closed" ||
             message == "Signaling connection ended" ||
             message == "Signaling failed" ||
+            message == "Host identity verification failed" ||
             message == "Username already in room")
         {
             SetSessionMode(SessionMode.None);

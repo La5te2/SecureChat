@@ -370,7 +370,10 @@ void ClientSessionCore::sendGkaContribution(std::uint64_t epoch) {
         if (it != mMemberPublicKeysById.end()) hostPublicKey = it->second;
     }
     if (hostPublicKey.empty()) {
-        chatEmit(mCallbacks.onError, "Cannot send GKA contribution before Host identity is verified");
+        chatEmit(
+            mCallbacks.onError,
+            "Cannot send GKA contribution before Host identity is verified; check Client trust store and Host certificate chain");
+        requestShutdown("Host identity verification failed");
         return;
     }
 
@@ -873,14 +876,30 @@ void ClientSessionCore::handleSignalingMessage(const std::string& s) {
             const auto hostPublicKey = j.value("hostPublicKey", "");
             const auto hostUsername = j.value("hostUsername", chat::protocol::HostActorId);
             const auto hostIdentity = j.find("hostIdentity");
-            if (!hostPublicKey.empty() && hostIdentity != j.end() && hostIdentity->is_object()) {
-                rememberVerifiedMemberIdentity(
+            if (hostPublicKey.empty() || hostIdentity == j.end() || !hostIdentity->is_object()) {
+                // A Client cannot participate in GKA until it has authenticated
+                // Host's signed identity/publicKey binding. Missing fields here
+                // usually mean an old Server build is still running.
+                chatEmit(
+                    mCallbacks.onError,
+                    "Host identity is missing from join response; check that Server, Host, and Client are the same build");
+                requestShutdown("Host identity verification failed");
+                return;
+            }
+            if (!rememberVerifiedMemberIdentity(
                     chat::protocol::HostActorId,
                     hostUsername,
                     hostPublicKey,
                     *hostIdentity,
                     "",
-                    "joined");
+                    "joined")) {
+                // Verification failure is terminal. Staying connected would only
+                // lead to a GKA timeout, which hides the real PKI/root-cause.
+                chatEmit(
+                    mCallbacks.onError,
+                    "Host identity verification failed; check Client trust store, Host certificate chain, room name, and rebuild all components if one executable was updated");
+                requestShutdown("Host identity verification failed");
+                return;
             }
             chatEmit(mCallbacks.onLog, "own_actor_id " + mClientId);
             chatEmit(
