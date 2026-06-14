@@ -275,6 +275,10 @@ SignalingServer::SignalingServer(uint16_t port) {
     // Do not let half-open or abandoned WebSocket handshakes keep the public
     // signaling port alive but unable to accept fresh clients.
     config.connectionTimeout = std::chrono::seconds(15);
+    // Match libdatachannel's WebSocket frame cap to our signaling JSON budget.
+    // PKI cert chains make room_members/group_key frames larger than tiny
+    // defaults on some builds, especially over public WSS.
+    config.maxMessageSize = chat::protocol::MaxSignalingMessageBytes;
 
     if (envEnabled("SECURECHAT_SIGNALING_TLS")) {
         const auto certFile = envValue("SECURECHAT_TLS_CERT_FILE");

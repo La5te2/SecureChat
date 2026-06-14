@@ -147,9 +147,17 @@ void runExternalServerSession(
     }
     else {
         std::string line;
-        while (!session->shouldStop() && readInputLineUtf8(line)) {
+        bool inputClosed = false;
+        while (!session->shouldStop()) {
+            if (!readInputLineUtf8(line)) {
+                inputClosed = true;
+                break;
+            }
             if (line == "/quit" || line == "/exit") break;
             session->sendLine(line);
+        }
+        if (inputClosed && !session->shouldStop()) {
+            std::cout << "[status] Console input closed; stopping host" << std::endl;
         }
     }
 
