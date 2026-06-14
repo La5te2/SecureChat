@@ -22,7 +22,7 @@
 - 机密性：文本和附件 metadata/chunk 使用应用层 AES-256-GCM encrypted relay；Server 只转发 ciphertext。
 - 完整性：文本和附件 metadata/chunk 使用 AES-256-GCM AEAD；room/sender metadata 由 Server 绑定到 WebSocket 会话状态。
 - 密钥协商：GKA v3 使用临时 X25519 public key、成员签名 contribution、Host 发起 epoch、成员加入/离开后 key rotation。
-- 认证与访问控制：房间密码限制加入；WSS 提供 Server 证书校验；可选 mTLS 反向代理限制客户端连接准入；PKI 成员身份认证强制把成员证书签名绑定到 `join_room` public key 和 `group_key` envelope。
+- 认证与访问控制：房间密码限制加入；WSS 提供 Server 证书校验；PKI 成员身份认证强制把成员证书签名绑定到 `join_room` public key 和 `group_key` envelope。
 - 附件安全：大小限制、扩展名白名单、图片/语音文件头校验、文件名净化、固定缓存目录、缓存总量限制、不自动执行，WinUI 未知成员附件默认不自动预览。
 - 可用性：连接数和坏消息限制、连接超时、维护线程清理、GKA contribution 超时自动驱逐、daemon 脚本、可选 systemd 模板。
 - 部署卫生：默认不落盘日志、非 root guard、必要端口说明、安全组来源 IP 收敛步骤。
@@ -61,7 +61,7 @@
 - 当前强制 PKI 下，篡改 `join_room.publicKey` 或 `identity.signature` 会被 Host 拒绝。
 - 当前强制 PKI 下，篡改 `group_key.ciphertext`、`ephemeralPublicKey` 或 `identity.signature` 会被 Client 拒绝。
 - 当前强制 PKI 下，证书链中任一证书指纹进入 `SECURECHAT_PKI_REVOCATION_FILE` 时身份被拒绝。
-- 启用 mTLS 反向代理后，无客户端证书连接被 Nginx 拒绝，有受信任客户端证书连接成功。
+- 启用 Nginx TLS 反向代理后，公网只暴露 Nginx 入口，SecureChat backend 只监听本机地址。
 - Host 断开后 room 关闭，Client 收到停止提示。
 - Server stop/SIGTERM 后释放 TCP `25566`。
 
@@ -322,7 +322,7 @@ Server 不应可见：
 - Client B 对重复 relay 输出 `Dropped replayed encrypted relay`，不重复展示消息或附件。
 - Client 对旧 `group_key` 输出 stale/replayed 相关错误，不回滚到旧 room group key。
 - Host 对未知 `client_left` 记录忽略，不移除现有成员，不触发新的 group key rotation。
-- Client 对普通 relay 错误只显示提示，不主动 shutdown。
+- Client 对非终止类 relay 错误只显示提示，不主动 shutdown。
 - 如果 Server 对真实已知成员伪造断线或直接断开连接，Host 仍会移除该成员并轮换 group key；这是可用性和状态层风险，不是内容机密性突破。
 
 ### 系统缓解
@@ -608,7 +608,7 @@ Server 不应可见：
 
 ### 实验步骤：端口扫描
 
-1. 在云服务器上启动 SecureChat Server 或 mTLS 反向代理入口。
+1. 在云服务器上启动 SecureChat Server 或 Nginx TLS 反向代理入口。
 2. 从授权测试机扫描预期端口：
    ```bash
    nmap -Pn -p 22,80,443,25566,25567,5188 <your-server-ip-or-domain>
@@ -618,13 +618,13 @@ Server 不应可见：
    ss -lntp
    sudo ufw status
    ```
-4. 如果使用 mTLS 反向代理，确认公网只暴露 Nginx 的 `25566`，后端 `25567` 只监听 `127.0.0.1`。
+4. 如果使用 Nginx TLS 反向代理，确认公网只暴露 Nginx 的 `25566`，后端 `25567` 只监听 `127.0.0.1`。
 
 ### 预期现象：端口扫描
 
-- 普通公网聊天入口只应暴露 `25566`。
+- 公网聊天入口只应暴露 `25566`。
 - Web UI `5188` 不应直接暴露公网。
-- mTLS 部署中，公网应看到 Nginx `25566`，不应直接访问后端 `25567`。
+- Nginx TLS 反向代理部署中，公网应看到 Nginx `25566`，不应直接访问后端 `25567`。
 - Server 进程不是群成员，端口扫描只能证明服务暴露面，不能读取聊天明文。
 
 ### 实验步骤：TCP 半连接
@@ -653,7 +653,7 @@ Server 不应可见：
 ### 系统缓解
 
 - 云安全组限制来源 IP 或来源 CIDR。
-- 公网部署优先使用 Nginx/mTLS 入口，由反向代理承接 TLS 和连接准入。
+- 公网部署优先使用 Nginx TLS 入口，由反向代理承接 TLS 和 WebSocket upgrade。
 - Linux 开启 SYN cookies，并使用云厂商 DDoS/安全组能力。
 - SecureChat Server 保持 `connectionTimeout`、连接数限制、坏消息限制和维护线程清理。
 

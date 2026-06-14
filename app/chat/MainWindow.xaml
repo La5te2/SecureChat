@@ -293,32 +293,6 @@
                             <Button x:Name="BrowsePkiRevocationFileButton" Grid.Column="1" Content="Browse" Click="BrowsePkiRevocationFile_Click" HorizontalAlignment="Stretch" VerticalAlignment="Bottom" />
                         </Grid>
                         <PasswordBox x:Name="PkiIdentityKeyPassBox" Header="Identity key passphrase" />
-                        <TextBlock x:Name="MtlsHeaderText" Text="mTLS / WSS" FontWeight="SemiBold" />
-                        <Grid ColumnSpacing="8">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="88" />
-                            </Grid.ColumnDefinitions>
-                            <TextBox x:Name="TlsCaFileBox" Header="Server TLS CA file" TextChanged="PersistedSetting_Changed" />
-                            <Button x:Name="BrowseTlsCaFileButton" Grid.Column="1" Content="Browse" Click="BrowseTlsCaFile_Click" HorizontalAlignment="Stretch" VerticalAlignment="Bottom" />
-                        </Grid>
-                        <Grid ColumnSpacing="8">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="88" />
-                            </Grid.ColumnDefinitions>
-                            <TextBox x:Name="MtlsClientCertBox" Header="mTLS client cert chain" TextChanged="PersistedSetting_Changed" />
-                            <Button x:Name="BrowseMtlsClientCertButton" Grid.Column="1" Content="Browse" Click="BrowseMtlsClientCert_Click" HorizontalAlignment="Stretch" VerticalAlignment="Bottom" />
-                        </Grid>
-                        <Grid ColumnSpacing="8">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="88" />
-                            </Grid.ColumnDefinitions>
-                            <TextBox x:Name="MtlsClientKeyBox" Header="mTLS client private key" TextChanged="PersistedSetting_Changed" />
-                            <Button x:Name="BrowseMtlsClientKeyButton" Grid.Column="1" Content="Browse" Click="BrowseMtlsClientKey_Click" HorizontalAlignment="Stretch" VerticalAlignment="Bottom" />
-                        </Grid>
-                        <PasswordBox x:Name="MtlsClientKeyPassBox" Header="mTLS key passphrase" />
                         <TextBlock x:Name="ChatBackgroundHeaderText" Text="Chat Background" FontWeight="SemiBold" />
                         <Grid ColumnSpacing="8">
                             <Grid.ColumnDefinitions>

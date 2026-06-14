@@ -121,9 +121,6 @@ void ClientSessionCore::start() {
 
     mWs->onOpen([this]() {
         chatEmit(mCallbacks.onStatus, "Signaling connected");
-        if (chat::websocket_config::hasClientCertificate(mWsConfig)) {
-            chatEmit(mCallbacks.onStatus, "mTLS client certificate ready");
-        }
         json msg = {
             {"type", "join_room"},
             {"roomId", mRoomToken},
@@ -147,6 +144,11 @@ void ClientSessionCore::start() {
 
     mWs->onClosed([this]() {
         chatEmit(mCallbacks.onStatus, "Signaling closed");
+        if (!mSawErrorFrame.load() && !mStopped.load() && !mShutdownRequested.load()) {
+            chatEmit(
+                mCallbacks.onError,
+                "Signaling closed without an error frame; check that Server, Host, and Client are the same build");
+        }
         requestShutdown("Signaling connection ended");
     });
 
@@ -1026,6 +1028,7 @@ void ClientSessionCore::handleSignalingMessage(const std::string& s) {
             chatEmit(mCallbacks.onStatus, j.value("message", "moderation state changed"));
         }
         else if (type == "error") {
+            mSawErrorFrame.store(true);
             const std::string message = j.value("message", "unknown");
             if (message == "host disconnected") {
                 requestShutdown("Session stopped");

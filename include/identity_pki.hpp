@@ -18,7 +18,7 @@ struct VerifiedIdentity {
 };
 
 // Application-layer PKI context. This authenticates the temporary X25519 keys
-// used by GKA; it is separate from TLS/mTLS transport certificates.
+// used by GKA; it is separate from TLS transport certificates.
 class IdentityContext {
 public:
     IdentityContext();

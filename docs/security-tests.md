@@ -37,23 +37,20 @@ rg -n "PeerConnection|DataChannel|offer|answer|ice|ICE|STUN|TURN|legacy|compat|S
 - 文档只在“已移除/不再需要”语境中提到 WebRTC、DataChannel、STUN 或 ICE；
 - `SECURECHAT_E2EE_PASSPHRASE` 和 `SECURECHAT_ICE_SERVERS` 只作为已移除变量出现。
 
-### mTLS 可实现性检查
+### Nginx TLS 反向代理检查
 
 已检查 libdatachannel 头文件：
 
 - `rtc::WebSocketServer::Configuration` 支持 `enableTls`、`certificatePemFile`、`keyPemFile`、`keyPemPass`；
-- 服务端配置没有 TLS 客户端证书验证、客户端 CA trust store 或 verify callback 字段；
-- 因此 mTLS 由 Nginx 反向代理实现，SecureChat Server 作为 `127.0.0.1` backend。
+- SecureChat Server 可以直接启用 WSS，也可以只监听 `127.0.0.1` 作为 Nginx backend；
+- Nginx TLS 反向代理由 `deploy/securechat-nginx-tls.conf` 和 `deploy/securechat-server-backend.service` 提供模板。
 
 仓库已提供：
 
 - `SECURECHAT_BIND_ADDRESS`；
 - `SECURECHAT_TLS_CA_FILE`；
-- `SECURECHAT_MTLS_CLIENT_CERT_FILE`；
-- `SECURECHAT_MTLS_CLIENT_KEY_FILE`；
-- `SECURECHAT_MTLS_CLIENT_KEY_PASS`；
-- `deploy/securechat-nginx-mtls.conf`；
-- `deploy/securechat-server-mtls-backend.service`。
+- `deploy/securechat-nginx-tls.conf`；
+- `deploy/securechat-server-backend.service`。
 
 ## 手动实验 1：WS 明文信令抓包
 
@@ -155,9 +152,9 @@ frame contains "encrypted_relay"
 - `frame contains "join_room"` 无结果；
 - 包长度和时间序列。
 
-## 手动实验 3：mTLS 连接准入
+## 手动实验 3：Nginx TLS 反向代理暴露面
 
-目的：证明没有客户端 TLS 证书时不能连接，有受信任客户端证书时可以连接。
+目的：证明公网只暴露 Nginx TLS 入口，SecureChat backend 只监听本机地址，外部网络路径只能看到 TLS record。
 
 ### 部署步骤
 
@@ -176,12 +173,10 @@ sudo apt install -y nginx openssl
 sudo systemctl enable --now nginx
 ```
 
-mTLS 客户端证书可按 `docs/deployment-hardening.md` 生成；下面示例使用 `alice-mtls-chain.pem` 和 `alice-mtls-key.pem`，避免和应用层成员 PKI 的 `alice-chain.pem` 混淆。
-
-安装 Nginx mTLS 配置：
+安装 Nginx TLS 配置：
 
 ```bash
-sudo cp /opt/SecureChat/deploy/securechat-nginx-mtls.conf /etc/nginx/conf.d/securechat-mtls.conf
+sudo cp /opt/SecureChat/deploy/securechat-nginx-tls.conf /etc/nginx/conf.d/securechat-tls.conf
 sudo nginx -t
 sudo systemctl reload nginx
 ```
@@ -199,7 +194,7 @@ ss -lntp | grep -E ':(25566|25567)'
 127.0.0.1:25567 由 SecureChat backend 监听
 ```
 
-### 无客户端证书测试
+### TLS 入口测试
 
 ```bash
 openssl s_client -connect chat.la5te2.online:25566 -servername chat.la5te2.online
@@ -207,33 +202,13 @@ openssl s_client -connect chat.la5te2.online:25566 -servername chat.la5te2.onlin
 
 预期现象：
 
-- TLS 握手失败，或连接建立后被 Nginx 拒绝；
-- Nginx error log 中出现 client certificate required 或 verify failed；
-- Host/Client 无法完成 WebSocket 连接。
-
-### 带客户端证书测试
-
-```bash
-openssl s_client \
-  -connect chat.la5te2.online:25566 \
-  -servername chat.la5te2.online \
-  -cert certs/pki/alice-mtls-chain.pem \
-  -key certs/pki/alice-mtls-key.pem
-```
-
-如果入口服务器证书由私有 CA 或自签名证书签发，再加 `-CAfile certs/pki/root-ca.pem`。
-
-预期现象：
-
 - TLS verify return code 为 0；
 - 可以继续由 Host/Client 使用 `wss://chat.la5te2.online:25566` 建立 WebSocket；
 - SecureChat Server 日志只看到来自本机代理的连接。
 
-SecureChat Host/Client 连接 mTLS 入口：
+SecureChat Host/Client 连接 TLS 入口：
 
 ```bash
-export SECURECHAT_MTLS_CLIENT_CERT_FILE=certs/pki/alice-mtls-chain.pem
-export SECURECHAT_MTLS_CLIENT_KEY_FILE=certs/pki/alice-mtls-key.pem
 ./start_client.sh --server wss://chat.la5te2.online:25566
 ```
 
@@ -242,9 +217,9 @@ export SECURECHAT_MTLS_CLIENT_KEY_FILE=certs/pki/alice-mtls-key.pem
 截图建议：
 
 - `ss -lntp` 显示监听分离；
-- 无证书失败；
-- 有证书成功；
-- Nginx 日志中的证书验证结果。
+- `openssl s_client` 显示服务器 TLS 证书；
+- Wireshark/tcpdump 中只能看到 TLS record；
+- Nginx access/error log 中的 WebSocket upgrade 结果。
 
 ## 手动实验 4：PKI public key 替换验证
 
@@ -354,7 +329,7 @@ grep -R "secret-message-123\|secret-plan.txt" server.log logs || true
 - 正确目标对重复 `encrypted_relay` 输出 `Dropped replayed encrypted relay`，不重复展示消息或附件；
 - Client 对旧 `group_key` 输出 stale/replayed 相关错误，不回滚到旧 room group key；
 - Host 输出 `Ignored unknown client_left`，成员列表不变，不触发新的 group key rotation。
-- Client 对普通 relay 错误只显示错误提示，不主动退出；入房失败和 `host disconnected` 仍是终止事件。
+- Client 对非终止类 relay 错误只显示错误提示，不主动退出；入房失败和 `host disconnected` 仍是终止事件。
 
 ## 手动实验 6：附件安全
 
@@ -398,9 +373,9 @@ sudo ufw status
 
 ### 端口扫描预期现象
 
-- 普通公网 Server 部署只需要暴露 TCP `25566`。
+- 公网 Server 部署只需要暴露 TCP `25566`。
 - Web UI `5188` 不应直接暴露公网。
-- mTLS 反向代理部署中，公网只暴露 Nginx `25566`，SecureChat backend `25567` 只监听 `127.0.0.1`。
+- Nginx TLS 反向代理部署中，公网只暴露 Nginx `25566`，SecureChat backend `25567` 只监听 `127.0.0.1`。
 
 ### TCP 半连接步骤
 

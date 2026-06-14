@@ -265,9 +265,9 @@ void validateIncomingSignaling(const json& data) {
 SignalingServer::SignalingServer(uint16_t port) {
     rtc::WebSocketServer::Configuration config;
     config.port = port;
-    // Normal standalone mode listens on all interfaces. Reverse-proxy mTLS
-    // deployments set SECURECHAT_BIND_ADDRESS=127.0.0.1 so only Nginx/Caddy can
-    // reach the plain backend WebSocket.
+    // Normal standalone mode listens on all interfaces. Reverse-proxy TLS
+    // deployments can set SECURECHAT_BIND_ADDRESS=127.0.0.1 so only Nginx/Caddy
+    // can reach the plain backend WebSocket.
     const auto bindAddress = envValue("SECURECHAT_BIND_ADDRESS");
     config.bindAddress = bindAddress.empty() ? "0.0.0.0" : bindAddress;
     // Do not let half-open or abandoned WebSocket handshakes keep the public

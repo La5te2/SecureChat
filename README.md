@@ -32,7 +32,7 @@ SecureChat 当前定位为课程/论文实验系统；公网运行时应按本�
 - 私发文本和私发附件使用双层加密：外层仍走 room group key 保护 relay envelope，但 Server 不再按目标定向投递，而是广播外层密文；内层使用发送者临时 X25519 和目标成员已验证 public key 派生 pairwise key。没有目标成员私钥的 Server、Host 或其他 Client 不能解内层私发内容。
 - PKI 身份认证是 Host/Client 必需配置：成员身份私钥会签名 `join_room` 绑定、GKA 贡献和 Host 的 `group_key`/group-state envelope；接收端验证证书链、吊销状态和签名后才接受成员公钥、贡献集合和新 group key。
 - Host 可使用 `/silence`、`/unsilence`、`/evict` 或 `/ban` 管理当前房间成员。禁言只阻止目标 Client 发送 encrypted relay；驱逐会踢出成员，并在当前房间生命周期内封禁其已验证成员证书指纹。
-- 可选 mTLS 部署已提供：Nginx 在公网入口要求 TLS 客户端证书，SecureChat Server 作为本机 WebSocket backend 运行。模板见 `deploy/securechat-nginx-mtls.conf` 和 `deploy/securechat-server-mtls-backend.service`。
+- 可选 Nginx TLS 反向代理模板已提供：Nginx 对公网提供 `wss://`，SecureChat Server 作为本机 WebSocket backend 运行。模板见 `deploy/securechat-nginx-tls.conf` 和 `deploy/securechat-server-backend.service`。
 - 房间密码能阻止普通误入，但不能替代 TLS、限速、防火墙和强认证。
 - 能限制安全组来源 IP 时，不建议长期使用 `0.0.0.0/0`。
 - 不建议把 Web UI 端口 `5188` 直接暴露到公网。
@@ -54,7 +54,7 @@ docs/cpp-csharp-guide.md
 
 ## 完整测试流程
 
-本节只给出从“已经能构建”到“能证明功能和安全边界”的测试主线。安装、编译、运行命令和部署细节已经在后续小节展开：Windows 构建见 [Windows 构建](#windows-构建)，Linux 环境和构建见 [Linux 环境配置](#linux-环境配置) 与 [Linux 构建](#linux-构建)，成员 PKI 见 [PKI 身份认证](#pki-身份认证)，mTLS 入口见 [mTLS 反向代理部署](#mtls-反向代理部署)，公网部署见 [公网云服务器部署](#公网云服务器部署)，启动命令见 [运行 Server、Host 和 Client](#运行-serverhost-和-client)。
+本节只给出从“已经能构建”到“能证明功能和安全边界”的测试主线。安装、编译、运行命令和部署细节已经在后续小节展开：Windows 构建见 [Windows 构建](#windows-构建)，Linux 环境和构建见 [Linux 环境配置](#linux-环境配置) 与 [Linux 构建](#linux-构建)，成员 PKI 见 [PKI 身份认证](#pki-身份认证)，Nginx TLS 入口见 [Nginx TLS 反向代理部署](#nginx-tls-反向代理部署)，公网部署见 [公网云服务器部署](#公网云服务器部署)，启动命令见 [运行 Server、Host 和 Client](#运行-serverhost-和-client)。
 
 ### 1. 本地局域网功能测试
 
@@ -89,12 +89,11 @@ docs/cpp-csharp-guide.md
 - `wss://` 链路上只能看到 TLS record、IP、端口和连接时序，不能直接看到信令 JSON、聊天文本、附件名或 group key。
 - Server 日志即使开启 `SECURECHAT_SERVER_LOG_FILE`，也不应包含聊天文本或原始附件名。
 
-### 3. mTLS 反向代理测试
+### 3. Nginx TLS 反向代理测试
 
-1. 按 [mTLS 反向代理部署](#mtls-反向代理部署) 让 Nginx 监听公网 `25566`，SecureChat Server 只监听 `127.0.0.1:25567`。
-2. Host/Client 同时配置应用层成员 PKI 和 TLS 客户端证书。
-3. 分别测试“带正确客户端 TLS 证书”和“不带客户端 TLS 证书”的连接。
-4. 在服务器上检查监听状态：
+1. 按 [Nginx TLS 反向代理部署](#nginx-tls-反向代理部署) 让 Nginx 监听公网 `25566`，SecureChat Server 只监听 `127.0.0.1:25567`。
+2. Host/Client 使用应用层成员 PKI，连接 `wss://chat.la5te2.online:25566`。
+3. 在服务器上检查监听状态：
 
 ```bash
 ss -lntp | grep -E ':25566|:25567'
@@ -104,7 +103,7 @@ ss -lntp | grep -E ':25566|:25567'
 
 - 公网只暴露 Nginx 的 `25566`。
 - 后端 `25567` 只在本机监听，不能从公网直接连接。
-- 没有合法 TLS 客户端证书的连接会在反向代理层被拒绝；通过 mTLS 的连接仍需通过应用层 PKI 身份认证。
+- Nginx 负责 TLS 终止和 WebSocket upgrade；成员身份仍由应用层 PKI 验证。
 
 ### 4. PKI 和 GKA 安全测试
 
@@ -129,7 +128,7 @@ ss -lntp
 sudo ufw status
 ```
 
-预期结果：公网只暴露必要端口；Web UI `5188` 不直接暴露；mTLS 后端 `25567` 只监听 `127.0.0.1`。
+预期结果：公网只暴露必要端口；Web UI `5188` 不直接暴露；Nginx 反代后端 `25567` 只监听 `127.0.0.1`。
 
 低速、限量 TCP 半连接测试只在自有服务器上执行：
 
@@ -315,7 +314,7 @@ json encryptGroupStateForMember(
 - Host 仍是群成员和房间生命周期管理者，因此可以读取群聊内容、驱逐成员或关闭房间；但当前 `K_G` 不再由 Host 单方随机生成，而是由签名贡献集合导出。
 - 恶意成员可以拒绝提交 GKA contribution，这属于可用性攻击；Host 会在 10 秒 GKA 超时后自动驱逐仍未提交贡献的成员，并只用剩余成员重新发起 epoch。
 - 私发是广播外层 relay 加内层 pairwise 加密：Host/Client 会在解密外层后检查 `relayTargetId`。内层 pairwise key 由发送者临时 X25519 private key 和目标成员已验证 public key 派生，不从 room group key 派生，因此其他成员即使持有当前 `K_G` 也不能解开私发正文或私发附件 chunk。
-- Server 仍可见 metadata，包括 room token、连接 id、ciphertext 长度和时序。这会泄露活跃时间和大致内容大小；WSS/mTLS、默认少日志和部署最小暴露只能降低风险，不能隐藏这些模式。
+- Server 仍可见 metadata，包括 room token、连接 id、ciphertext 长度和时序。这会泄露活跃时间和大致内容大小；WSS、默认少日志和部署最小暴露只能降低风险，不能隐藏这些模式。
 - 接收端维护 relay nonce/tag replay cache；Client 还检查递增的 group key epoch，拒绝重放或过期 `group_key`。这能阻止常见 Server 重放旧 envelope，但不能阻止 Server 直接断连或丢弃新消息。
 典型中间人攻击是公钥替换：
 
@@ -366,12 +365,12 @@ export SECURECHAT_PKI_REVOCATION_FILE=certs/pki/revoked.txt
 
 详细字段见 `docs/pki-identity.md`。
 
-## mTLS 反向代理部署
+## Nginx TLS 反向代理部署
 
-当前 libdatachannel 的 WebSocketServer 不暴露 TLS 客户端证书校验接口，因此 mTLS 在反向代理层实现：
+Nginx 可以放在公网入口做 TLS 终止，SecureChat Server 只作为本机 WebSocket backend：
 
 ```text
-Host/Client -- mTLS WSS --> Nginx :25566 -- local WS --> SecureChat Server 127.0.0.1:25567
+Host/Client -- WSS --> Nginx :25566 -- local WS --> SecureChat Server 127.0.0.1:25567
 ```
 
 SecureChat Server backend 启动：
@@ -388,38 +387,28 @@ sudo apt install -y nginx openssl
 sudo systemctl enable --now nginx
 ```
 
-mTLS 需要三类证书：
+这种部署只需要两类证书：
 
 - 服务器 TLS 证书：Nginx 使用，例如 `/opt/SecureChat/certs/fullchain.pem` 和 `/opt/SecureChat/certs/privkey.pem`；公网域名推荐用 Let's Encrypt/Certbot，方法见 `docs/certificate_methods.md`。
-- mTLS 客户端 TLS 证书：Host/Client 连接 Nginx 时出示，例如 `certs/pki/alice-mtls-chain.pem` 和 `certs/pki/alice-mtls-key.pem`；Nginx 用 `ssl_client_certificate` 指向的 CA 验证它。
 - 应用层成员 PKI 证书：SecureChat Host/Client 用它签名和验签 `join_room`、GKA contribution 和 group state，变量是 `SECURECHAT_PKI_TRUST_STORE`、`SECURECHAT_IDENTITY_CERT_FILE`、`SECURECHAT_IDENTITY_KEY_FILE`。
 
-Host/Client 连接 mTLS 入口前配置客户端证书：
-
-```bash
-export SECURECHAT_MTLS_CLIENT_CERT_FILE=certs/pki/alice-mtls-chain.pem
-export SECURECHAT_MTLS_CLIENT_KEY_FILE=certs/pki/alice-mtls-key.pem
-```
-
-WinUI 使用 mTLS 时，不需要从 PowerShell 启动；在设置面板的“mTLS / WSS”区域选择客户端证书链、客户端私钥和可选服务器 TLS CA 文件即可。完整 Windows/Linux/WinUI/Web 启动步骤见 `docs/startup-guide.md`。
-
-如果 mTLS 入口服务器证书是私有 CA 或自签名证书，再额外设置 `SECURECHAT_TLS_CA_FILE`；使用 Let's Encrypt 等系统已信任 CA 时通常不需要。
+如果 Nginx 入口服务器证书是系统已信任 CA 签发，例如 Let's Encrypt，Host/Client 和 WinUI 直接使用 `wss://` URL 即可。自签名或私有 CA 场景下，CLI/Web 进程可通过 `SECURECHAT_TLS_CA_FILE` 指定服务器 CA；WinUI 不提供这个高级项，建议把 CA 导入操作系统信任存储或使用公网受信任证书。
 
 Nginx 模板：
 
 ```text
-deploy/securechat-nginx-mtls.conf
+deploy/securechat-nginx-tls.conf
 ```
 
 systemd backend 模板：
 
 ```text
-deploy/securechat-server-mtls-backend.service
+deploy/securechat-server-backend.service
 ```
 
-`deploy/` 文件是 Linux 部署模板，不是双击运行程序。普通 systemd 部署时，把 `deploy/securechat-server.service` 复制到 `/etc/systemd/system/securechat-server.service`，检查 `User`、`WorkingDirectory`、`ExecStart` 和证书路径后执行 `sudo systemctl daemon-reload` 与 `sudo systemctl enable --now securechat-server.service`。Nginx+mTLS 部署时，把 Nginx 模板复制到 `/etc/nginx/conf.d/securechat-mtls.conf`，把 backend service 模板复制到 `/etc/systemd/system/securechat-server-mtls-backend.service`，检查证书路径和后端端口后启动 Nginx 与 backend。完整步骤见 `docs/deployment-hardening.md`。
+`deploy/` 文件是 Linux 部署模板，不是双击运行程序。直接 systemd 部署时，把 `deploy/securechat-server.service` 复制到 `/etc/systemd/system/securechat-server.service`，检查 `User`、`WorkingDirectory`、`ExecStart` 和证书路径后执行 `sudo systemctl daemon-reload` 与 `sudo systemctl enable --now securechat-server.service`。Nginx TLS 反代部署时，把 Nginx 模板复制到 `/etc/nginx/conf.d/securechat-tls.conf`，把 backend service 模板复制到 `/etc/systemd/system/securechat-server-backend.service`，检查证书路径和后端端口后启动 Nginx 与 backend。完整步骤见 `docs/deployment-hardening.md`。
 
-mTLS 只限制“谁能建立到 Server 的 TLS 连接”，当前不是强制部署模式；本地或局域网测试可以继续使用 `ws://`。应用层消息机密性仍由 GKA v3 和 AES-256-GCM 提供，成员身份、GKA 贡献和临时 X25519 key 的绑定仍由强制 PKI 身份认证提供。
+Nginx TLS 反代只保护传输通道并隐藏本机 backend；本地或局域网测试可以继续使用 `ws://`。应用层消息机密性仍由 GKA v3 和 AES-256-GCM 提供，成员身份、GKA 贡献和临时 X25519 key 的绑定仍由强制 PKI 身份认证提供。
 
 ## Windows 构建
 

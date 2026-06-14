@@ -2,7 +2,7 @@
 
 本文档记录 Windows 和 Linux 下的手动构建、脚本构建和启动命令。命令默认在项目根目录执行。
 
-如果只想知道怎么启动 Server、Host、Client，请优先看 `docs/startup-guide.md`。那里按 Windows/Linux 和 WS/WSS/mTLS 分开写了完整步骤。
+如果只想知道怎么启动 Server、Host、Client，请优先看 `docs/startup-guide.md`。那里按 Windows/Linux 和 WS/WSS/Nginx TLS 反向代理分开写了完整步骤。
 
 Windows 项目根目录示例：
 
@@ -176,9 +176,9 @@ export SECURECHAT_PKI_REVOCATION_FILE=certs/pki/revoked.txt
 
 每个成员机器使用自己的 `SECURECHAT_IDENTITY_CERT_FILE` 和 `SECURECHAT_IDENTITY_KEY_FILE`。同一房间内的成员应信任同一个 CA bundle。详细证书生成和字段说明见 `docs/pki-identity.md`。
 
-## 可选 mTLS 反向代理启动
+## 可选 Nginx TLS 反向代理启动
 
-mTLS 由 Nginx 处理，SecureChat Server 作为本机 backend 运行。公网只暴露 Nginx 的 `25566`，backend 只监听本机 `25567`。
+TLS 由 Nginx 处理，SecureChat Server 作为本机 backend 运行。公网只暴露 Nginx 的 `25566`，backend 只监听本机 `25567`。
 
 Nginx 需要安装在服务器系统上，不是仓库里的可执行文件。Ubuntu/Debian 示例：
 
@@ -188,11 +188,10 @@ sudo apt install -y nginx openssl
 sudo systemctl enable --now nginx
 ```
 
-mTLS 入口至少需要：
+Nginx TLS 入口至少需要：
 
 - Nginx 服务器 TLS 证书：`/opt/SecureChat/certs/fullchain.pem`、`/opt/SecureChat/certs/privkey.pem`；
-- 用来验证客户端 TLS 证书的 CA：`/opt/SecureChat/certs/pki/root-ca.pem`；
-- 每台 Host/Client 自己持有的客户端 TLS 证书和私钥，例如 `certs/pki/alice-mtls-chain.pem`、`certs/pki/alice-mtls-key.pem`。
+- Host/Client 使用的应用层成员 PKI：`SECURECHAT_PKI_TRUST_STORE`、`SECURECHAT_IDENTITY_CERT_FILE`、`SECURECHAT_IDENTITY_KEY_FILE`。
 
 不使用 systemd 时，用脚本启动 backend。`start_server.sh` 默认后台运行：
 
@@ -200,14 +199,14 @@ mTLS 入口至少需要：
 sudo -u securechat -H bash -lc 'cd /opt/SecureChat && \
   SECURECHAT_BIND_ADDRESS=127.0.0.1 \
   SECURECHAT_PORT=25567 \
-  SECURECHAT_SERVER_PID_FILE=server-mtls-backend.pid \
+  SECURECHAT_SERVER_PID_FILE=server-backend.pid \
   ./start_server.sh --mode ws'
 ```
 
 安装 Nginx 配置：
 
 ```bash
-sudo cp /opt/SecureChat/deploy/securechat-nginx-mtls.conf /etc/nginx/conf.d/securechat-mtls.conf
+sudo cp /opt/SecureChat/deploy/securechat-nginx-tls.conf /etc/nginx/conf.d/securechat-tls.conf
 sudo nginx -t
 sudo systemctl reload nginx
 ```
@@ -223,16 +222,9 @@ sudo nginx -s reload
 使用 systemd backend 模板：
 
 ```bash
-sudo cp /opt/SecureChat/deploy/securechat-server-mtls-backend.service /etc/systemd/system/securechat-server-mtls-backend.service
+sudo cp /opt/SecureChat/deploy/securechat-server-backend.service /etc/systemd/system/securechat-server-backend.service
 sudo systemctl daemon-reload
-sudo systemctl enable --now securechat-server-mtls-backend.service
-```
-
-Host/Client 连接外部入口：
-
-```bash
-export SECURECHAT_MTLS_CLIENT_CERT_FILE=certs/pki/alice-mtls-chain.pem
-export SECURECHAT_MTLS_CLIENT_KEY_FILE=certs/pki/alice-mtls-key.pem
+sudo systemctl enable --now securechat-server-backend.service
 ```
 
 如果入口服务器证书不是系统信任 CA 签发，再设置：
@@ -267,7 +259,7 @@ cmake --build out/build/x64-linux-release --config Release
 
 ### Linux CLI 启动顺序
 
-下面只给最小本机 WS 测试命令。完整 PKI、WSS、脚本和 mTLS 步骤见 `docs/startup-guide.md`。
+下面只给最小本机 WS 测试命令。完整 PKI、WSS、脚本和 Nginx TLS 反向代理步骤见 `docs/startup-guide.md`。
 
 终端 1：启动 Server。
 

@@ -1,10 +1,10 @@
 # SecureChat 环境变量参考
 
-本文档列出当前仍可配置的 `SECURECHAT_*` 环境变量。不是每个运行角色都需要配置所有变量；Server、Host、Client 和 mTLS 反向代理场景各自使用其中一部分。交互使用时优先通过命令参数、隐藏输入和脚本默认值完成，不建议把秘密长期写入 shell 启动文件。当前 Host/Client 必须配置 PKI 成员身份变量，否则会启动失败。
+本文档列出当前仍可配置的 `SECURECHAT_*` 环境变量。不是每个运行角色都需要配置所有变量；Server、Host、Client 和 Nginx TLS 反向代理 backend 场景各自使用其中一部分。交互使用时优先通过命令参数、隐藏输入和脚本默认值完成，不建议把秘密长期写入 shell 启动文件。当前 Host/Client 必须配置 PKI 成员身份变量，否则会启动失败。
 
 ## 总览
 
-当前共有 31 个 `SECURECHAT_*` 变量：
+当前共有 28 个 `SECURECHAT_*` 变量：
 
 ```text
 SECURECHAT_ALLOW_ROOT
@@ -19,9 +19,6 @@ SECURECHAT_IDENTITY_KEY_FILE
 SECURECHAT_IDENTITY_KEY_PASS
 SECURECHAT_LOG_FILE
 SECURECHAT_LOGS_MAX_BYTES
-SECURECHAT_MTLS_CLIENT_CERT_FILE
-SECURECHAT_MTLS_CLIENT_KEY_FILE
-SECURECHAT_MTLS_CLIENT_KEY_PASS
 SECURECHAT_PID_FILE
 SECURECHAT_PKI_REVOCATION_FILE
 SECURECHAT_PKI_TRUST_STORE
@@ -46,7 +43,7 @@ SECURECHAT_USER
 | --- | --- | --- |
 | `SECURECHAT_SERVER_BIN` | `./out/build/x64-linux-release/server` | `start_server.sh` 使用的 Server 可执行文件路径。 |
 | `SECURECHAT_PORT` | `25566` | Server 监听端口；也用于 stop 脚本查找监听进程。 |
-| `SECURECHAT_BIND_ADDRESS` | `0.0.0.0` | Server 绑定地址；mTLS 反向代理后端建议设为 `127.0.0.1`。 |
+| `SECURECHAT_BIND_ADDRESS` | `0.0.0.0` | Server 绑定地址；Nginx TLS 反向代理 backend 建议设为 `127.0.0.1`。 |
 | `SECURECHAT_SERVER_PID_FILE` | `server.pid` | Server daemon pid 文件路径。 |
 | `SECURECHAT_SERVER_LOG_FILE` | 空 | Server 诊断日志路径；为空时 daemon 输出写入 `/dev/null`。 |
 | `SECURECHAT_ALLOW_ROOT` | 空 | `start_server.sh` 默认拒绝 root 运行；临时诊断时设为 `1` 才允许 root。 |
@@ -94,30 +91,9 @@ printf '%s\n' 'room-password' | ./start_client.sh --server wss://chat.la5te2.onl
 | `SECURECHAT_TLS_CERT_FILE` | `start_server.sh --mode wss` 时默认为 `certs/fullchain.pem` | TLS 证书链 PEM 路径。 |
 | `SECURECHAT_TLS_KEY_FILE` | `start_server.sh --mode wss` 时默认为 `certs/privkey.pem` | TLS 私钥 PEM 路径。 |
 | `SECURECHAT_TLS_KEY_PASS` | 空 | TLS 私钥密码；只有私钥加密时需要。 |
-| `SECURECHAT_TLS_CA_FILE` | 空 | Host/Client 使用的自定义 CA PEM 路径；用于信任自签名或私有 CA 签发的 WSS/mTLS 入口证书。 |
+| `SECURECHAT_TLS_CA_FILE` | 空 | Host/Client 使用的自定义 CA PEM 路径；用于信任自签名或私有 CA 签发的 WSS 入口证书。 |
 
 `ws://` 是明文 WebSocket；公网部署建议使用 `wss://`。
-
-## mTLS 客户端证书
-
-mTLS 服务端验证由 Nginx 反向代理完成。Host/Client 需要在 TLS 握手时出示客户端证书时，配置以下变量：
-
-| 变量 | 默认值 | 用途 |
-| --- | --- | --- |
-| `SECURECHAT_MTLS_CLIENT_CERT_FILE` | 空 | Host/Client 在 TLS 握手中出示的客户端证书链 PEM 路径。 |
-| `SECURECHAT_MTLS_CLIENT_KEY_FILE` | 空 | Host/Client mTLS 客户端证书对应的私钥 PEM 路径。 |
-| `SECURECHAT_MTLS_CLIENT_KEY_PASS` | 空 | mTLS 客户端私钥密码；只有私钥加密时需要。 |
-
-示例：
-
-```bash
-export SECURECHAT_MTLS_CLIENT_CERT_FILE=certs/pki/alice-mtls-chain.pem
-export SECURECHAT_MTLS_CLIENT_KEY_FILE=certs/pki/alice-mtls-key.pem
-```
-
-如果 WSS/mTLS 入口服务器证书由私有 CA 或自签名证书签发，再额外设置 `SECURECHAT_TLS_CA_FILE`。使用 Let's Encrypt 等系统已信任 CA 时通常不需要设置。
-
-mTLS 负责连接准入；PKI 成员身份认证负责把成员身份签名绑定到 GKA v3 的临时 X25519 public key 和成员 contribution。两者可以使用同一套测试证书，但真实部署中建议按用途签发不同证书。
 
 ## PKI 成员身份认证
 

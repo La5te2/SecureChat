@@ -428,7 +428,6 @@ public sealed partial class MainWindow : Window
             message == "Room group key ready" ||
             message == "Signaling connected" ||
             message == "Signaling closed" ||
-            message == "mTLS client certificate ready" ||
             message.Contains("endpoint", StringComparison.OrdinalIgnoreCase);
     }
 
@@ -1691,21 +1690,6 @@ public sealed partial class MainWindow : Window
         await PickPkiFileIntoAsync(PkiRevocationFileBox);
     }
 
-    private async void BrowseTlsCaFile_Click(object sender, RoutedEventArgs e)
-    {
-        await PickPkiFileIntoAsync(TlsCaFileBox);
-    }
-
-    private async void BrowseMtlsClientCert_Click(object sender, RoutedEventArgs e)
-    {
-        await PickPkiFileIntoAsync(MtlsClientCertBox);
-    }
-
-    private async void BrowseMtlsClientKey_Click(object sender, RoutedEventArgs e)
-    {
-        await PickPkiFileIntoAsync(MtlsClientKeyBox);
-    }
-
     private async System.Threading.Tasks.Task PickPkiFileIntoAsync(TextBox target)
     {
         var picker = new FileOpenPicker();
@@ -1725,19 +1709,7 @@ public sealed partial class MainWindow : Window
 
     private bool ApplySessionEnvironment()
     {
-        if (!ApplyOptionalTlsEnvironment()) return false;
         return ApplyMemberPkiEnvironment();
-    }
-
-    private bool ApplyOptionalTlsEnvironment()
-    {
-        // mTLS/WSS settings are optional. When present, native.dll uses them
-        // during the TLS handshake before the application-layer PKI runs.
-        return
-            SetProcessEnvironmentFromBox("SECURECHAT_TLS_CA_FILE", TlsCaFileBox) &&
-            SetProcessEnvironmentFromBox("SECURECHAT_MTLS_CLIENT_CERT_FILE", MtlsClientCertBox) &&
-            SetProcessEnvironmentFromBox("SECURECHAT_MTLS_CLIENT_KEY_FILE", MtlsClientKeyBox) &&
-            SetProcessEnvironmentValue("SECURECHAT_MTLS_CLIENT_KEY_PASS", MtlsClientKeyPassBox.Password);
     }
 
     private bool ApplyMemberPkiEnvironment()
@@ -2204,14 +2176,6 @@ public sealed partial class MainWindow : Window
             BrowsePkiIdentityCertButton.Content = UiText("Browse", "选择");
             BrowsePkiIdentityKeyButton.Content = UiText("Browse", "选择");
             BrowsePkiRevocationFileButton.Content = UiText("Browse", "选择");
-            MtlsHeaderText.Text = UiText("mTLS / WSS", "mTLS / WSS");
-            TlsCaFileBox.Header = UiText("Server TLS CA file", "服务器 TLS CA 文件");
-            MtlsClientCertBox.Header = UiText("mTLS client cert chain", "mTLS 客户端证书链");
-            MtlsClientKeyBox.Header = UiText("mTLS client private key", "mTLS 客户端私钥");
-            MtlsClientKeyPassBox.Header = UiText("mTLS key passphrase", "mTLS 私钥口令");
-            BrowseTlsCaFileButton.Content = UiText("Browse", "选择");
-            BrowseMtlsClientCertButton.Content = UiText("Browse", "选择");
-            BrowseMtlsClientKeyButton.Content = UiText("Browse", "选择");
             ChatBackgroundHeaderText.Text = UiText("Chat Background", "聊天背景");
             ImportChatBackgroundButton.Content = UiText("Import Image", "导入图片");
             ClearChatBackgroundButton.Content = UiText("Clear Image", "清除图片");
@@ -2332,9 +2296,6 @@ public sealed partial class MainWindow : Window
             AppendYaml(builder, "pki_identity_cert", PkiIdentityCertBox.Text.Trim());
             AppendYaml(builder, "pki_identity_key", PkiIdentityKeyBox.Text.Trim());
             AppendYaml(builder, "pki_revocation_file", PkiRevocationFileBox.Text.Trim());
-            AppendYaml(builder, "tls_ca_file", TlsCaFileBox.Text.Trim());
-            AppendYaml(builder, "mtls_client_cert", MtlsClientCertBox.Text.Trim());
-            AppendYaml(builder, "mtls_client_key", MtlsClientKeyBox.Text.Trim());
             AppendYaml(builder, "chat_background_path", chatBackgroundPath ?? "");
             AppendYaml(builder, "chat_background_opacity", NumberString(BackgroundOpacitySlider.Value));
             AppendYaml(builder, "chat_background_crop_x", ComboTag(BackgroundHorizontalComboBox));
@@ -2386,9 +2347,6 @@ public sealed partial class MainWindow : Window
             PkiIdentityCertBox.Text = Value(chatValues, "pki_identity_cert", "");
             PkiIdentityKeyBox.Text = Value(chatValues, "pki_identity_key", "");
             PkiRevocationFileBox.Text = Value(chatValues, "pki_revocation_file", "");
-            TlsCaFileBox.Text = Value(chatValues, "tls_ca_file", "");
-            MtlsClientCertBox.Text = Value(chatValues, "mtls_client_cert", "");
-            MtlsClientKeyBox.Text = Value(chatValues, "mtls_client_key", "");
             SetSlider(BackgroundOpacitySlider, Value(chatValues, "chat_background_opacity", "0.28"));
             SetComboByTag(BackgroundHorizontalComboBox, Value(chatValues, "chat_background_crop_x", "Center"));
             SetComboByTag(BackgroundVerticalComboBox, Value(chatValues, "chat_background_crop_y", "Center"));

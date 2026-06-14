@@ -55,24 +55,13 @@ SecureChat 保留 WS 作为明确标注的 insecure mode。它运行更简单，
 - 服务器 IP、连接时间、流量大小等元数据仍可能被观察；
 - 自签名证书适合测试，但除非客户端显式信任，否则不能提供正常公网身份校验。
 
-## mTLS 模式
-
-libdatachannel 的 `WebSocketServer::Configuration` 当前没有暴露 TLS 客户端证书验证配置。因此 SecureChat 的 mTLS 通过反向代理实现：Nginx 监听公网 `25566` 并要求客户端 TLS 证书，验证通过后把 WebSocket 流量转发到本机 `ws://127.0.0.1:25567`。
+## Nginx TLS 反向代理
 
 ```text
-Host/Client -- mTLS WSS --> Nginx -- local WS --> SecureChat Server
+Host/Client -- WSS --> Nginx -- local WS --> SecureChat Server
 ```
 
-mTLS 用于连接准入，不能替代应用层 PKI 身份签名。Server 仍只负责房间注册、成员状态和 opaque encrypted relay，不参与 TLS 客户端证书语义。
-
-Host/Client 通过以下变量在 TLS 握手中出示客户端证书：
-
-```bash
-export SECURECHAT_MTLS_CLIENT_CERT_FILE=certs/pki/alice-mtls-chain.pem
-export SECURECHAT_MTLS_CLIENT_KEY_FILE=certs/pki/alice-mtls-key.pem
-```
-
-如果 mTLS 入口服务器证书不是系统信任 CA 签发，再配置 `SECURECHAT_TLS_CA_FILE`。
+Nginx 可以监听公网 `25566`，完成 TLS 终止和 WebSocket upgrade，再把流量转发到本机 `ws://127.0.0.1:25567`。Server 仍只负责房间注册、成员状态和 opaque encrypted relay。反向代理只改变传输入口，不改变应用层 PKI、GKA 和 encrypted relay 的安全边界。
 
 ## 为什么 WS 和 WSS 不在同一个端口
 
@@ -113,7 +102,7 @@ Client 会在 `join_room` 中附带成员证书链和签名，Host 验证证书�
 
 Server 的 `room_members.memberInfos` 会转发 Client 入房时提交的 `publicKey` 和 signed `identity`，让其他 Client 自行验证成员公钥。Host 的加密 `member_identity` 控制消息也会携带同样材料；接收端会拒绝同一个 member id 上的公钥或证书指纹冲突。私发只有在目标成员 public key 已验证时才会发送，否则失败关闭。
 
-这里的“Server 不验证证书”指 Server 不验证应用层成员身份证书链，即 `identity.certChainPem`。Server 不检查 CA、有效期、吊销列表或 identity 签名；这些都由 Host/Client 完成。mTLS 客户端 TLS 证书属于反向代理连接准入，由 Nginx 等入口组件验证，不属于 SecureChat Server 的应用层成员身份验证。
+这里的“Server 不验证证书”指 Server 不验证应用层成员身份证书链，即 `identity.certChainPem`。Server 不检查 CA、有效期、吊销列表或 identity 签名；这些都由 Host/Client 完成。TLS 服务器证书属于传输层入口身份，不属于 SecureChat Server 的应用层成员身份验证。
 
 ## 房间治理信令
 
@@ -140,5 +129,5 @@ Server 可以断开连接、丢弃消息或伪造成员离线，这属于可用�
 - 私发 relay 的内层 `pairwise_private` 不从 room group key 派生，没有目标成员私钥的端点无法解密；
 - Host/Client 维护最近 relay nonce/tag cache，重复 envelope 会被丢弃；
 - Client 检查递增 `group_key.epoch`，拒绝旧 group state 回滚；
-- Client 只把入房失败和 `host disconnected` 等明确终止事件作为 shutdown；普通 relay 错误只提示，不主动离开房间；
+- Client 只把入房失败和 `host disconnected` 等明确终止事件作为 shutdown；非终止类 relay 错误只提示，不主动离开房间；
 - Server 仍能对已知成员伪造断线通知或直接断开连接，这会导致 Host 移除该成员并轮换 group key；这是可用性攻击，不能由应用层密码学完全阻止。

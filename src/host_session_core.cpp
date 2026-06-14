@@ -138,9 +138,6 @@ void HostSessionCore::start() {
 
     mWs->onOpen([this]() {
         chatEmit(mCallbacks.onStatus, "Signaling connected");
-        if (chat::websocket_config::hasClientCertificate(mWsConfig)) {
-            chatEmit(mCallbacks.onStatus, "mTLS client certificate ready");
-        }
         chatEmit(mCallbacks.onStatus, "PKI identity ready: " + mIdentity.fingerprint());
         json msg = {
             {"type", "create_room"},

@@ -65,15 +65,15 @@ ss -lntp | grep ':25566' || echo '25566 released'
 
 模板包含 `Restart=on-failure`、`RestartSec=3`、`NoNewPrivileges=true`，并使用专用 `securechat` 用户。systemd 只改善进程监督和权限边界，不能替代 WSS 或应用层 E2EE。
 
-## 可选 mTLS 反向代理
+## 可选 Nginx TLS 反向代理
 
-当前 libdatachannel 的 `WebSocketServer` 只暴露服务器证书配置，不暴露 TLS 握手阶段的客户端证书校验接口。因此 SecureChat 的 mTLS 部署通过 Nginx 反向代理实现：
+Nginx 可以作为公网 TLS 入口，SecureChat Server 只监听本机 backend：
 
 ```text
-Host/Client -- mTLS WSS --> Nginx :25566 -- local WS --> SecureChat Server 127.0.0.1:25567
+Host/Client -- WSS --> Nginx :25566 -- local WS --> SecureChat Server 127.0.0.1:25567
 ```
 
-这种模式下，Nginx 在 TLS 握手阶段要求客户端证书，并用 `ssl_client_certificate` 指向的 CA 验证证书链。SecureChat Server 只监听本机地址，继续负责房间注册、成员状态和 encrypted relay，不参与 TLS 客户端证书语义。
+这种模式下，Nginx 负责 TLS 终止和 WebSocket upgrade。SecureChat Server 只监听本机地址，继续负责房间注册、成员状态和 encrypted relay。
 
 ### 安装 Nginx
 
@@ -101,131 +101,14 @@ nginx -v
 systemctl status nginx --no-pager
 ```
 
-### 准备三类证书
-
-mTLS 部署会同时出现三类证书，作用不同：
+### 准备证书
 
 | 类型 | 放在哪里 | 谁使用 | 作用 |
 | --- | --- | --- | --- |
 | 服务器 TLS 证书 | `/opt/SecureChat/certs/fullchain.pem`、`/opt/SecureChat/certs/privkey.pem` | Nginx | 证明 `wss://chat.la5te2.online:25566` 是正确服务器，并加密外部 TLS 通道。 |
-| mTLS 客户端 TLS 证书 | 例如 `certs/pki/alice-mtls-chain.pem`、`certs/pki/alice-mtls-key.pem` | Host/Client 在 TLS 握手时出示，Nginx 验证 | 限制只有持有客户端 TLS 证书的进程能连入口。 |
 | 应用层成员 PKI 证书 | `SECURECHAT_IDENTITY_CERT_FILE`、`SECURECHAT_IDENTITY_KEY_FILE` | SecureChat Host/Client 本地验签 | 绑定成员身份、临时 X25519 public key、GKA contribution 和 group state。 |
 
 服务器 TLS 证书可以用 Let's Encrypt/Certbot 获取，步骤见 `docs/certificate_methods.md`。如果已有云厂商或其他 CA 签发的 PEM 证书，也可以直接放到上述路径。
-
-下面是本地实验用的 mTLS 客户端证书生成示例。它复用 `docs/pki-identity.md` 中的测试 Root CA 和 Intermediate CA；真实部署建议给 mTLS 和应用层成员身份使用不同用途的 CA 或证书。客户端证书链文件应包含“mTLS 客户端叶子证书 + Intermediate CA 证书”，这样 Nginx 可以从客户端证书链验证到 `ssl_client_certificate` 指定的 Root CA。
-
-#### Windows PowerShell
-
-在项目根目录执行；如果还没有 `root-ca.pem`、`intermediate-ca.pem` 和 `intermediate-ca-key.pem`，先按 `docs/pki-identity.md` 生成：
-
-```powershell
-Set-Location certs\pki
-
-@"
-basicConstraints=critical,CA:FALSE
-keyUsage=critical,digitalSignature
-extendedKeyUsage=clientAuth
-subjectKeyIdentifier=hash
-authorityKeyIdentifier=keyid,issuer
-"@ | Set-Content -Encoding ascii mtls-client.ext
-
-openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out alice-mtls-key.pem
-
-openssl req -new -key alice-mtls-key.pem `
-  -out alice-mtls.csr `
-  -subj "/CN=alice-mtls"
-
-openssl x509 -req -in alice-mtls.csr `
-  -CA intermediate-ca.pem -CAkey intermediate-ca-key.pem -CAcreateserial `
-  -out alice-mtls-cert.pem `
-  -days 365 `
-  -extfile mtls-client.ext
-
-Get-Content .\alice-mtls-cert.pem, .\intermediate-ca.pem |
-  Set-Content -Encoding ascii .\alice-mtls-chain.pem
-
-openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out bob-mtls-key.pem
-
-openssl req -new -key bob-mtls-key.pem `
-  -out bob-mtls.csr `
-  -subj "/CN=bob-mtls"
-
-openssl x509 -req -in bob-mtls.csr `
-  -CA intermediate-ca.pem -CAkey intermediate-ca-key.pem -CAcreateserial `
-  -out bob-mtls-cert.pem `
-  -days 365 `
-  -extfile mtls-client.ext
-
-Get-Content .\bob-mtls-cert.pem, .\intermediate-ca.pem |
-  Set-Content -Encoding ascii .\bob-mtls-chain.pem
-
-Set-Location ..\..
-```
-
-Windows CLI Host/Client 使用 Alice 的 mTLS 客户端证书时：
-
-```powershell
-$env:SECURECHAT_MTLS_CLIENT_CERT_FILE="certs\pki\alice-mtls-chain.pem"
-$env:SECURECHAT_MTLS_CLIENT_KEY_FILE="certs\pki\alice-mtls-key.pem"
-```
-
-Windows WinUI 使用 mTLS 时，在设置面板的“mTLS / WSS”区域选择同样的客户端证书链和客户端私钥；如果入口服务器证书不是系统信任 CA 签发，再选择 `SECURECHAT_TLS_CA_FILE` 对应的 CA 文件。WinUI 会在 Host/Join 前把这些设置写入当前进程环境变量。
-
-#### Linux Bash
-
-在项目根目录执行；如果还没有 `root-ca.pem`、`intermediate-ca.pem` 和 `intermediate-ca-key.pem`，先按 `docs/pki-identity.md` 生成：
-
-```bash
-cat > certs/pki/mtls-client.ext <<'EOF'
-basicConstraints=critical,CA:FALSE
-keyUsage=critical,digitalSignature
-extendedKeyUsage=clientAuth
-subjectKeyIdentifier=hash
-authorityKeyIdentifier=keyid,issuer
-EOF
-
-openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out certs/pki/alice-mtls-key.pem
-
-openssl req -new -key certs/pki/alice-mtls-key.pem \
-  -out certs/pki/alice-mtls.csr \
-  -subj "/CN=alice-mtls"
-
-openssl x509 -req \
-  -in certs/pki/alice-mtls.csr \
-  -CA certs/pki/intermediate-ca.pem \
-  -CAkey certs/pki/intermediate-ca-key.pem \
-  -CAcreateserial \
-  -out certs/pki/alice-mtls-cert.pem \
-  -days 365 \
-  -extfile certs/pki/mtls-client.ext
-
-cat certs/pki/alice-mtls-cert.pem certs/pki/intermediate-ca.pem > certs/pki/alice-mtls-chain.pem
-
-openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out certs/pki/bob-mtls-key.pem
-
-openssl req -new -key certs/pki/bob-mtls-key.pem \
-  -out certs/pki/bob-mtls.csr \
-  -subj "/CN=bob-mtls"
-
-openssl x509 -req \
-  -in certs/pki/bob-mtls.csr \
-  -CA certs/pki/intermediate-ca.pem \
-  -CAkey certs/pki/intermediate-ca-key.pem \
-  -CAcreateserial \
-  -out certs/pki/bob-mtls-cert.pem \
-  -days 365 \
-  -extfile certs/pki/mtls-client.ext
-
-cat certs/pki/bob-mtls-cert.pem certs/pki/intermediate-ca.pem > certs/pki/bob-mtls-chain.pem
-```
-
-Nginx 使用 `ssl_client_certificate /opt/SecureChat/certs/pki/root-ca.pem;` 和 `ssl_verify_depth 2;` 来验证这些客户端 TLS 证书。Linux Host/Client 使用 Alice 的 mTLS 客户端证书时：
-
-```bash
-export SECURECHAT_MTLS_CLIENT_CERT_FILE=certs/pki/alice-mtls-chain.pem
-export SECURECHAT_MTLS_CLIENT_KEY_FILE=certs/pki/alice-mtls-key.pem
-```
 
 如果 Nginx 的服务器 TLS 证书不是系统默认信任 CA 签发的，再额外设置：
 
@@ -236,8 +119,8 @@ export SECURECHAT_TLS_CA_FILE=certs/pki/root-ca.pem
 复制模板：
 
 ```bash
-sudo cp /opt/SecureChat/deploy/securechat-nginx-mtls.conf /etc/nginx/conf.d/securechat-mtls.conf
-sudo editor /etc/nginx/conf.d/securechat-mtls.conf
+sudo cp /opt/SecureChat/deploy/securechat-nginx-tls.conf /etc/nginx/conf.d/securechat-tls.conf
+sudo editor /etc/nginx/conf.d/securechat-tls.conf
 sudo nginx -t
 sudo systemctl reload nginx
 ```
@@ -250,7 +133,7 @@ sudo systemctl reload nginx
 sudo -u securechat -H bash -lc 'cd /opt/SecureChat && \
   SECURECHAT_BIND_ADDRESS=127.0.0.1 \
   SECURECHAT_PORT=25567 \
-  SECURECHAT_SERVER_PID_FILE=server-mtls-backend.pid \
+  SECURECHAT_SERVER_PID_FILE=server-backend.pid \
   ./start_server.sh --mode ws'
 ```
 
@@ -259,7 +142,7 @@ sudo -u securechat -H bash -lc 'cd /opt/SecureChat && \
 ```bash
 sudo -u securechat -H bash -lc 'cd /opt/SecureChat && \
   SECURECHAT_PORT=25567 \
-  SECURECHAT_SERVER_PID_FILE=server-mtls-backend.pid \
+  SECURECHAT_SERVER_PID_FILE=server-backend.pid \
   ./stop_server.sh'
 ```
 
@@ -279,10 +162,10 @@ sudo nginx -s quit
 使用 systemd 时复制 backend 模板：
 
 ```bash
-sudo cp /opt/SecureChat/deploy/securechat-server-mtls-backend.service /etc/systemd/system/securechat-server-mtls-backend.service
-sudo systemctl edit --full securechat-server-mtls-backend.service
+sudo cp /opt/SecureChat/deploy/securechat-server-backend.service /etc/systemd/system/securechat-server-backend.service
+sudo systemctl edit --full securechat-server-backend.service
 sudo systemctl daemon-reload
-sudo systemctl enable --now securechat-server-mtls-backend.service
+sudo systemctl enable --now securechat-server-backend.service
 ```
 
 验证监听面：
@@ -295,17 +178,8 @@ ss -lntp | grep -E ':(25566|25567)'
 
 - `25566` 由 Nginx 对公网监听；
 - `25567` 只绑定 `127.0.0.1`；
-- 没有客户端证书时，TLS 握手失败；
-- 带受信任客户端证书时，WebSocket upgrade 成功；
-- 聊天内容仍由应用层 GKA v3/AES-256-GCM 保护，mTLS 不替代成员身份 PKI。
-
-Host/Client 连接 mTLS 入口前需要提供客户端证书：
-
-```bash
-export SECURECHAT_MTLS_CLIENT_CERT_FILE=certs/pki/alice-mtls-chain.pem
-export SECURECHAT_MTLS_CLIENT_KEY_FILE=certs/pki/alice-mtls-key.pem
-./start_client.sh --server wss://chat.la5te2.online:25566
-```
+- Host/Client 通过 `wss://chat.la5te2.online:25566` 完成 WebSocket upgrade；
+- 聊天内容仍由应用层 GKA v3/AES-256-GCM 保护，TLS 不替代成员身份 PKI。
 
 如果 `chat.la5te2.online` 的服务器证书由私有 CA 或自签名证书签发，再额外设置：
 

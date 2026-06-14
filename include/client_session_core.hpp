@@ -117,6 +117,9 @@ private:
     chat::identity_pki::IdentityContext mIdentity;
     std::vector<unsigned char> mGroupKey;
     std::uint64_t mGroupKeyEpoch = 0;
+    // Set once an explicit Server/Host error frame is received. If the transport
+    // closes without this flag, the UI can report that the peer closed silently.
+    std::atomic_bool mSawErrorFrame = false;
     std::atomic_bool mShutdownRequested = false;
     std::atomic_bool mStopped = false;
     // Core attachment receive state, keyed by sender actor id.

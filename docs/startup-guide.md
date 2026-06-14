@@ -161,14 +161,7 @@ out\build\x64-release\server.exe 25566
 
 这些路径会保存到 WinUI 同目录的 `config.yml`。Host 和 Join 启动前，WinUI 会把这些设置写入当前进程的 `SECURECHAT_PKI_TRUST_STORE`、`SECURECHAT_IDENTITY_CERT_FILE`、`SECURECHAT_IDENTITY_KEY_FILE` 和 `SECURECHAT_PKI_REVOCATION_FILE`，因此不需要为了普通双击启动而提前打开 PowerShell 设置临时环境变量。
 
-如果连接的是要求 mTLS 的 `wss://` Nginx 入口，再在同一个设置面板的“mTLS / WSS”区域填写：
-
-- Server TLS CA file / 服务器 TLS CA 文件：可选。入口服务器证书由私有 CA 或自签名 CA 签发时，选择对应 CA，例如 `root-ca.pem`；使用系统信任的公网证书时可留空；
-- mTLS client cert chain / mTLS 客户端证书链：选择当前成员的 mTLS 客户端证书链，例如 Host 选择 `alice-mtls-chain.pem`，Client 选择 `bob-mtls-chain.pem`；
-- mTLS client private key / mTLS 客户端私钥：选择对应私钥，例如 `alice-mtls-key.pem` 或 `bob-mtls-key.pem`；
-- mTLS key passphrase / mTLS 私钥口令：如果 mTLS 私钥加密，启动本次会话前填写；这个口令不会保存到配置文件。
-
-Host 和 Join 启动前，WinUI 会把这些可选项写入当前进程的 `SECURECHAT_TLS_CA_FILE`、`SECURECHAT_MTLS_CLIENT_CERT_FILE`、`SECURECHAT_MTLS_CLIENT_KEY_FILE` 和 `SECURECHAT_MTLS_CLIENT_KEY_PASS`。本地 `ws://127.0.0.1:25566` 或普通 `wss://` 不要求 mTLS 客户端证书时，这一栏可以留空。
+WinUI 不配置 Server 端 TLS 证书。是否使用 TLS 由 Server URL 决定：本地可填 `ws://127.0.0.1:25566`，公网 TLS 入口填 `wss://chat.la5te2.online:25566`。如果入口证书是系统已信任 CA 签发，WinUI 不需要额外证书设置；自签证书场景建议先把 CA 导入操作系统信任存储。
 
 Host 页：
 
@@ -467,14 +460,14 @@ Join 面板填写：
 - Password：和 Host 相同的房间密码；
 - 点击 Join。
 
-## Linux：mTLS，不使用 systemd
+## Linux：Nginx TLS 反向代理，不使用 systemd
 
-mTLS 的外部入口是 Nginx，SecureChat Server 只做本机 backend。
+Nginx 对外提供普通 `wss://` TLS 入口，SecureChat Server 只做本机 backend。
 
 拓扑：
 
 ```text
-Host/Client -- wss+mTLS --> Nginx:25566 -- ws --> SecureChat Server 127.0.0.1:25567
+Host/Client -- wss --> Nginx:25566 -- ws --> SecureChat Server 127.0.0.1:25567
 ```
 
 安装 Nginx：
@@ -488,38 +481,36 @@ sudo nginx -v
 复制 Nginx 配置：
 
 ```bash
-sudo cp /opt/SecureChat/deploy/securechat-nginx-mtls.conf /etc/nginx/conf.d/securechat-mtls.conf
-sudo editor /etc/nginx/conf.d/securechat-mtls.conf
+sudo cp /opt/SecureChat/deploy/securechat-nginx-tls.conf /etc/nginx/conf.d/securechat-tls.conf
+sudo editor /etc/nginx/conf.d/securechat-tls.conf
 sudo nginx -t
 sudo nginx -s reload
 ```
 
-启动 SecureChat backend。注意这里是 `ws`，因为它只监听本机 `127.0.0.1:25567`，外部 TLS/mTLS 已由 Nginx 处理：
+启动 SecureChat backend。注意这里是 `ws`，因为它只监听本机 `127.0.0.1:25567`，外部 TLS 已由 Nginx 处理：
 
 ```bash
 sudo -u securechat -H bash -lc 'cd /opt/SecureChat && \
   SECURECHAT_BIND_ADDRESS=127.0.0.1 \
   SECURECHAT_PORT=25567 \
-  SECURECHAT_SERVER_PID_FILE=server-mtls-backend.pid \
+  SECURECHAT_SERVER_PID_FILE=server-backend.pid \
   ./start_server.sh --mode ws'
 ```
 
-Host/Client 连接 mTLS 入口前，除了应用层成员 PKI，还要设置 mTLS 客户端证书：
+Host/Client 直接连接 Nginx 的 `wss://` 入口，仍然只需要应用层成员 PKI：
 
 ```bash
-export SECURECHAT_MTLS_CLIENT_CERT_FILE=certs/pki/alice-mtls-chain.pem
-export SECURECHAT_MTLS_CLIENT_KEY_FILE=certs/pki/alice-mtls-key.pem
 ./start_host.sh --server wss://chat.la5te2.online:25566
 ```
 
-Client 同理，把 `alice-mtls-*` 换成自己的 mTLS 客户端证书。
+Client 同理，使用自己的成员 PKI 后连接同一个 `wss://` URL。
 
 停止 backend：
 
 ```bash
 sudo -u securechat -H bash -lc 'cd /opt/SecureChat && \
   SECURECHAT_PORT=25567 \
-  SECURECHAT_SERVER_PID_FILE=server-mtls-backend.pid \
+  SECURECHAT_SERVER_PID_FILE=server-backend.pid \
   ./stop_server.sh'
 ```
 

@@ -36,7 +36,7 @@ const shouldShowStatus = (message) => {
   const text = message.toLowerCase();
   // Keep low-level endpoint noise hidden, but show security-critical state so
   // PKI and group-key failures are visible in the browser UI.
-  return text.includes("pki") || text.includes("mtls") || text.includes("identity") || text.includes("group key");
+  return text.includes("pki") || text.includes("identity") || text.includes("group key");
 };
 
 const addMessage = (kind, message) => {

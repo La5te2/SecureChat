@@ -279,7 +279,7 @@ void CHAT_CALL chat_set_event_callback(chat_event_callback callback, void* user_
 
 // Updates the environment table used by the native CRT. C# Environment APIs do
 // not reliably update std::getenv's copy on Windows, so WinUI calls this for
-// PKI, TLS, and mTLS settings before creating HostSessionCore/ClientSessionCore.
+// member PKI settings before creating HostSessionCore/ClientSessionCore.
 int CHAT_CALL chat_set_environment_variable(const char* name, const char* value) {
     installNativeCrashHandlersOnce();
     const auto key = safeString(name);

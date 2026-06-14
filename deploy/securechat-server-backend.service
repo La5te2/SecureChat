@@ -1,5 +1,5 @@
 [Unit]
-Description=SecureChat local backend for mTLS reverse proxy
+Description=SecureChat local backend for TLS reverse proxy
 After=network-online.target
 Wants=network-online.target
 

@@ -405,10 +405,9 @@ Host 验证 Client 身份后，会记录该成员证书的 SHA-256 指纹和 sub
 
 ## 与 WSS 的关系
 
-WSS、mTLS 和 PKI 解决的问题不同：
+WSS 和 PKI 解决的问题不同：
 
 - WSS 保护 Host/Client 到 Server 的传输通道，防止网络路径上的被动监听和主动篡改；
-- mTLS 在反向代理入口要求客户端 TLS 证书，用于限制谁能建立到 Server 的连接；
 - PKI 成员身份认证把成员证书签名绑定到 GKA v3 的临时 X25519 public key、成员 contribution 和 Host 的 `group_key`/group-state envelope；
 - 即使使用 PKI，Server 仍能看到 room token、连接 id、成员状态、消息大小和转发时序等元数据；
 - 即使使用 WSS，恶意 Server 仍可能尝试替换成员 public key，但 Host/Client 的 PKI 签名验证会拒绝不一致的 identity。
@@ -423,7 +422,7 @@ WSS、mTLS 和 PKI 解决的问题不同：
 - 证书是否出现在本地吊销列表；
 - `join_room`、GKA contribution 或 `group_key` 的 identity 签名是否正确。
 
-这些验证都发生在 Host/Client 本地。这样设计的原因是 Server 是不可信 relay，不能成为成员身份语义的信任根。mTLS 使用的客户端 TLS 证书是另一层连接准入证书，由 Nginx 等反向代理在 TLS 握手阶段验证，不是这里的应用层成员身份证书。
+这些验证都发生在 Host/Client 本地。这样设计的原因是 Server 是不可信 relay，不能成为成员身份语义的信任根。Nginx 或 Server 使用的 TLS 服务器证书只证明传输入口身份，不是这里的应用层成员身份证书。
 
 ## 成员 id 命名
 
