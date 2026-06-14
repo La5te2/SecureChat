@@ -163,6 +163,11 @@ void HostSessionCore::start() {
         // entered "hosting" state. Mirror Client shutdown events so frontends
         // can restore their controls when the signaling channel disappears.
         if (!mStopped.exchange(true)) {
+            if (!mRoomCreated.load()) {
+                chatEmit(
+                    mCallbacks.onError,
+                    "Signaling closed before room creation completed; check Server URL, room name/password, PKI files, and rebuild all components if one executable was updated");
+            }
             chatEmit(mCallbacks.onStatus, "Signaling connection ended");
         }
     });
@@ -881,6 +886,7 @@ void HostSessionCore::handleSignalingMessage(const std::string& s) {
         std::string type = j.value("type", "");
 
         if (type == "room_created") {
+            mRoomCreated.store(true);
             chatEmit(mCallbacks.onStatus, "Room created: " + mRoomId);
             rotateGroupKey("room created");
         }

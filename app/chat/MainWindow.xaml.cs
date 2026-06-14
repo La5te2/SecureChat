@@ -28,6 +28,8 @@ public sealed partial class MainWindow : Window
     private enum SessionMode
     {
         None,
+        ConnectingHost,
+        ConnectingJoin,
         Host,
         Join
     }
@@ -220,10 +222,8 @@ public sealed partial class MainWindow : Window
         if (ok != 0)
         {
             roomName = HostRoomBox.Text.Trim();
-            participants.Clear();
-            AddParticipant(HostUserBox.Text.Trim());
-            SetSessionMode(SessionMode.Host);
-            MarkLocalIdentityIfPossible();
+            ResetParticipants();
+            SetSessionMode(SessionMode.ConnectingHost);
         }
     }
 
@@ -245,10 +245,8 @@ public sealed partial class MainWindow : Window
         if (ok != 0)
         {
             roomName = JoinRoomBox.Text.Trim();
-            participants.Clear();
-            AddParticipant(JoinUserBox.Text.Trim());
-            SetSessionMode(SessionMode.Join);
-            MarkLocalIdentityIfPossible();
+            ResetParticipants();
+            SetSessionMode(SessionMode.ConnectingJoin);
         }
     }
 
@@ -1305,13 +1303,15 @@ public sealed partial class MainWindow : Window
     private void SetSessionMode(SessionMode mode)
     {
         sessionMode = mode;
+        var isConnected = mode is SessionMode.Host or SessionMode.Join;
+        var hasNativeSession = mode != SessionMode.None;
         HostButton.IsEnabled = mode == SessionMode.None;
         JoinButton.IsEnabled = mode == SessionMode.None;
-        StopButton.IsEnabled = true;
-        MessageBox.IsEnabled = mode != SessionMode.None;
-        SendModeBox.IsEnabled = mode != SessionMode.None;
-        PrivateTargetBox.IsEnabled = mode != SessionMode.None;
-        SendButton.IsEnabled = mode != SessionMode.None;
+        StopButton.IsEnabled = hasNativeSession;
+        MessageBox.IsEnabled = isConnected;
+        SendModeBox.IsEnabled = isConnected;
+        PrivateTargetBox.IsEnabled = isConnected;
+        SendButton.IsEnabled = isConnected;
         if (mode == SessionMode.None)
         {
             roomName = "-";
@@ -1352,10 +1352,25 @@ public sealed partial class MainWindow : Window
             return;
         }
 
+        if (message.StartsWith("Room created: ", StringComparison.OrdinalIgnoreCase))
+        {
+            SetSessionMode(SessionMode.Host);
+            AddParticipant(HostUserBox.Text.Trim());
+            MarkLocalIdentityIfPossible();
+            ShowInfo(message, InfoBarSeverity.Success);
+            return;
+        }
+
+        if (message.StartsWith("Joined room", StringComparison.OrdinalIgnoreCase))
+        {
+            SetSessionMode(SessionMode.Join);
+            MarkLocalIdentityIfPossible();
+            ShowInfo(message, InfoBarSeverity.Success);
+            return;
+        }
+
         if (message.StartsWith("Host started", StringComparison.OrdinalIgnoreCase) ||
-            message.StartsWith("Room created: ", StringComparison.OrdinalIgnoreCase) ||
             message.StartsWith("Clients can join", StringComparison.OrdinalIgnoreCase) ||
-            message.StartsWith("Joined room", StringComparison.OrdinalIgnoreCase) ||
             message == "LAN room selected.")
         {
             ShowInfo(message, InfoBarSeverity.Success);
@@ -1579,6 +1594,8 @@ public sealed partial class MainWindow : Window
         {
             SessionMode.Host => UiText("server", "服务端"),
             SessionMode.Join => UiText("client", "客户端"),
+            SessionMode.ConnectingHost => UiText("connecting server", "正在连接服务端"),
+            SessionMode.ConnectingJoin => UiText("connecting client", "正在连接客户端"),
             _ => UiText("not connected", "未连接")
         };
         RoomModeText.Text = $"{UiText("Mode", "模式")}: {mode}";

@@ -117,6 +117,9 @@ private:
     chat::identity_pki::IdentityContext mIdentity;
     std::vector<unsigned char> mGroupKey;
     std::uint64_t mGroupKeyEpoch = 0;
+    // True only after the Server accepts join_room and assigns a clientId.
+    // A close before this point is an admission/connect failure, not a chat drop.
+    std::atomic_bool mJoinedRoom = false;
     // Set once an explicit Server/Host error frame is received. If the transport
     // closes without this flag, the UI can report that the peer closed silently.
     std::atomic_bool mSawErrorFrame = false;

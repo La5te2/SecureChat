@@ -145,9 +145,13 @@ void ClientSessionCore::start() {
     mWs->onClosed([this]() {
         chatEmit(mCallbacks.onStatus, "Signaling closed");
         if (!mSawErrorFrame.load() && !mStopped.load() && !mShutdownRequested.load()) {
-            chatEmit(
-                mCallbacks.onError,
-                "Signaling closed without an error frame; check that Server, Host, and Client are the same build");
+            // WebSocket close can arrive without the error JSON frame that the
+            // peer tried to send. Report the current admission stage so WinUI
+            // does not misleadingly treat every silent close as a build mismatch.
+            const auto message = mJoinedRoom.load()
+                ? "Signaling connection ended unexpectedly; the Server or Host may have stopped, or the network closed the socket"
+                : "Signaling closed before room join completed; check Server URL, room/password, Host status, PKI files, and rebuild all components if one executable was updated";
+            chatEmit(mCallbacks.onError, message);
         }
         requestShutdown("Signaling connection ended");
     });
@@ -858,6 +862,7 @@ void ClientSessionCore::handleSignalingMessage(const std::string& s) {
             // Server-assigned clientId becomes the routing id for future private
             // relay and group-key envelopes.
             mClientId = j.value("clientId", "");
+            mJoinedRoom.store(true);
             // Use the Server-accepted display name for all later signed GKA
             // contributions. Host verifies this field against its member table,
             // so keeping the local copy in sync prevents avoidable GKA rejection.

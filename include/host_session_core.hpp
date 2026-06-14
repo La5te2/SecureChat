@@ -144,6 +144,9 @@ private:
     ChatCallbacks mCallbacks;
     std::shared_ptr<rtc::WebSocket> mWs;
     std::atomic_bool mStopped = false;
+    // Set after room_created is accepted by Server. WinUI uses close events
+    // before this point as connection/admission failures, not active sessions.
+    std::atomic_bool mRoomCreated = false;
     std::mutex mClientsMutex;
     std::unordered_map<std::string, std::string> mClientNames;
     std::unordered_map<std::string, std::string> mClientPublicKeys;
