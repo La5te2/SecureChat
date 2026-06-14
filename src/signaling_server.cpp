@@ -25,6 +25,9 @@ constexpr auto healthLogInterval = std::chrono::minutes(1);
 // Give terminal error frames enough time to leave the WebSocket before closing.
 // Public WSS/reverse-proxy paths can otherwise show Clients only a bare close.
 constexpr auto terminalErrorFlushDelay = std::chrono::milliseconds(600);
+// Printed at startup so deployment logs can prove which Server binary is
+// actually running after a git pull/rebuild/restart cycle.
+constexpr const char* serverBuildMarker = "securechat-server-20260614-ws-frame-budget";
 
 std::string envValue(const char* name) {
     const char* value = std::getenv(name);
@@ -303,6 +306,9 @@ SignalingServer::SignalingServer(uint16_t port) {
 
     std::cout << "[signal] server running on " << mUrlScheme << "://"
               << *config.bindAddress << ":" << mServer->port() << std::endl;
+    std::cout << "[signal] build marker: " << serverBuildMarker
+              << " maxMessageSize=" << chat::protocol::MaxSignalingMessageBytes
+              << std::endl;
     mMaintenanceThread = std::thread([this]() {
         maintenanceLoop();
     });
@@ -1167,7 +1173,18 @@ void SignalingServer::safeSend(const std::shared_ptr<rtc::WebSocket>& ws, const 
     }
 
     try {
-        ws->send(data.dump());
+        const auto serialized = data.dump();
+        if (type == "room_members" ||
+            type == chat::secure_relay::GkaRequestType ||
+            type == chat::secure_relay::GroupKeyType) {
+            // These frames carry PKI/member/GKA material and are the first
+            // messages likely to exceed tiny WebSocket defaults on stale builds.
+            std::cout << "[signal] sending type=" << type
+                      << " bytes=" << serialized.size()
+                      << " limit=" << chat::protocol::MaxSignalingMessageBytes
+                      << std::endl;
+        }
+        ws->send(serialized);
     }
     catch (const std::exception& e) {
         std::cout << "[signal] send failed type=" << type << " error=" << e.what() << std::endl;
