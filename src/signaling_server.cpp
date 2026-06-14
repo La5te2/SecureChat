@@ -22,6 +22,7 @@ constexpr std::size_t maxIdentityCertChainBytes = 128 * 1024;
 constexpr std::size_t maxIdentitySignatureBytes = 4096;
 constexpr auto maintenanceInterval = std::chrono::seconds(15);
 constexpr auto healthLogInterval = std::chrono::minutes(1);
+constexpr auto terminalErrorFlushDelay = std::chrono::milliseconds(150);
 
 std::string envValue(const char* name) {
     const char* value = std::getenv(name);
@@ -70,6 +71,23 @@ std::string stringField(const json& data, const char* key, std::size_t maxLength
         throw std::runtime_error(std::string("signaling field is too large: ") + key);
     }
     return value;
+}
+
+void closeAfterTerminalError(std::shared_ptr<rtc::WebSocket> ws) {
+    // rtc::WebSocket::send is asynchronous. Closing immediately after sending a
+    // terminal error can race the error frame and make Clients see only "closed".
+    // The socket is already removed from room state before this helper is used.
+    if (!ws) return;
+    std::thread([socket = std::move(ws)]() {
+        std::this_thread::sleep_for(terminalErrorFlushDelay);
+        if (!socket->isClosed()) {
+            try {
+                socket->close();
+            }
+            catch (const std::exception&) {
+            }
+        }
+    }).detach();
 }
 
 void identityField(const json& data, bool required) {
@@ -643,13 +661,7 @@ void SignalingServer::handleRejectClient(rtc::WebSocket* key, const json& data) 
     }
 
     safeSend(targetWs, {{"type", "error"}, {"message", reason}});
-    if (targetWs && !targetWs->isClosed()) {
-        try {
-            targetWs->close();
-        }
-        catch (const std::exception&) {
-        }
-    }
+    closeAfterTerminalError(targetWs);
     if (!roomId.empty()) broadcastRoomMembers(roomId);
     std::cout << "[signal] host rejected " << targetId << " from " << roomId << ": " << reason << std::endl;
 }
@@ -985,13 +997,7 @@ void SignalingServer::broadcastRoomMembers(const std::string& roomId) {
 
 void SignalingServer::rejectClient(const std::shared_ptr<rtc::WebSocket>& ws, const std::string& message) {
     safeSend(ws, {{"type", "error"}, {"message", message}});
-    if (ws && !ws->isClosed()) {
-        try {
-            ws->close();
-        }
-        catch (const std::exception&) {
-        }
-    }
+    closeAfterTerminalError(ws);
 }
 
 void SignalingServer::recordBadMessage(rtc::WebSocket* key, const std::string& message) {
@@ -1010,13 +1016,7 @@ void SignalingServer::recordBadMessage(rtc::WebSocket* key, const std::string& m
     safeSend(ws, {{"type", "error"}, {"message", message}});
     if (closeClient) {
         std::cout << "[signal] closing client after repeated bad signaling messages" << std::endl;
-        if (ws && !ws->isClosed()) {
-            try {
-                ws->close();
-            }
-            catch (const std::exception&) {
-            }
-        }
+        closeAfterTerminalError(ws);
     }
 }
 
