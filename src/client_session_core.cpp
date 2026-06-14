@@ -1010,7 +1010,12 @@ void ClientSessionCore::handleSignalingMessage(const std::string& s) {
         }
         else if (type == chat::secure_relay::GkaRequestType) {
             const auto epoch = j.value("epoch", 0ULL);
-            if (j.value("roomId", "") != mRoomToken) {
+            const auto requestRoom = j.value("roomId", "");
+            chatEmit(
+                mCallbacks.onStatus,
+                "GKA request received: epoch " + std::to_string(epoch) +
+                    (requestRoom == mRoomToken ? " (room matched)" : " (room mismatch)"));
+            if (requestRoom != mRoomToken) {
                 chatEmit(mCallbacks.onError, "Dropped GKA request for another room");
                 return;
             }

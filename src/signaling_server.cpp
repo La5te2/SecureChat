@@ -22,7 +22,9 @@ constexpr std::size_t maxIdentityCertChainBytes = 128 * 1024;
 constexpr std::size_t maxIdentitySignatureBytes = 4096;
 constexpr auto maintenanceInterval = std::chrono::seconds(15);
 constexpr auto healthLogInterval = std::chrono::minutes(1);
-constexpr auto terminalErrorFlushDelay = std::chrono::milliseconds(150);
+// Give terminal error frames enough time to leave the WebSocket before closing.
+// Public WSS/reverse-proxy paths can otherwise show Clients only a bare close.
+constexpr auto terminalErrorFlushDelay = std::chrono::milliseconds(600);
 
 std::string envValue(const char* name) {
     const char* value = std::getenv(name);

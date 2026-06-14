@@ -549,6 +549,9 @@ void HostSessionCore::sendGkaRequestToClients() {
         {"epoch", epoch}
     };
     mWs->send(msg.dump());
+    // Diagnostic status: if a Client joins but never prints "GKA request
+    // received", the Server/proxy path did not deliver this control frame.
+    chatEmit(mCallbacks.onStatus, "GKA request sent: epoch " + std::to_string(epoch));
 }
 
 void HostSessionCore::startGkaTimeoutWorker() {
