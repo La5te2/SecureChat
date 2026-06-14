@@ -68,6 +68,10 @@ private:
         json identity;
         std::string role;
         std::shared_ptr<rtc::WebSocket> ws;
+        // libdatachannel WebSocket sends are not guaranteed to be safe when
+        // multiple signaling callbacks write the same TLS socket at once. The
+        // Server serializes every outbound frame per connection.
+        std::shared_ptr<std::mutex> sendMutex = std::make_shared<std::mutex>();
         std::size_t badMessageCount = 0;
     };
 
@@ -112,7 +116,7 @@ private:
     // Sends JSON to one connected socket if it is still open.
     void sendToClient(rtc::WebSocket* key, const json& data);
     // Shared guarded send helper used after recipient snapshots leave the mutex.
-    static void safeSend(const std::shared_ptr<rtc::WebSocket>& ws, const json& data);
+    void safeSend(const std::shared_ptr<rtc::WebSocket>& ws, const json& data);
 
     std::unique_ptr<rtc::WebSocketServer> mServer;
     std::string mUrlScheme = "ws";

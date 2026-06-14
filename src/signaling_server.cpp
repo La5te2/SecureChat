@@ -1172,6 +1172,21 @@ void SignalingServer::safeSend(const std::shared_ptr<rtc::WebSocket>& ws, const 
         return;
     }
 
+    std::shared_ptr<std::mutex> sendMutex;
+    {
+        std::lock_guard<std::mutex> lock(mMutex);
+        auto client = findClient(ws.get());
+        if (client) sendMutex = client->sendMutex;
+    }
+
+    // Host actions and membership broadcasts can be produced by different
+    // signaling callback threads. Serialize writes to one socket so TLS/WSS
+    // frames are not interleaved under libdatachannel.
+    std::unique_lock<std::mutex> sendLock;
+    if (sendMutex) {
+        sendLock = std::unique_lock<std::mutex>(*sendMutex);
+    }
+
     try {
         const auto serialized = data.dump();
         if (type == "room_members" ||
