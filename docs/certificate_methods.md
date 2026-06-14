@@ -171,7 +171,7 @@ D:\Programming\CyberSecurity\Lessons\Experiment\SecureChat\certs\fullchain.pem
 D:\Programming\CyberSecurity\Lessons\Experiment\SecureChat\certs\privkey.pem
 ```
 
-WinUI 和 Windows Web 现在不配置证书路径。它们作为 Host/Client 连接外部 Server，只需要在 Host 或 Join 页面填写：
+WinUI 现在不配置 Server 证书路径。它作为 Host/Client 连接外部 Server，只需要在 Host 或 Join 页面填写：
 
 ```text
 wss://chat.la5te2.online:25566

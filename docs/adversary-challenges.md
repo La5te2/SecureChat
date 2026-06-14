@@ -60,7 +60,7 @@
 - 当前强制 PKI 下，无 `identity` 的 Client 被 Server/Host 拒绝。
 - 当前强制 PKI 下，篡改 `join_room.publicKey` 或 `identity.signature` 会被 Host 拒绝。
 - 当前强制 PKI 下，篡改 `group_key.ciphertext`、`ephemeralPublicKey` 或 `identity.signature` 会被 Client 拒绝。
-- 当前强制 PKI 下，证书链中任一证书指纹进入 `SECURECHAT_PKI_REVOCATION_FILE` 时身份被拒绝。
+- 当前强制 PKI 下，错误 CA、过期证书、错误 Key Usage 或错误签名都会导致身份被拒绝。
 - 启用 Nginx TLS 反向代理后，公网只暴露 Nginx 入口，SecureChat backend 只监听本机地址。
 - Host 断开后 room 关闭，Client 收到停止提示。
 - Server stop/SIGTERM 后释放 TCP `25566`。
@@ -205,7 +205,7 @@ Host 验证 `join_room` identity 时会发现签名覆盖的 public key 与被�
 当前不覆盖：
 
 - 成员设备被攻破后的本地私钥泄露；
-- 已被 CA 签发且未被吊销的恶意成员证书；
+- 已被 CA 签发且仍在有效期内的恶意成员证书；
 - 接收成员拿到明文后的截图、复制或二次转发。
 
 ### 验证证据
@@ -478,7 +478,7 @@ Server 不应可见：
 
 - 校验失败提示。
 - 接收端没有把伪装文件渲染为图片或音频。
-- WinUI 中攻击者不是 PKI Verified 成员，或虽 Verified 但未被当前房间临时标记为 Trusted 时，图片/音频只显示附件卡片，不自动进入图片或音频解码器。
+- WinUI 中攻击者被右键标记为 Blocked 时，图片/音频只显示附件卡片，不自动进入图片或音频解码器。
 
 ## 挑战 10：超大附件和缓存消耗
 
@@ -611,7 +611,7 @@ Server 不应可见：
 1. 在云服务器上启动 SecureChat Server 或 Nginx TLS 反向代理入口。
 2. 从授权测试机扫描预期端口：
    ```bash
-   nmap -Pn -p 22,80,443,25566,25567,5188 <your-server-ip-or-domain>
+   nmap -Pn -p 22,80,443,25566,25567 <your-server-ip-or-domain>
    ```
 3. 对比云安全组和本机监听：
    ```bash
@@ -623,7 +623,6 @@ Server 不应可见：
 ### 预期现象：端口扫描
 
 - 公网聊天入口只应暴露 `25566`。
-- Web UI `5188` 不应直接暴露公网。
 - Nginx TLS 反向代理部署中，公网应看到 Nginx `25566`，不应直接访问后端 `25567`。
 - Server 进程不是群成员，端口扫描只能证明服务暴露面，不能读取聊天明文。
 

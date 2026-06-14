@@ -20,12 +20,6 @@ export SECURECHAT_IDENTITY_KEY_FILE=certs/pki/client-key.pem
 export SECURECHAT_IDENTITY_KEY_PASS='key-password'
 ```
 
-本地吊销列表是可选项：
-
-```bash
-export SECURECHAT_PKI_REVOCATION_FILE=certs/pki/revoked.txt
-```
-
 Host 和 Client 都使用同一组变量名。实际部署时，每个成员机器使用自己的 `SECURECHAT_IDENTITY_CERT_FILE` 和 `SECURECHAT_IDENTITY_KEY_FILE`，但共享同一个受信任 CA bundle。
 
 ## 证书要求
@@ -135,10 +129,9 @@ Get-Content .\bob-cert.pem, .\intermediate-ca.pem |
   Set-Content -Encoding ascii .\bob-chain.pem
 ```
 
-创建空吊销列表并回到项目根目录：
+回到项目根目录：
 
 ```powershell
-New-Item -ItemType File -Force revoked.txt
 Set-Location ..\..
 ```
 
@@ -148,10 +141,9 @@ Windows CLI 使用 Alice 证书时：
 $env:SECURECHAT_PKI_TRUST_STORE="certs\pki\root-ca.pem"
 $env:SECURECHAT_IDENTITY_CERT_FILE="certs\pki\alice-chain.pem"
 $env:SECURECHAT_IDENTITY_KEY_FILE="certs\pki\alice-key.pem"
-$env:SECURECHAT_PKI_REVOCATION_FILE="certs\pki\revoked.txt"
 ```
 
-WinUI 中填写同样的四个文件路径即可。Bob 把 `alice-chain.pem` 和 `alice-key.pem` 换成 `bob-chain.pem` 和 `bob-key.pem`。
+WinUI 中填写同样的三个文件路径即可。Bob 把 `alice-chain.pem` 和 `alice-key.pem` 换成 `bob-chain.pem` 和 `bob-key.pem`。
 
 ## 证书生成：Linux Bash
 
@@ -254,19 +246,12 @@ openssl x509 -req \
 cat certs/pki/bob-cert.pem certs/pki/intermediate-ca.pem > certs/pki/bob-chain.pem
 ```
 
-创建空吊销列表：
-
-```bash
-: > certs/pki/revoked.txt
-```
-
 Linux CLI 使用 Alice 证书时：
 
 ```bash
 export SECURECHAT_PKI_TRUST_STORE=certs/pki/root-ca.pem
 export SECURECHAT_IDENTITY_CERT_FILE=certs/pki/alice-chain.pem
 export SECURECHAT_IDENTITY_KEY_FILE=certs/pki/alice-key.pem
-export SECURECHAT_PKI_REVOCATION_FILE=certs/pki/revoked.txt
 ```
 
 Bob 把 `alice-chain.pem` 和 `alice-key.pem` 换成 `bob-chain.pem` 和 `bob-key.pem`。
@@ -277,7 +262,7 @@ Bob 把 `alice-chain.pem` 和 `alice-key.pem` 换成 `bob-chain.pem` 和 `bob-ke
 openssl x509 -in certs/pki/alice-cert.pem -noout -fingerprint -sha256
 ```
 
-需要长期吊销该证书时，把输出中的十六进制指纹写入 `SECURECHAT_PKI_REVOCATION_FILE` 指向的文本文件。房间内 `/ban` 或 `/evict` 不会写入这个文件。
+这个指纹用于人工核对身份和房间内封禁。`/ban` 或 `/evict` 会把目标成员已验证的叶子证书指纹记录在当前 Host 房间内存中，用于阻止同一证书在该房间生命周期内重新加入。
 
 ## join_room 绑定
 
@@ -308,9 +293,8 @@ Host 收到 `new_client` 后会：
 
 1. 验证成员证书链能追溯到 `SECURECHAT_PKI_TRUST_STORE`；
 2. 检查证书有效期和 Key Usage；
-3. 检查证书链中任一证书指纹是否在本地吊销列表中；
-4. 验证 `signatureAlg` 与证书公钥类型一致；
-5. 验证签名确实覆盖当前 `roomId`、`username` 和临时 X25519 public key。
+3. 验证 `signatureAlg` 与证书公钥类型一致；
+4. 验证签名确实覆盖当前 `roomId`、`username` 和临时 X25519 public key。
 
 验证失败时，Host 发送 `reject_client`，Server 会移除该 Client 并关闭其 WebSocket。验证通过后，Host 还会检查该证书指纹是否已经被当前房间的 `/evict` 或 `/ban` 命令封禁；若已封禁，Host 拒绝该 Client，不记录 public key，也不允许其参与 GKA epoch。未被封禁时，Host 才记录该 public key，并在成员变化时发起新的 GKA epoch。
 
@@ -349,7 +333,7 @@ tag:<len>:<aes-gcm-tag>
 identityNonce:<len>:<identity-nonce>
 ```
 
-Client 在解封装 group state 之前，会先验证 Host 证书链、吊销状态、签名算法和签名。如果验证失败，Client 不会执行 X25519 解封装，也不会接受该 room group key。解开 group state 后，Client 还会验证每个成员的 GKA contribution 签名，再本地导出 `K_G`。
+Client 在解封装 group state 之前，会先验证 Host 证书链、签名算法和签名。如果验证失败，Client 不会执行 X25519 解封装，也不会接受该 room group key。解开 group state 后，Client 还会验证每个成员的 GKA contribution 签名，再本地导出 `K_G`。
 
 ## 验证结果进入 UI
 
@@ -377,28 +361,18 @@ Host 验证 Client 身份后，会记录该成员证书的 SHA-256 指纹和 sub
 }
 ```
 
-该控制消息本身仍走应用层 encrypted relay。接收端只接受 relay metadata 显示发送者是 Host 的 `member_identity`，并会重新验证其中的 signed identity；如果同一个 member id 已经有已验证 public key 或证书指纹，后续冲突会被拒绝，不会静默覆盖。WinUI 成员列表中 Verified/Trusted 成员使用绿色 `name / id` 身份框，Unknown/Blocked 使用红色身份框；点击身份框会复制完整证书指纹。用户可以把 `Verified` 成员临时标记为 `Trusted` 以允许自动预览附件，也可以标记为 `Blocked` 禁止自动预览。
+该控制消息本身仍走应用层 encrypted relay。接收端只接受 relay metadata 显示发送者是 Host 的 `member_identity`，并会重新验证其中的 signed identity；如果同一个 member id 已经有已验证 public key 或证书指纹，后续冲突会被拒绝，不会静默覆盖。WinUI 成员列表只显示成员名，默认绿色；点击成员卡片会复制完整证书指纹；右键成员卡片会切换红色 Blocked/绿色 Allowed，用于控制该成员附件是否自动预览。
 
-私发使用该已验证 member id/name 到 X25519 public key 的映射。发送端找不到目标成员的已验证 public key 时，私发会失败并提示错误，不会降级为仅 room group key 加密。
+私发使用该已验证 member id/name 到 X25519 public key 的映射。用户输入的私发目标只按成员显示名匹配；发送端找不到目标成员的已验证 public key 时，私发会失败并提示错误，不会降级为仅 room group key 加密或群发。
 
-## 吊销列表
+## 房间内封禁
 
-`SECURECHAT_PKI_REVOCATION_FILE` 是本地受信任文本文件，每行一个 SHA-256 证书指纹，大小写和冒号不敏感：
-
-```text
-# revoked.txt
-9F:12:AB:...
-7c32aa...
-```
-
-当前实现会检查 identity 证书链中的每张证书。如果叶子证书或中间证书的 SHA-256 指纹出现在吊销列表中，该 identity 会被拒绝。成员被拒绝或离开后，Host 的既有成员变化逻辑会发起新的 GKA epoch。
-
-`/evict` 和 `/ban` 使用的是另一层当前房间内存封禁：Host 把目标成员已经验证通过的叶子证书指纹记录到当前房间状态中，防止同一证书在该房间生命周期内重新加入。它不写入 `SECURECHAT_PKI_REVOCATION_FILE`，也不会跨 Host 进程或跨房间保留。需要跨房间、跨重启的拒绝时，应把证书指纹写入受信任吊销列表。
+`/evict` 和 `/ban` 使用当前房间内存封禁：Host 把目标成员已经验证通过的叶子证书指纹记录到当前房间状态中，防止同一证书在该房间生命周期内重新加入。该状态不跨 Host 进程或跨房间保存。成员被驱逐后，Host 会移除该成员并发起新的 GKA epoch。
 
 ## 代码位置
 
 - `include/identity_pki.hpp`：PKI 身份上下文接口。
-- `src/identity_pki.cpp`：证书链验证、吊销检查、签名与验签。
+- `src/identity_pki.cpp`：证书链验证、签名与验签。
 - `src/client_session_core.cpp`：Client 在 `join_room` 和 GKA contribution 中签名身份，收到 `group_key` 后验证 Host 身份、验证 contribution set，并复验 `room_members.memberInfos` / `member_identity` 中的成员 public key。
 - `src/host_session_core.cpp`：Host 验证 Client 身份，验证 GKA contribution，签名 `group_key`/group-state envelope，广播 verified member identity，并拒绝验证失败的 Client。
 - `src/signaling_server.cpp`：Server 只校验 `identity` 字段结构和大小，转发 opaque identity object；不验证证书，不参与密钥协商语义。
@@ -419,7 +393,6 @@ WSS 和 PKI 解决的问题不同：
 - 证书链是否由受信任 Root CA 签发；
 - 证书是否过期；
 - 证书 Key Usage 是否允许 `digitalSignature`；
-- 证书是否出现在本地吊销列表；
 - `join_room`、GKA contribution 或 `group_key` 的 identity 签名是否正确。
 
 这些验证都发生在 Host/Client 本地。这样设计的原因是 Server 是不可信 relay，不能成为成员身份语义的信任根。Nginx 或 Server 使用的 TLS 服务器证书只证明传输入口身份，不是这里的应用层成员身份证书。

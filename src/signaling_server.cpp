@@ -6,8 +6,12 @@
 
 #include <chrono>
 #include <cstdlib>
+#include <iomanip>
 #include <initializer_list>
 #include <iostream>
+#include <memory>
+#include <openssl/evp.h>
+#include <sstream>
 #include <stdexcept>
 #include <utility>
 
@@ -37,6 +41,34 @@ std::string envValue(const char* name) {
 bool envEnabled(const char* name) {
     const auto value = envValue(name);
     return value == "1" || value == "true" || value == "TRUE" || value == "yes" || value == "on";
+}
+
+std::string sha256HexForLog(const std::string& value) {
+    unsigned char digest[EVP_MAX_MD_SIZE] = {};
+    unsigned int digestLength = 0;
+    using CtxPtr = std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)>;
+    CtxPtr ctx(EVP_MD_CTX_new(), EVP_MD_CTX_free);
+    if (!ctx ||
+        EVP_DigestInit_ex(ctx.get(), EVP_sha256(), nullptr) != 1 ||
+        EVP_DigestUpdate(ctx.get(), value.data(), value.size()) != 1 ||
+        EVP_DigestFinal_ex(ctx.get(), digest, &digestLength) != 1) {
+        return "redacted";
+    }
+
+    std::ostringstream out;
+    out << std::hex << std::setfill('0');
+    for (unsigned int i = 0; i < digestLength; ++i) {
+        out << std::setw(2) << static_cast<int>(digest[i]);
+    }
+    return out.str();
+}
+
+std::string logActorId(const std::string& actorId) {
+    // Keep application-visible member ids readable in Host/Client UI, but avoid
+    // writing names such as "user_bob" into Server logs.
+    if (actorId.empty()) return "<empty>";
+    if (actorId == chat::protocol::HostActorId) return "host";
+    return "id#" + sha256HexForLog("securechat-log-actor:" + actorId).substr(0, 12);
 }
 
 bool validName(const std::string& value, std::size_t maxLength) {
@@ -97,8 +129,8 @@ void closeAfterTerminalError(std::shared_ptr<rtc::WebSocket> ws) {
 
 void identityField(const json& data, bool required) {
     // Server checks only the shape and size of application identity data. The
-    // certificate chain, revocation list, and signature are verified by Host or
-    // Client after the Server forwards this opaque field.
+    // certificate chain and signature are verified by Host or Client after the
+    // Server forwards this opaque field.
     auto it = data.find("identity");
     if (it == data.end()) {
         if (required) throw std::runtime_error("missing identity");
@@ -592,7 +624,7 @@ void SignalingServer::handleJoinRoom(rtc::WebSocket* key, const json& data) {
         return;
     }
 
-    std::cout << "[signal] member joined " << roomId << " as " << clientId << std::endl;
+    std::cout << "[signal] member joined " << roomId << " as " << logActorId(clientId) << std::endl;
     json joined = {
         {"type", "joined"},
         {"roomId", roomId},
@@ -675,7 +707,7 @@ void SignalingServer::handleRejectClient(rtc::WebSocket* key, const json& data) 
     safeSend(targetWs, {{"type", "error"}, {"message", reason}});
     closeAfterTerminalError(targetWs);
     if (!roomId.empty()) broadcastRoomMembers(roomId);
-    std::cout << "[signal] host rejected " << targetId << " from " << roomId << ": " << reason << std::endl;
+    std::cout << "[signal] host rejected " << logActorId(targetId) << " from " << roomId << ": " << reason << std::endl;
 }
 
 void SignalingServer::handleClientSilence(rtc::WebSocket* key, const json& data, bool silenced) {
@@ -729,7 +761,7 @@ void SignalingServer::handleClientSilence(rtc::WebSocket* key, const json& data,
     const std::string message = silenced ? "member silenced" : "member unsilenced";
     safeSend(targetWs, {{"type", "moderation"}, {"state", state}, {"message", message}});
     std::cout << "[signal] host " << (silenced ? "silenced " : "unsilenced ")
-              << targetId << " in " << roomId << std::endl;
+              << logActorId(targetId) << " in " << roomId << std::endl;
 }
 
 void SignalingServer::relayGkaRequest(rtc::WebSocket* key, const json& data) {
@@ -818,7 +850,7 @@ void SignalingServer::relayGkaContribution(rtc::WebSocket* key, const json& data
     }
 
     safeSend(hostWs, envelope);
-    std::cout << "[signal] GKA contribution " << senderId
+    std::cout << "[signal] GKA contribution " << logActorId(senderId)
               << " -> host room " << roomId
               << " epoch=" << envelope.value("epoch", 0ULL) << std::endl;
 }
@@ -871,7 +903,7 @@ void SignalingServer::relayGroupKey(rtc::WebSocket* key, const json& data) {
     }
 
     safeSend(targetWs, envelope);
-    std::cout << "[signal] group key host -> " << targetId << " room " << roomId << std::endl;
+    std::cout << "[signal] group key host -> " << logActorId(targetId) << " room " << roomId << std::endl;
 }
 
 void SignalingServer::relayEncrypted(rtc::WebSocket* key, const json& data) {
@@ -928,7 +960,7 @@ void SignalingServer::relayEncrypted(rtc::WebSocket* key, const json& data) {
         safeSend(recipient, envelope);
     }
 
-    std::cout << "[signal] encrypted relay " << senderId
+    std::cout << "[signal] encrypted relay " << logActorId(senderId)
               << " -> room " << roomId
               << " recipients=" << recipients.size() << std::endl;
 }
@@ -986,15 +1018,15 @@ void SignalingServer::cleanup(rtc::WebSocket* key) {
     }
 
     if (role == "client" && !clientId.empty()) {
-        std::cout << "[signal] " << clientId << " left " << roomId << std::endl;
+        std::cout << "[signal] " << logActorId(clientId) << " left " << roomId << std::endl;
         safeSend(notifyHost, {{"type", "client_left"}, {"clientId", clientId}});
         if (shouldBroadcastMembers) broadcastRoomMembers(roomId);
     }
 }
 
 void SignalingServer::broadcastRoomMembers(const std::string& roomId) {
-    // Sends both human-readable member labels and structured ids. Existing UI
-    // can display members, while private relay can resolve name/id targets.
+    // Sends both human-readable member labels and structured ids. UI displays
+    // names, while Host/Client keep ids internally for PKI and relay routing.
     RoomSnapshot snapshot;
     {
         std::lock_guard<std::mutex> lock(mMutex);

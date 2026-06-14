@@ -20,7 +20,7 @@ extern "C" {
 // Managed callers must copy strings before returning.
 typedef void(CHAT_CALL* chat_event_callback)(const char* kind, const char* message, void* user_data);
 
-// Registers the process-wide callback used by WinUI/Web wrappers to receive native events.
+// Registers the process-wide callback used by WinUI wrappers to receive native events.
 CHAT_API void CHAT_CALL chat_set_event_callback(chat_event_callback callback, void* user_data);
 // Sets or clears a process environment variable inside the native runtime.
 // WinUI uses this before starting a session so std::getenv-based C++ code sees
@@ -32,17 +32,17 @@ CHAT_API int CHAT_CALL chat_host_start(const char* server_url, const char* room_
 CHAT_API int CHAT_CALL chat_join_start(const char* url, const char* room_id, const char* username, const char* password);
 // Sends a room text line or slash command through the active native session.
 CHAT_API int CHAT_CALL chat_send_line(const char* line);
-// Sends a text line or slash attachment command to one member name/id.
+// Sends a text line or slash attachment command to one member display name.
 CHAT_API int CHAT_CALL chat_send_line_to(const char* target, const char* line);
 // Broadcasts one attachment of the selected media kind.
 CHAT_API int CHAT_CALL chat_send_image(const char* file_path);
-// Sends one image attachment to one member name/id.
+// Sends one image attachment to one member display name.
 CHAT_API int CHAT_CALL chat_send_image_to(const char* target, const char* file_path);
 CHAT_API int CHAT_CALL chat_send_file(const char* file_path);
-// Sends one generic file attachment to one member name/id.
+// Sends one generic file attachment to one member display name.
 CHAT_API int CHAT_CALL chat_send_file_to(const char* target, const char* file_path);
 CHAT_API int CHAT_CALL chat_send_voice(const char* file_path);
-// Sends one voice attachment to one member name/id.
+// Sends one voice attachment to one member display name.
 CHAT_API int CHAT_CALL chat_send_voice_to(const char* target, const char* file_path);
 // Stops the active Host or Client session without unloading the native module.
 CHAT_API void CHAT_CALL chat_stop();

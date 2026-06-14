@@ -52,7 +52,6 @@ Server 不需要下面这些变量。每一个要运行 Host 或 Client 的 Powe
 $env:SECURECHAT_PKI_TRUST_STORE="certs\pki\root-ca.pem"
 $env:SECURECHAT_IDENTITY_CERT_FILE="certs\pki\alice-chain.pem"
 $env:SECURECHAT_IDENTITY_KEY_FILE="certs\pki\alice-key.pem"
-$env:SECURECHAT_PKI_REVOCATION_FILE="certs\pki\revoked.txt"
 ```
 
 换另一个成员时，把 `alice-chain.pem` 和 `alice-key.pem` 换成该成员自己的证书和私钥，例如 `bob-chain.pem`、`bob-key.pem`。
@@ -73,7 +72,6 @@ out\build\x64-release\server.exe 25566
 $env:SECURECHAT_PKI_TRUST_STORE="certs\pki\root-ca.pem"
 $env:SECURECHAT_IDENTITY_CERT_FILE="certs\pki\alice-chain.pem"
 $env:SECURECHAT_IDENTITY_KEY_FILE="certs\pki\alice-key.pem"
-$env:SECURECHAT_PKI_REVOCATION_FILE="certs\pki\revoked.txt"
 
 out\build\x64-release\host.exe --server ws://127.0.0.1:25566 secure-room alice
 ```
@@ -86,7 +84,6 @@ out\build\x64-release\host.exe --server ws://127.0.0.1:25566 secure-room alice
 $env:SECURECHAT_PKI_TRUST_STORE="certs\pki\root-ca.pem"
 $env:SECURECHAT_IDENTITY_CERT_FILE="certs\pki\bob-chain.pem"
 $env:SECURECHAT_IDENTITY_KEY_FILE="certs\pki\bob-key.pem"
-$env:SECURECHAT_PKI_REVOCATION_FILE="certs\pki\revoked.txt"
 
 out\build\x64-release\client.exe ws://127.0.0.1:25566 secure-room bob
 ```
@@ -156,10 +153,9 @@ out\build\x64-release\server.exe 25566
 - Trust store / 信任根：选择 `root-ca.pem`；
 - Identity cert chain / 成员证书链：Host 选择 `alice-chain.pem`，Client 选择 `bob-chain.pem`；
 - Identity private key / 成员私钥：Host 选择 `alice-key.pem`，Client 选择 `bob-key.pem`；
-- Revocation list / 吊销列表：可选；这是长期证书吊销列表，不是房间内 `/ban` 或 `/evict` 的记录文件。普通房间封禁只保存在当前 Host 进程内存中，不会写入这个文件；
 - Identity key passphrase / 成员私钥口令：如果私钥加密，启动本次会话前填写；这个口令不会保存到配置文件。
 
-这些路径会保存到 WinUI 同目录的 `config.yml`。Host 和 Join 启动前，WinUI 会把这些设置写入当前进程的 `SECURECHAT_PKI_TRUST_STORE`、`SECURECHAT_IDENTITY_CERT_FILE`、`SECURECHAT_IDENTITY_KEY_FILE` 和 `SECURECHAT_PKI_REVOCATION_FILE`，因此不需要为了普通双击启动而提前打开 PowerShell 设置临时环境变量。
+这些路径会保存到 WinUI 同目录的 `config.yml`。Host 和 Join 启动前，WinUI 会把这些设置写入当前进程的 `SECURECHAT_PKI_TRUST_STORE`、`SECURECHAT_IDENTITY_CERT_FILE` 和 `SECURECHAT_IDENTITY_KEY_FILE`，因此不需要为了普通双击启动而提前打开 PowerShell 设置临时环境变量。
 
 WinUI 不配置 Server 端 TLS 证书。是否使用 TLS 由 Server URL 决定：本地可填 `ws://127.0.0.1:25566`，公网 TLS 入口填 `wss://chat.la5te2.online:25566`。如果入口证书是系统已信任 CA 签发，WinUI 不需要额外证书设置；自签证书场景建议先把 CA 导入操作系统信任存储。
 
@@ -180,66 +176,6 @@ Join 页：
 - 点击 Join。
 
 如果要在同一台 Windows 机器上测试两个 WinUI 成员，可以复制一份 WinUI 输出目录，或者分别在两份运行目录的设置面板里选择不同的成员证书和私钥。单个 WinUI 进程一次只代表一个成员身份。
-
-## Windows：Web UI
-
-Web UI 是浏览器界面。它不等于聊天 Server；聊天 Server 仍然是 `server.exe` 或 Linux 上的 `server`。
-
-先启动聊天 Server：
-
-```powershell
-out\build\x64-release\server.exe 25566
-```
-
-启动 Web UI 前，在 PowerShell 里配置当前 Web UI 进程使用的成员 PKI：
-
-```powershell
-$env:SECURECHAT_PKI_TRUST_STORE="certs\pki\root-ca.pem"
-$env:SECURECHAT_IDENTITY_CERT_FILE="certs\pki\alice-chain.pem"
-$env:SECURECHAT_IDENTITY_KEY_FILE="certs\pki\alice-key.pem"
-$env:SECURECHAT_PKI_REVOCATION_FILE="certs\pki\revoked.txt"
-
-dotnet app\web\bin\Release\net10.0\win-x64\SecureChat.Web.dll --urls http://127.0.0.1:5188
-```
-
-浏览器打开：
-
-```text
-http://127.0.0.1:5188
-```
-
-在 Web UI 的 Host 面板填写：
-
-- Room：`secure-room`；
-- Server URL：`ws://127.0.0.1:25566`；
-- User：`alice`；
-- Password：房间密码；
-- 点击 Host/Create。
-
-在另一个 Web UI 进程或 CLI/WinUI Client 里加入同一个房间。Web UI 当前一个进程只持有一套成员 PKI；如果要同机开两个 Web UI 成员，应使用不同端口和不同 PowerShell 环境变量，例如第二个成员：
-
-```powershell
-$env:SECURECHAT_PKI_TRUST_STORE="certs\pki\root-ca.pem"
-$env:SECURECHAT_IDENTITY_CERT_FILE="certs\pki\bob-chain.pem"
-$env:SECURECHAT_IDENTITY_KEY_FILE="certs\pki\bob-key.pem"
-$env:SECURECHAT_PKI_REVOCATION_FILE="certs\pki\revoked.txt"
-
-dotnet app\web\bin\Release\net10.0\win-x64\SecureChat.Web.dll --urls http://127.0.0.1:5189
-```
-
-第二个浏览器页面打开：
-
-```text
-http://127.0.0.1:5189
-```
-
-Join 面板填写：
-
-- Server URL：`ws://127.0.0.1:25566`；
-- Room：`secure-room`；
-- User：`bob`；
-- Password：和 Host 相同的房间密码；
-- 点击 Join。
 
 ## Linux：准备工作
 
@@ -273,7 +209,6 @@ Server 不需要下面这些变量。每一个要运行 Host 或 Client 的终�
 export SECURECHAT_PKI_TRUST_STORE=certs/pki/root-ca.pem
 export SECURECHAT_IDENTITY_CERT_FILE=certs/pki/alice-chain.pem
 export SECURECHAT_IDENTITY_KEY_FILE=certs/pki/alice-key.pem
-export SECURECHAT_PKI_REVOCATION_FILE=certs/pki/revoked.txt
 ```
 
 换另一个成员时，把证书和私钥换成该成员自己的文件。
@@ -296,7 +231,6 @@ cd ~/SecureChat
 export SECURECHAT_PKI_TRUST_STORE=certs/pki/root-ca.pem
 export SECURECHAT_IDENTITY_CERT_FILE=certs/pki/alice-chain.pem
 export SECURECHAT_IDENTITY_KEY_FILE=certs/pki/alice-key.pem
-export SECURECHAT_PKI_REVOCATION_FILE=certs/pki/revoked.txt
 
 ./out/build/x64-linux-release/host --server ws://127.0.0.1:25566 secure-room alice
 ```
@@ -310,7 +244,6 @@ cd ~/SecureChat
 export SECURECHAT_PKI_TRUST_STORE=certs/pki/root-ca.pem
 export SECURECHAT_IDENTITY_CERT_FILE=certs/pki/bob-chain.pem
 export SECURECHAT_IDENTITY_KEY_FILE=certs/pki/bob-key.pem
-export SECURECHAT_PKI_REVOCATION_FILE=certs/pki/revoked.txt
 
 ./out/build/x64-linux-release/client ws://127.0.0.1:25566 secure-room bob
 ```
@@ -338,7 +271,6 @@ export SECURECHAT_USER=alice
 export SECURECHAT_PKI_TRUST_STORE=certs/pki/root-ca.pem
 export SECURECHAT_IDENTITY_CERT_FILE=certs/pki/alice-chain.pem
 export SECURECHAT_IDENTITY_KEY_FILE=certs/pki/alice-key.pem
-export SECURECHAT_PKI_REVOCATION_FILE=certs/pki/revoked.txt
 
 ./start_host.sh --server ws://127.0.0.1:25566
 ```
@@ -352,7 +284,6 @@ export SECURECHAT_USER=bob
 export SECURECHAT_PKI_TRUST_STORE=certs/pki/root-ca.pem
 export SECURECHAT_IDENTITY_CERT_FILE=certs/pki/bob-chain.pem
 export SECURECHAT_IDENTITY_KEY_FILE=certs/pki/bob-key.pem
-export SECURECHAT_PKI_REVOCATION_FILE=certs/pki/revoked.txt
 
 ./start_client.sh --server ws://127.0.0.1:25566
 ```
@@ -388,77 +319,6 @@ Host/Client 连接：
 ```bash
 export SECURECHAT_TLS_CA_FILE=certs/pki/root-ca.pem
 ```
-
-## Linux：Web UI
-
-Web UI 是浏览器界面，不是聊天 Server。需要先启动聊天 Server。
-
-构建 Web UI：
-
-```bash
-cd ~/SecureChat
-chmod +x build_web.sh
-./build_web.sh
-```
-
-终端 1：启动聊天 Server。
-
-```bash
-cd ~/SecureChat
-./out/build/x64-linux-release/server 25566
-```
-
-终端 2：配置 Web UI 进程使用的成员 PKI，然后启动 Web UI。
-
-```bash
-cd ~/SecureChat
-export SECURECHAT_PKI_TRUST_STORE=certs/pki/root-ca.pem
-export SECURECHAT_IDENTITY_CERT_FILE=certs/pki/alice-chain.pem
-export SECURECHAT_IDENTITY_KEY_FILE=certs/pki/alice-key.pem
-export SECURECHAT_PKI_REVOCATION_FILE=certs/pki/revoked.txt
-
-dotnet app/web/bin/Release/net10.0/linux-x64/SecureChat.Web.dll --urls http://127.0.0.1:5188
-```
-
-浏览器打开：
-
-```text
-http://127.0.0.1:5188
-```
-
-Host 面板填写：
-
-- Room：`secure-room`；
-- Server URL：`ws://127.0.0.1:25566`；
-- User：`alice`；
-- Password：房间密码；
-- 点击 Host/Create。
-
-如果要在同一台 Linux 机器上开第二个 Web UI 成员，用另一个终端、另一套成员 PKI、另一个 Web 端口：
-
-```bash
-cd ~/SecureChat
-export SECURECHAT_PKI_TRUST_STORE=certs/pki/root-ca.pem
-export SECURECHAT_IDENTITY_CERT_FILE=certs/pki/bob-chain.pem
-export SECURECHAT_IDENTITY_KEY_FILE=certs/pki/bob-key.pem
-export SECURECHAT_PKI_REVOCATION_FILE=certs/pki/revoked.txt
-
-dotnet app/web/bin/Release/net10.0/linux-x64/SecureChat.Web.dll --urls http://127.0.0.1:5189
-```
-
-浏览器打开：
-
-```text
-http://127.0.0.1:5189
-```
-
-Join 面板填写：
-
-- Server URL：`ws://127.0.0.1:25566`；
-- Room：`secure-room`；
-- User：`bob`；
-- Password：和 Host 相同的房间密码；
-- 点击 Join。
 
 ## Linux：Nginx TLS 反向代理，不使用 systemd
 

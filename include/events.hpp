@@ -1,4 +1,4 @@
-// Callback bundle used to decouple C++ session logic from CLI, WinUI, and Web UI.
+// Callback bundle used to decouple C++ session logic from CLI and WinUI.
 #pragma once
 
 #include <functional>
@@ -6,7 +6,7 @@
 
 struct ChatCallbacks {
     // Each frontend supplies only the callbacks it cares about. CLI prints them,
-    // WinUI renders them, and Web UI publishes them as browser events.
+    // WinUI renders them while CLI prints them to stdout.
     std::function<void(const std::string&)> onLog;
     std::function<void(const std::string&)> onError;
     std::function<void(const std::string&)> onMessage;

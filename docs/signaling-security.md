@@ -98,11 +98,11 @@ wss://chat.la5te2.online:25566
 
 GKA v3 不再要求成员手工配置共享 E2EE 口令。Client 加入时提交临时 X25519 public key；Host 在成员变化时发起 GKA epoch；当前成员提交签名随机 contribution；Host 汇总贡献集合后通过 `group_key`/group-state envelope 分别封装给当前成员。Client 解封装 group state、验证贡献签名后本地导出 room group key。Server 只转发这些 envelope，不创建群密钥，也不参与密钥协商语义。Host 维护 GKA watchdog；如果某个 Client 在 10 秒内没有提交当前 epoch 的有效 contribution，Host 会驱逐该成员、封当前房间内的证书指纹，并用剩余成员重新发起 epoch。
 
-Client 会在 `join_room` 中附带成员证书链和签名，Host 验证证书链、吊销列表和签名后才信任该临时 X25519 public key。成员 GKA contribution 也带签名，Host 和 Client 都会验证。Host 发送 `group_key` envelope 时附带 Host 身份签名，Client 验证通过后才解封装 group state。Server 只要求相关 identity 字段结构和大小合法；证书链验证发生在 Host/Client 本地，Server 不参与身份语义。
+Client 会在 `join_room` 中附带成员证书链和签名，Host 验证证书链、有效期、Key Usage 和签名后才信任该临时 X25519 public key。成员 GKA contribution 也带签名，Host 和 Client 都会验证。Host 发送 `group_key` envelope 时附带 Host 身份签名，Client 验证通过后才解封装 group state。Server 只要求相关 identity 字段结构和大小合法；证书链验证发生在 Host/Client 本地，Server 不参与身份语义。
 
 Server 的 `room_members.memberInfos` 会转发 Client 入房时提交的 `publicKey` 和 signed `identity`，让其他 Client 自行验证成员公钥。Host 的加密 `member_identity` 控制消息也会携带同样材料；接收端会拒绝同一个 member id 上的公钥或证书指纹冲突。私发只有在目标成员 public key 已验证时才会发送，否则失败关闭。
 
-这里的“Server 不验证证书”指 Server 不验证应用层成员身份证书链，即 `identity.certChainPem`。Server 不检查 CA、有效期、吊销列表或 identity 签名；这些都由 Host/Client 完成。TLS 服务器证书属于传输层入口身份，不属于 SecureChat Server 的应用层成员身份验证。
+这里的“Server 不验证证书”指 Server 不验证应用层成员身份证书链，即 `identity.certChainPem`。Server 不检查 CA、有效期、Key Usage 或 identity 签名；这些都由 Host/Client 完成。TLS 服务器证书属于传输层入口身份，不属于 SecureChat Server 的应用层成员身份验证。
 
 ## 房间治理信令
 

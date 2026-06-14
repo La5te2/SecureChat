@@ -111,7 +111,7 @@ Host 发给单个 Client 的 group-state envelope：
 
 `room_members.memberInfos` 会携带 Host/Client 入房时提交的 `publicKey` 和 signed `identity`。接收端不信任 Server 对成员公钥的陈述，而是重新验证 identity 签名后才把 member id/name 映射到 pairwise public key。GKA group state 中的 contribution identity 也会被复验。Host 的加密 `member_identity` 控制消息同样不能静默覆盖已有的已验证公钥或证书指纹。
 
-Client 加入时的 `join_room` 也可以携带同形状的 `identity` 对象。Server 只校验字段结构和大小；Host/Client 本地完成证书链、吊销列表、签名算法和签名内容验证。
+Client 加入时的 `join_room` 也可以携带同形状的 `identity` 对象。Server 只校验字段结构和大小；Host/Client 本地完成证书链、有效期、Key Usage、签名算法和签名内容验证。
 
 ## Server 可见与不可见内容
 
@@ -149,9 +149,8 @@ Server 不应可见：
 - 接收文件名会去除路径分隔符和 Windows 不允许的字符，限制长度，并处理 Windows 保留文件名，降低路径穿越和特殊文件名风险。
 - `logs/` 和子目录会尽量设置为 owner-only 权限。
 - 新附件接收前会检查 `logs/` 缓存总量，超限时只在 `logs/images`、`logs/voice`、`logs/files` 中删除最旧缓存文件。
-- WinUI 默认把未知远端成员附件显示为“附件已接收”，不会因为成员在线就自动预览。
-- WinUI 成员列表用 Unknown、Verified、Trusted、Blocked 四种内部状态决定身份框背景和附件预览策略；Verified 来自 PKI 验证，Trusted/Blocked 是当前房间内本机用户的临时策略。
-- WinUI 提供自动预览图片、自动加载音频、仅信任成员自动预览三个开关。
+- WinUI 成员默认 Allowed，成员卡片为绿色；右键成员卡片可切换为 Blocked 红色状态，禁止该成员附件自动预览。
+- WinUI 提供自动预览图片、自动加载音频两个开关。
 - WinUI 预览前会再次检查图片尺寸、总像素数、文件大小，以及 WAV 采样率、声道数、时长和 chunk 结构。
 
 默认缓存总量上限：
@@ -168,15 +167,13 @@ export SECURECHAT_LOGS_MAX_BYTES=1073741824
 
 ## WinUI 成员附件预览状态
 
-WinUI 不再把“在线成员”直接视为可信附件来源，而是使用四种状态：
+WinUI 的附件预览策略是本机 UI 状态，不参与 PKI 验证或密钥协商：
 
-- Unknown：没有 PKI 验证结果。远端图片和音频只显示附件卡片，用户点击“预览”后才进入本地解码器。
-- Verified：PKI 验证通过，成员证书和签名已经绑定到该成员的临时 X25519 public key。默认配置下仍不会自动预览。
-- Trusted：Verified 成员被本机用户在当前房间手动允许自动预览。该状态只保存在内存中，退出会话、断开、重新加入或切换房间后失效。
-- Blocked：本机用户阻止该成员附件自动预览。Blocked 优先级最高，即使成员是 Verified 或 Trusted 也不自动预览。
+- Allowed：默认状态，成员卡片为绿色；图片/音频按设置面板的自动预览开关处理。
+- Blocked：本机用户右键成员卡片后进入该状态，成员卡片为红色；图片/音频只显示附件卡片，不自动进入本地解码器。再次右键恢复 Allowed。
 - 自己本地选择并发送的附件按“本地文件”处理，不证明该成员可信。
 
-默认配置为：图片自动预览开、音频自动加载关、仅信任成员自动预览开。因此默认情况下，Unknown 和 Verified 远端成员发来的图片和音频都只显示附件卡片；用户把 Verified 成员标记为 Trusted 后，图片可在结构校验通过后自动预览。关闭“仅信任成员自动预览”时，Verified 成员也可以按图片/音频开关自动预览，但 Unknown 和 Blocked 仍不会自动预览。
+默认配置为：图片自动预览开、音频自动加载关。因此默认情况下，Allowed 成员发来的图片可在结构校验通过后自动预览，音频仍显示附件卡片；Blocked 成员始终不自动预览。
 
 WinUI 中的 `MaxPreviewImageBytes` 和 `MaxPreviewAudioBytes` 只限制本地预览，不限制协议传输。协议传输统一由 `SECURECHAT_ATTACHMENT_MAX_BYTES` 控制。一个附件可能被允许接收，但因为尺寸、像素数、WAV 结构或预览大小上限而不被 WinUI 自动预览。
 

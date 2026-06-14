@@ -1,5 +1,5 @@
 // Application-layer PKI implementation. It loads certificates and private keys,
-// verifies chains/revocation, and signs/verifies GKA identity bindings.
+// verifies certificate chains and signs/verifies GKA identity bindings.
 #include "identity_pki.hpp"
 
 #include <openssl/asn1.h>
@@ -13,11 +13,9 @@
 #include <openssl/x509v3.h>
 
 #include <algorithm>
-#include <cctype>
 #include <cstdlib>
 #include <fstream>
 #include <memory>
-#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -45,13 +43,6 @@ std::string readTextFile(const std::string& path) {
     std::ostringstream buffer;
     buffer << file.rdbuf();
     return buffer.str();
-}
-
-std::string trimCopy(std::string value) {
-    const auto first = value.find_first_not_of(" \t\r\n");
-    if (first == std::string::npos) return "";
-    const auto last = value.find_last_not_of(" \t\r\n");
-    return value.substr(first, last - first + 1);
 }
 
 std::string base64Encode(const unsigned char* data, std::size_t size) {
@@ -97,20 +88,6 @@ std::string hexEncode(const unsigned char* data, std::size_t size) {
     for (std::size_t i = 0; i < size; ++i) {
         out.push_back(digits[(data[i] >> 4) & 0x0f]);
         out.push_back(digits[data[i] & 0x0f]);
-    }
-    return out;
-}
-
-std::string normalizeHex(std::string value) {
-    // Revocation entries may contain separators; keep only hex digits and fold
-    // to uppercase so comparisons match OpenSSL fingerprint output.
-    std::string out;
-    out.reserve(value.size());
-    for (const auto ch : value) {
-        const auto c = static_cast<unsigned char>(ch);
-        if (std::isxdigit(c)) {
-            out.push_back(static_cast<char>(std::toupper(c)));
-        }
     }
     return out;
 }
@@ -250,23 +227,6 @@ std::string certificateFingerprint(X509* cert) {
     return hexEncode(digest, digestSize);
 }
 
-std::set<std::string> loadRevokedFingerprints(const std::string& path) {
-    // Simple project-local revocation list: one SHA-256 fingerprint per line.
-    std::set<std::string> revoked;
-    if (path.empty()) return revoked;
-
-    std::ifstream file(path);
-    if (!file) throw std::runtime_error("failed to open PKI revocation file: " + path);
-    std::string line;
-    while (std::getline(file, line)) {
-        line = trimCopy(line);
-        if (line.empty() || line[0] == '#') continue;
-        const auto normalized = normalizeHex(line);
-        if (!normalized.empty()) revoked.insert(normalized);
-    }
-    return revoked;
-}
-
 void requireDigitalSignatureUsage(X509* cert) {
     // Identity certificates must be allowed to sign protocol bindings.
     ASN1_BIT_STRING* usage = static_cast<ASN1_BIT_STRING*>(
@@ -293,20 +253,9 @@ STACK_OF(X509)* buildUntrustedStack(const std::vector<X509Ptr>& certs) {
 
 void verifyCertificateChain(
     X509_STORE* trustStore,
-    const std::set<std::string>& revokedFingerprints,
     const std::vector<X509Ptr>& certs) {
     if (!trustStore) throw std::runtime_error("PKI trust store is not loaded");
     if (certs.empty()) throw std::runtime_error("identity certificate is missing");
-
-    // The local revocation file is trusted configuration. Check every
-    // certificate sent in the identity chain so revoking an intermediate or
-    // leaf certificate both stop the identity from being accepted.
-    for (const auto& cert : certs) {
-        const auto fingerprint = certificateFingerprint(cert.get());
-        if (revokedFingerprints.find(fingerprint) != revokedFingerprints.end()) {
-            throw std::runtime_error("identity certificate is revoked");
-        }
-    }
 
     requireDigitalSignatureUsage(certs.front().get());
 
@@ -435,14 +384,13 @@ json makeIdentityObject(
 
 std::vector<X509Ptr> verifiedIdentityCerts(
     X509_STORE* trustStore,
-    const std::set<std::string>& revokedFingerprints,
     const json& identity) {
     if (!identity.is_object()) throw std::runtime_error("identity must be an object");
     if (identity.value("version", 0) != 1) throw std::runtime_error("unsupported identity version");
     const auto certChainPem = identity.value("certChainPem", "");
     if (certChainPem.empty()) throw std::runtime_error("identity certificate chain is missing");
     auto certs = parseCertificateChain(certChainPem);
-    verifyCertificateChain(trustStore, revokedFingerprints, certs);
+    verifyCertificateChain(trustStore, certs);
     return certs;
 }
 
@@ -468,7 +416,6 @@ struct IdentityContext::Data {
     EvpPkeyPtr privateKey{nullptr, EVP_PKEY_free};
     std::string certChainPem;
     std::vector<X509Ptr> localCerts;
-    std::set<std::string> revokedFingerprints;
     std::string localSubject;
     std::string localFingerprint;
 };
@@ -512,7 +459,7 @@ VerifiedIdentity IdentityContext::verifyJoinRoom(
     if (!mData) throw std::runtime_error("PKI identity is not configured");
     const auto nonce = requiredIdentityString(identity, "nonce");
     const auto signature = base64Decode(requiredIdentityString(identity, "signature"));
-    const auto certs = verifiedIdentityCerts(mData->trustStore.get(), mData->revokedFingerprints, identity);
+    const auto certs = verifiedIdentityCerts(mData->trustStore.get(), identity);
     EvpPkeyPtr publicSigningKey(X509_get_pubkey(certs.front().get()), EVP_PKEY_free);
     if (!publicSigningKey) throw std::runtime_error("identity certificate public key missing");
     requireSignatureAlgorithmMatches(publicSigningKey.get(), identity);
@@ -553,7 +500,7 @@ VerifiedIdentity IdentityContext::verifyGkaContribution(
     if (!mData) throw std::runtime_error("PKI identity is not configured");
     const auto nonce = requiredIdentityString(identity, "nonce");
     const auto signature = base64Decode(requiredIdentityString(identity, "signature"));
-    const auto certs = verifiedIdentityCerts(mData->trustStore.get(), mData->revokedFingerprints, identity);
+    const auto certs = verifiedIdentityCerts(mData->trustStore.get(), identity);
     EvpPkeyPtr publicSigningKey(X509_get_pubkey(certs.front().get()), EVP_PKEY_free);
     if (!publicSigningKey) throw std::runtime_error("identity certificate public key missing");
     requireSignatureAlgorithmMatches(publicSigningKey.get(), identity);
@@ -587,7 +534,7 @@ VerifiedIdentity IdentityContext::verifyGroupKeyEnvelope(const json& envelope) c
     const auto& identity = *it;
     const auto nonce = requiredIdentityString(identity, "nonce");
     const auto signature = base64Decode(requiredIdentityString(identity, "signature"));
-    const auto certs = verifiedIdentityCerts(mData->trustStore.get(), mData->revokedFingerprints, identity);
+    const auto certs = verifiedIdentityCerts(mData->trustStore.get(), identity);
     EvpPkeyPtr publicSigningKey(X509_get_pubkey(certs.front().get()), EVP_PKEY_free);
     if (!publicSigningKey) throw std::runtime_error("host identity certificate public key missing");
     requireSignatureAlgorithmMatches(publicSigningKey.get(), identity);
@@ -606,7 +553,6 @@ IdentityContext loadFromEnvironment() {
     const auto certPath = envValue("SECURECHAT_IDENTITY_CERT_FILE");
     const auto keyPath = envValue("SECURECHAT_IDENTITY_KEY_FILE");
     const auto keyPassword = envValue("SECURECHAT_IDENTITY_KEY_PASS");
-    const auto revocationPath = envValue("SECURECHAT_PKI_REVOCATION_FILE");
 
     if (trustStorePath.empty() || certPath.empty() || keyPath.empty()) {
         throw std::runtime_error(
@@ -618,9 +564,7 @@ IdentityContext loadFromEnvironment() {
     data->certChainPem = readTextFile(certPath);
     data->localCerts = parseCertificateChain(data->certChainPem);
     data->privateKey = loadPrivateKey(keyPath, keyPassword);
-    data->revokedFingerprints = loadRevokedFingerprints(revocationPath);
-
-    verifyCertificateChain(data->trustStore.get(), data->revokedFingerprints, data->localCerts);
+    verifyCertificateChain(data->trustStore.get(), data->localCerts);
     requireKeyMatchesCertificate(data->privateKey.get(), data->localCerts.front().get());
     data->localSubject = certificateSubject(data->localCerts.front().get());
     data->localFingerprint = certificateFingerprint(data->localCerts.front().get());

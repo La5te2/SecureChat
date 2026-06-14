@@ -296,11 +296,16 @@ void HostSessionCore::sendLine(const std::string& line) {
 }
 
 void HostSessionCore::sendLineTo(const std::string& target, const std::string& line) {
-    // Host can privately address any current Client by name or id. The private
-    // target is stored inside the encrypted payload, so Server only broadcasts.
-    const auto targetId = resolveClientId(trimCopy(target));
-    if (targetId.empty()) {
+    // Host privately addresses current Clients by display name only. The
+    // resolved protocol id stays inside encrypted payloads, so Server only broadcasts.
+    const auto targetNameInput = trimCopy(target);
+    const auto targetId = resolveClientId(targetNameInput);
+    if (targetNameInput.empty()) {
         sendLine(line);
+        return;
+    }
+    if (targetId.empty()) {
+        chatEmit(mCallbacks.onError, "Target member name not found: " + targetNameInput);
         return;
     }
     if (line.empty()) {
@@ -308,15 +313,15 @@ void HostSessionCore::sendLineTo(const std::string& target, const std::string& l
         return;
     }
     if (line.rfind("/image ", 0) == 0 || line.rfind("/img ", 0) == 0) {
-        sendImageTo(targetId, trimCopy(line.substr(line.find(' ') + 1)));
+        sendImageTo(targetNameInput, trimCopy(line.substr(line.find(' ') + 1)));
         return;
     }
     if (line.rfind("/file ", 0) == 0) {
-        sendTextFileTo(targetId, trimCopy(line.substr(line.find(' ') + 1)));
+        sendTextFileTo(targetNameInput, trimCopy(line.substr(line.find(' ') + 1)));
         return;
     }
     if (line.rfind("/voice ", 0) == 0) {
-        sendVoiceTo(targetId, trimCopy(line.substr(line.find(' ') + 1)));
+        sendVoiceTo(targetNameInput, trimCopy(line.substr(line.find(' ') + 1)));
         return;
     }
 
@@ -332,7 +337,7 @@ void HostSessionCore::sendLineTo(const std::string& target, const std::string& l
 
 bool HostSessionCore::handleHostCommand(const std::string& line) {
     // Moderation commands are local Host controls, not chat messages. They reuse
-    // the normal input box so CLI, WinUI, and Web wrappers get the same behavior.
+    // the normal input box so CLI and WinUI get the same behavior.
     std::istringstream input(trimCopy(line));
     std::string command;
     input >> command;
@@ -343,7 +348,7 @@ bool HostSessionCore::handleHostCommand(const std::string& line) {
     std::string target;
     input >> target;
     if (target.empty()) {
-        chatEmit(mCallbacks.onError, "Usage: " + command + " <member-name-or-id>");
+        chatEmit(mCallbacks.onError, "Usage: " + command + " <member-name>");
         return true;
     }
 
@@ -365,7 +370,12 @@ bool HostSessionCore::sendImage(const std::string& filePath) {
 }
 
 bool HostSessionCore::sendImageTo(const std::string& target, const std::string& filePath) {
-    const auto targetId = resolveClientId(trimCopy(target));
+    const auto targetName = trimCopy(target);
+    const auto targetId = resolveClientId(targetName);
+    if (!targetName.empty() && targetId.empty()) {
+        chatEmit(mCallbacks.onError, "Target member name not found: " + targetName);
+        return false;
+    }
     return sendAttachmentRelay(
         filePath,
         attachment::Kind::Image,
@@ -381,7 +391,12 @@ bool HostSessionCore::sendTextFile(const std::string& filePath) {
 }
 
 bool HostSessionCore::sendTextFileTo(const std::string& target, const std::string& filePath) {
-    const auto targetId = resolveClientId(trimCopy(target));
+    const auto targetName = trimCopy(target);
+    const auto targetId = resolveClientId(targetName);
+    if (!targetName.empty() && targetId.empty()) {
+        chatEmit(mCallbacks.onError, "Target member name not found: " + targetName);
+        return false;
+    }
     return sendAttachmentRelay(
         filePath,
         attachment::Kind::Text,
@@ -397,7 +412,12 @@ bool HostSessionCore::sendVoice(const std::string& filePath) {
 }
 
 bool HostSessionCore::sendVoiceTo(const std::string& target, const std::string& filePath) {
-    const auto targetId = resolveClientId(trimCopy(target));
+    const auto targetName = trimCopy(target);
+    const auto targetId = resolveClientId(targetName);
+    if (!targetName.empty() && targetId.empty()) {
+        chatEmit(mCallbacks.onError, "Target member name not found: " + targetName);
+        return false;
+    }
     return sendAttachmentRelay(
         filePath,
         attachment::Kind::Voice,
@@ -949,8 +969,8 @@ void HostSessionCore::handleSignalingMessage(const std::string& s) {
                 if (!member.is_object()) continue;
                 if (!first) members << "; ";
                 const auto id = member.value("id", "");
-                // Emit "name / id" for UI display and manual private-message
-                // targeting without exposing raw signaling JSON to the UI.
+                // Emit name/id so UI clients can keep internal PKI mapping
+                // without exposing raw signaling JSON to the UI.
                 members << member.value("username", id) << " / " << id;
                 first = false;
             }
@@ -1056,7 +1076,8 @@ void HostSessionCore::handleSignalingMessage(const std::string& s) {
             auto msg = chat::secure_relay::decryptMessageWithGroupKey(j, mRoomToken, mGroupKey);
             const auto relayTargetId = msg.payload.value("relayTargetId", "");
             if (!relayTargetId.empty() && relayTargetId != chat::protocol::HostActorId) {
-                chatEmit(mCallbacks.onError, "Dropped encrypted relay for another member");
+                // Private relay is broadcast at the outer layer. Non-target
+                // members discard it silently to avoid revealing private-send events.
                 return;
             }
             if (msg.type == chat::secure_relay::PairwisePrivateType) {
@@ -1323,14 +1344,14 @@ std::string HostSessionCore::displayNameForClient(const std::string& id) {
     return name == mClientNames.end() ? id : name->second;
 }
 
-// Resolves a username or user id token into the underlying client id when possible.
+// Resolves a visible member name into the underlying client id when possible.
 std::string HostSessionCore::resolveClientId(const std::string& token) {
+    if (token.empty()) return "";
     std::lock_guard<std::mutex> lock(mClientsMutex);
-    if (mClientNames.find(token) != mClientNames.end()) return token;
     for (const auto& [id, name] : mClientNames) {
         if (name == token) return id;
     }
-    return token;
+    return "";
 }
 
 void HostSessionCore::rejectClient(const std::string& clientId, const std::string& reason) {

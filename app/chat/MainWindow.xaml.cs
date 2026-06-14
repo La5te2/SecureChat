@@ -42,9 +42,8 @@ public sealed partial class MainWindow : Window
     // WinUI 不直接维护真正的房间状态，真正状态在 C++ core 和 Server。
     // 这里保存的是界面需要显示和点击的成员快照。
     private readonly HashSet<string> participants = new(StringComparer.OrdinalIgnoreCase);
-    // 这三个集合组成附件预览状态机：
-    // Unknown 默认不自动预览；Verified 表示 PKI 已验证；Trusted/Blocked 是用户在当前房间的临时选择。
-    private readonly HashSet<string> trustedAttachmentMembers = new(StringComparer.OrdinalIgnoreCase);
+    // Blocked 是当前房间内的本机 UI 策略：右键成员卡片切换。
+    // PKI 验证仍在 native 层完成；这里的颜色/预览策略不参与密钥认证。
     private readonly HashSet<string> blockedAttachmentMembers = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, VerifiedMemberInfo> verifiedAttachmentMembers = new(StringComparer.OrdinalIgnoreCase);
     // native core 先回调附件 metadata，再回调解密后的本地缓存路径。
@@ -54,10 +53,9 @@ public sealed partial class MainWindow : Window
     private bool sidebarVisible = true;
     private bool resizingSidebar;
     private bool settingsHiding;
-    private bool showOnlyOwnMessages;
+    private bool showOnlyMessages = true;
     private bool autoPreviewImages = true;
     private bool autoLoadAudio;
-    private bool onlyTrustedAttachmentPreview = true;
     private bool settingsReady;
     private bool refreshingLanguage;
     private bool infoBarFading;
@@ -78,16 +76,14 @@ public sealed partial class MainWindow : Window
     private bool isClosing;
 
     private static readonly NativeMethods.ChatEventCallback NoOpCallback = (_, _, _) => { };
-    // 附件预览信任状态只影响 WinUI 是否自动预览，不影响加解密和传输。
+    // 附件预览状态只影响 WinUI 是否自动预览，不影响加解密和传输。
     // 加解密仍由 C++ secure relay 和 group key 完成。
     private enum AttachmentMemberState
     {
-        Unknown,
-        Verified,
-        Trusted,
+        Allowed,
         Blocked
     }
-    private sealed record BubbleVisibilityState(bool IsFilterable, bool IsOwn);
+    private sealed record BubbleVisibilityState(bool IsMessageContent);
     private sealed record ChatDisplayLine(string Kind, string Sender, string Body, bool IsOwn, bool IsFilterable);
     private sealed record AttachmentSenderInfo(string DisplayName, string ActorId, string FileName = "")
     {
@@ -296,8 +292,9 @@ public sealed partial class MainWindow : Window
 
     private void SendCurrentMessage()
     {
-        // The target box is optional: empty means room broadcast; otherwise the
-        // native layer resolves the member name/id and sends private relay.
+        // The target box is optional: empty means room broadcast. Non-empty
+        // targets are resolved by current member display name only, avoiding
+        // collisions with fixed protocol ids such as "host".
         var text = MessageBox.Text.Trim();
         if (text.Length == 0) return;
         var target = PrivateTargetBox.Text.Trim();
@@ -333,7 +330,7 @@ public sealed partial class MainWindow : Window
         if (file is null) return;
         var target = PrivateTargetBox.Text.Trim();
 
-        // target 为空表示群发；target 非空时，native core 会解析成员 name/id 并走私发 relay。
+        // target 为空表示群发；target 非空时，native core 只按成员显示名解析并走私发 relay。
         _ = kind switch
         {
             FileKind.Image => target.Length == 0
@@ -467,7 +464,7 @@ public sealed partial class MainWindow : Window
     {
         return string.IsNullOrWhiteSpace(SenderLabel(sender))
             ? IsOwnAttachmentPath(path)
-            : IsOwnSender(sender.DisplayName);
+            : IsOwnActor(sender.ActorId, sender.DisplayName);
     }
 
     private bool ShouldAutoPreviewAttachment(AttachmentPreviewInfo info)
@@ -476,10 +473,8 @@ public sealed partial class MainWindow : Window
         if (info.Kind == "file") return false;
         // 自己刚选择发送的本地文件可以按用户设置预览。
         if (info.IsOwnLocalAttachment) return info.Kind == "image" ? autoPreviewImages : autoLoadAudio;
-        // Unknown 和 Blocked 都禁止自动进入图片/音频解码器。
-        if (info.MemberState is AttachmentMemberState.Unknown or AttachmentMemberState.Blocked) return false;
-        // 默认更保守：PKI Verified 只能证明身份，仍需用户手动标记 Trusted 才自动预览。
-        if (onlyTrustedAttachmentPreview && info.MemberState != AttachmentMemberState.Trusted) return false;
+        // 远端成员默认允许；用户右键成员卡片标记 Blocked 后不自动预览。
+        if (info.MemberState == AttachmentMemberState.Blocked) return false;
         return info.Kind == "image" ? autoPreviewImages : autoLoadAudio;
     }
 
@@ -504,7 +499,7 @@ public sealed partial class MainWindow : Window
         });
         stack.Children.Add(new TextBlock
         {
-            Text = $"{UiText("Source", "来源")}: {SenderLabel(info.Sender, UiText("Unknown member", "未知成员"))}",
+            Text = $"{UiText("Source", "来源")}: {SenderLabel(info.Sender, UiText("Unavailable source", "来源未知"))}",
             TextWrapping = TextWrapping.Wrap
         });
         stack.Children.Add(new TextBlock
@@ -517,9 +512,7 @@ public sealed partial class MainWindow : Window
             Text = AttachmentTrustLabel(info),
             Foreground = new SolidColorBrush(info.MemberState == AttachmentMemberState.Blocked
                 ? Color.FromArgb(255, 176, 32, 32)
-                : info.IsOwnLocalAttachment || info.MemberState is AttachmentMemberState.Verified or AttachmentMemberState.Trusted
-                    ? Color.FromArgb(255, 35, 112, 68)
-                    : Color.FromArgb(255, 160, 83, 28)),
+                : Color.FromArgb(255, 35, 112, 68)),
             TextWrapping = TextWrapping.Wrap
         });
 
@@ -680,14 +673,10 @@ public sealed partial class MainWindow : Window
 
     private AttachmentMemberState AttachmentMemberStateForSender(AttachmentSenderInfo sender)
     {
-        // actorId 优先，displayName 兜底。这样成员改名或重名时尽量使用稳定 id。
+        // actorId 优先，displayName 兜底。默认允许预览；用户右键成员后才进入 Blocked。
         var keys = AttachmentTrustKeys(sender).ToList();
         if (keys.Any(key => blockedAttachmentMembers.Contains(key))) return AttachmentMemberState.Blocked;
-        var verified = keys.Any(key => verifiedAttachmentMembers.ContainsKey(key));
-        if (!verified) return AttachmentMemberState.Unknown;
-        return keys.Any(key => trustedAttachmentMembers.Contains(key))
-            ? AttachmentMemberState.Trusted
-            : AttachmentMemberState.Verified;
+        return AttachmentMemberState.Allowed;
     }
 
     private IEnumerable<string> AttachmentTrustKeys(AttachmentSenderInfo sender)
@@ -745,11 +734,7 @@ public sealed partial class MainWindow : Window
     {
         var keys = ParticipantTrustKeys(participant).ToList();
         if (keys.Any(key => blockedAttachmentMembers.Contains(key))) return AttachmentMemberState.Blocked;
-        var verified = keys.Any(key => verifiedAttachmentMembers.ContainsKey(key));
-        if (!verified) return AttachmentMemberState.Unknown;
-        return keys.Any(key => trustedAttachmentMembers.Contains(key))
-            ? AttachmentMemberState.Trusted
-            : AttachmentMemberState.Verified;
+        return AttachmentMemberState.Allowed;
     }
 
     private VerifiedMemberInfo? VerifiedInfoForParticipant(string participant)
@@ -761,35 +746,14 @@ public sealed partial class MainWindow : Window
         return null;
     }
 
-    private void ToggleTrustedParticipant(string participant)
-    {
-        // Trusted 是用户在当前房间内的 UI 选择，不写入全局信任库。
-        // 离开房间后 ClearAttachmentMemberStates 会清空它。
-        var key = PrimaryParticipantKey(participant);
-        if (key.Length == 0) return;
-
-        var state = MemberStateForParticipant(participant);
-        if (state == AttachmentMemberState.Trusted)
-        {
-            trustedAttachmentMembers.Remove(key);
-        }
-        else if (state == AttachmentMemberState.Verified)
-        {
-            blockedAttachmentMembers.Remove(key);
-            trustedAttachmentMembers.Add(key);
-        }
-        RefreshParticipants();
-    }
-
     private void ToggleBlockedParticipant(string participant)
     {
-        // Blocked 优先级高于 Trusted，用来临时禁止某成员附件自动预览。
+        // Blocked 是当前房间内的临时 UI 状态：右键成员卡片切换红/绿。
         var key = PrimaryParticipantKey(participant);
         if (key.Length == 0) return;
 
         if (!blockedAttachmentMembers.Remove(key))
         {
-            trustedAttachmentMembers.Remove(key);
             blockedAttachmentMembers.Add(key);
         }
         RefreshParticipants();
@@ -809,8 +773,8 @@ public sealed partial class MainWindow : Window
         if (normalizedId.Length > 0) verifiedAttachmentMembers[normalizedId] = info;
         if (normalizedName.Length > 0) verifiedAttachmentMembers[normalizedName] = info;
 
-        // Replace older display-only rows with the stable "name / id" row once
-        // PKI has bound that room member to a certificate fingerprint.
+        // Keep stable name plus id internally for PKI/fingerprint lookup, while
+        // RefreshParticipants displays only the member name.
         RemoveParticipant(normalizedId);
         RemoveParticipant(normalizedName);
         var participant = ParticipantLabel(shownName, normalizedId);
@@ -889,11 +853,10 @@ public sealed partial class MainWindow : Window
 
     private void PruneAttachmentMemberStates()
     {
-        // 房间成员变化后，清理已经离开的成员的 Trusted/Blocked/Verified UI 状态。
+        // 房间成员变化后，清理已经离开的成员的 Blocked/Verified UI 状态。
         var liveKeys = participants.SelectMany(ParticipantTrustKeys)
             .Where(key => key.Length > 0)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
-        trustedAttachmentMembers.RemoveWhere(key => !liveKeys.Contains(key));
         blockedAttachmentMembers.RemoveWhere(key => !liveKeys.Contains(key));
         foreach (var key in verifiedAttachmentMembers.Keys.Where(key => !liveKeys.Contains(key)).ToList())
         {
@@ -905,8 +868,8 @@ public sealed partial class MainWindow : Window
     {
         return state switch
         {
-            AttachmentMemberState.Verified or AttachmentMemberState.Trusted => Color.FromArgb(54, 28, 135, 73),
-            AttachmentMemberState.Blocked or AttachmentMemberState.Unknown => Color.FromArgb(54, 176, 32, 32),
+            AttachmentMemberState.Blocked => Color.FromArgb(54, 176, 32, 32),
+            AttachmentMemberState.Allowed => Color.FromArgb(54, 28, 135, 73),
             _ => Color.FromArgb(20, 0, 0, 0)
         };
     }
@@ -915,15 +878,15 @@ public sealed partial class MainWindow : Window
     {
         return state switch
         {
-            AttachmentMemberState.Verified or AttachmentMemberState.Trusted => Color.FromArgb(190, 28, 135, 73),
-            AttachmentMemberState.Blocked or AttachmentMemberState.Unknown => Color.FromArgb(190, 176, 32, 32),
+            AttachmentMemberState.Blocked => Color.FromArgb(190, 176, 32, 32),
+            AttachmentMemberState.Allowed => Color.FromArgb(190, 28, 135, 73),
             _ => Color.FromArgb(50, 0, 0, 0)
         };
     }
 
     private void CopyParticipantFingerprint(string participant)
     {
-        // 成员列表点击复制完整证书指纹；界面只显示 name / id，避免长指纹破坏布局。
+        // 成员列表点击复制完整证书指纹；界面只显示 name，避免长 id/指纹破坏布局。
         var info = VerifiedInfoForParticipant(participant);
         if (info is null || string.IsNullOrWhiteSpace(info.Fingerprint))
         {
@@ -950,11 +913,7 @@ public sealed partial class MainWindow : Window
         return info.MemberState switch
         {
             AttachmentMemberState.Blocked => UiText("Blocked member: preview is disabled", "已阻止成员：禁用预览"),
-            AttachmentMemberState.Trusted => UiText("Trusted verified member: auto-preview may run", "已信任且已验证成员：可自动预览"),
-            AttachmentMemberState.Verified => onlyTrustedAttachmentPreview
-                ? UiText("Verified member: trust manually to allow auto-preview", "已验证成员：手动信任后才自动预览")
-                : UiText("Verified member: auto-preview may run", "已验证成员：可自动预览"),
-            _ => UiText("Unknown member: click Preview only if you trust the source", "未知成员：仅在信任来源时点击预览")
+            _ => UiText("Allowed member: auto-preview may run", "允许成员：可自动预览")
         };
     }
 
@@ -1185,8 +1144,8 @@ public sealed partial class MainWindow : Window
         var row = new Grid
         {
             HorizontalAlignment = HorizontalAlignment.Stretch,
-            Tag = new BubbleVisibilityState(isFilterable, isOwnSender),
-            Visibility = showOnlyOwnMessages && isFilterable && !isOwnSender
+            Tag = new BubbleVisibilityState(isFilterable),
+            Visibility = showOnlyMessages && !isFilterable
                 ? Visibility.Collapsed
                 : Visibility.Visible
         };
@@ -1208,6 +1167,7 @@ public sealed partial class MainWindow : Window
     {
         var displayKind = string.IsNullOrWhiteSpace(kind) ? "status" : kind;
         var sender = "";
+        var actorId = "";
         var body = message;
         if (displayKind == "message")
         {
@@ -1217,7 +1177,7 @@ public sealed partial class MainWindow : Window
                 var root = document.RootElement;
                 var type = root.TryGetProperty("type", out var typeValue) ? typeValue.GetString() ?? "" : "";
                 var from = root.TryGetProperty("from", out var fromValue) ? fromValue.GetString() ?? "" : "";
-                var actorId = from;
+                actorId = from;
                 if (root.TryGetProperty("payload", out var payload) &&
                     payload.ValueKind == JsonValueKind.Object)
                 {
@@ -1286,7 +1246,40 @@ public sealed partial class MainWindow : Window
             }
         }
 
-        return new ChatDisplayLine(displayKind, sender, body, IsOwnSender(sender), displayKind == "message");
+        return new ChatDisplayLine(
+            displayKind,
+            sender,
+            body,
+            IsOwnActor(actorId, sender),
+            displayKind.StartsWith("message", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private bool IsOwnActor(string actorId, string sender)
+    {
+        // Native messages carry both a display name and a stable actorId. Host
+        // messages use actorId="host", so display-name-only checks would render
+        // the Host's own messages on the left.
+        if (!string.IsNullOrWhiteSpace(actorId))
+        {
+            var normalizedActorId = actorId.Trim();
+            if (sessionMode == SessionMode.Host &&
+                string.Equals(normalizedActorId, "host", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            var ownParticipant = participants.FirstOrDefault(IsOwnParticipant);
+            if (!string.IsNullOrWhiteSpace(ownParticipant))
+            {
+                var ownParticipantId = ParticipantTrustKey(ownParticipant);
+                if (string.Equals(normalizedActorId, ownParticipantId, StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return IsOwnSender(sender);
     }
 
     private bool IsOwnSender(string sender)
@@ -1410,7 +1403,7 @@ public sealed partial class MainWindow : Window
     private void UpdateParticipants(string kind, string message)
     {
         // The native core currently emits room membership as a status string.
-        // Entries are formatted as "name / id" so users can target private sends.
+        // UI displays only names; stable ids stay internal for PKI/fingerprint lookup.
         if (kind != "status") return;
 
         TryRememberLocalIdentityStatus(message);
@@ -1477,7 +1470,6 @@ public sealed partial class MainWindow : Window
 
     private void ClearAttachmentMemberStates()
     {
-        trustedAttachmentMembers.Clear();
         blockedAttachmentMembers.Clear();
         verifiedAttachmentMembers.Clear();
         pendingAttachmentSenders.Clear();
@@ -1510,79 +1502,39 @@ public sealed partial class MainWindow : Window
             var verifiedInfo = VerifiedInfoForParticipant(name);
             var row = new Grid { ColumnSpacing = 8 };
             row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
             var identityBox = new Border
             {
                 Padding = new Thickness(8, 5, 8, 5),
-                Background = new SolidColorBrush(MemberStateBackground(state)),
-                BorderBrush = new SolidColorBrush(MemberStateBorder(state)),
-                BorderThickness = new Thickness(1),
-                CornerRadius = new CornerRadius(6),
+                Background = new SolidColorBrush(Color.FromArgb(0, 0, 0, 0)),
                 Child = new TextBlock
                 {
-                    Text = name,
+                    Text = ParticipantDisplayName(name),
                     TextWrapping = TextWrapping.Wrap,
                     FontWeight = FontWeights.SemiBold,
                     IsTextSelectionEnabled = false
                 }
             };
             ToolTipService.SetToolTip(identityBox, verifiedInfo is null
-                ? UiText("Fingerprint is not available", "指纹不可用")
-                : UiText("Click to copy certificate fingerprint", "点击复制证书指纹"));
+                ? UiText("Right-click to block/unblock attachment preview", "右键阻止/解除阻止附件预览")
+                : UiText("Click copies fingerprint; right-click blocks/unblocks previews", "单击复制指纹；右键阻止/解除阻止预览"));
             identityBox.Tapped += (_, _) => CopyParticipantFingerprint(name);
             row.Children.Add(identityBox);
 
-            if (!IsOwnParticipant(name))
-            {
-                var actions = new StackPanel
-                {
-                    Orientation = Orientation.Vertical,
-                    Spacing = 4,
-                    VerticalAlignment = VerticalAlignment.Center
-                };
-                if (state is AttachmentMemberState.Verified or AttachmentMemberState.Trusted)
-                {
-                    var trustButton = new Button
-                    {
-                        Content = state == AttachmentMemberState.Trusted
-                            ? UiText("Untrust", "取消信任")
-                            : UiText("Trust", "信任"),
-                        Padding = new Thickness(8, 3, 8, 3),
-                        MinWidth = 0
-                    };
-                    ToolTipService.SetToolTip(trustButton, UiText(
-                        "Trust only changes local auto-preview policy for this verified member.",
-                        "信任只改变该已验证成员在本机的自动预览策略。"));
-                    trustButton.Click += (_, _) => ToggleTrustedParticipant(name);
-                    actions.Children.Add(trustButton);
-                }
-
-                var blockButton = new Button
-                {
-                    Content = state == AttachmentMemberState.Blocked
-                        ? UiText("Unblock", "解除阻止")
-                        : UiText("Block", "阻止"),
-                    Padding = new Thickness(8, 3, 8, 3),
-                    MinWidth = 0
-                };
-                ToolTipService.SetToolTip(blockButton, UiText(
-                    "Blocked members never auto-preview attachments on this device.",
-                    "被阻止成员的附件不会在本机自动预览。"));
-                blockButton.Click += (_, _) => ToggleBlockedParticipant(name);
-                actions.Children.Add(blockButton);
-
-                Grid.SetColumn(actions, 1);
-                row.Children.Add(actions);
-            }
-
-            RoomParticipantsPanel.Children.Add(new Border
+            var participantCard = new Border
             {
                 Padding = new Thickness(10, 7, 10, 7),
-                Background = new SolidColorBrush(Color.FromArgb(20, 0, 0, 0)),
+                Background = new SolidColorBrush(MemberStateBackground(state)),
+                BorderBrush = new SolidColorBrush(MemberStateBorder(state)),
+                BorderThickness = new Thickness(1),
                 CornerRadius = new CornerRadius(6),
                 Child = row
-            });
+            };
+            participantCard.RightTapped += (_, _) => ToggleBlockedParticipant(name);
+            ToolTipService.SetToolTip(participantCard, state == AttachmentMemberState.Blocked
+                ? UiText("Right-click to allow attachment previews", "右键恢复附件预览")
+                : UiText("Right-click to block attachment previews", "右键阻止附件预览"));
+            RoomParticipantsPanel.Children.Add(participantCard);
         }
         RefreshRoomPanel();
     }
@@ -1703,11 +1655,6 @@ public sealed partial class MainWindow : Window
         await PickPkiFileIntoAsync(PkiIdentityKeyBox);
     }
 
-    private async void BrowsePkiRevocationFile_Click(object sender, RoutedEventArgs e)
-    {
-        await PickPkiFileIntoAsync(PkiRevocationFileBox);
-    }
-
     private async System.Threading.Tasks.Task PickPkiFileIntoAsync(TextBox target)
     {
         var picker = new FileOpenPicker();
@@ -1715,7 +1662,6 @@ public sealed partial class MainWindow : Window
         picker.FileTypeFilter.Add(".crt");
         picker.FileTypeFilter.Add(".cer");
         picker.FileTypeFilter.Add(".key");
-        picker.FileTypeFilter.Add(".txt");
         InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(this));
 
         var file = await picker.PickSingleFileAsync();
@@ -1737,7 +1683,6 @@ public sealed partial class MainWindow : Window
         if (!SetProcessEnvironmentFromBox("SECURECHAT_PKI_TRUST_STORE", PkiTrustStoreBox) ||
             !SetProcessEnvironmentFromBox("SECURECHAT_IDENTITY_CERT_FILE", PkiIdentityCertBox) ||
             !SetProcessEnvironmentFromBox("SECURECHAT_IDENTITY_KEY_FILE", PkiIdentityKeyBox) ||
-            !SetProcessEnvironmentFromBox("SECURECHAT_PKI_REVOCATION_FILE", PkiRevocationFileBox) ||
             !SetProcessEnvironmentValue("SECURECHAT_IDENTITY_KEY_PASS", PkiIdentityKeyPassBox.Password))
         {
             return false;
@@ -1844,9 +1789,9 @@ public sealed partial class MainWindow : Window
         SaveAppConfigIfReady();
     }
 
-    private void ShowOnlyOwnToggleSwitch_Toggled(object sender, RoutedEventArgs e)
+    private void ShowOnlyMessagesToggleSwitch_Toggled(object sender, RoutedEventArgs e)
     {
-        showOnlyOwnMessages = ShowOnlyOwnToggleSwitch.IsOn;
+        showOnlyMessages = ShowOnlyMessagesToggleSwitch.IsOn;
         RefreshBubbleVisibility();
         SaveAppConfigIfReady();
     }
@@ -1855,15 +1800,13 @@ public sealed partial class MainWindow : Window
     {
         if (refreshingLanguage) return;
         if (AutoPreviewImagesToggleSwitch is null ||
-            AutoLoadAudioToggleSwitch is null ||
-            TrustedMembersOnlyToggleSwitch is null)
+            AutoLoadAudioToggleSwitch is null)
         {
             return;
         }
 
         autoPreviewImages = AutoPreviewImagesToggleSwitch.IsOn;
         autoLoadAudio = AutoLoadAudioToggleSwitch.IsOn;
-        onlyTrustedAttachmentPreview = TrustedMembersOnlyToggleSwitch.IsOn;
         SaveAppConfigIfReady();
     }
 
@@ -2029,7 +1972,7 @@ public sealed partial class MainWindow : Window
         foreach (var row in MessagesPanel.Children.OfType<Grid>())
         {
             if (row.Tag is not BubbleVisibilityState state) continue;
-            row.Visibility = showOnlyOwnMessages && state.IsFilterable && !state.IsOwn
+            row.Visibility = showOnlyMessages && !state.IsMessageContent
                 ? Visibility.Collapsed
                 : Visibility.Visible;
         }
@@ -2154,7 +2097,7 @@ public sealed partial class MainWindow : Window
             RoomParticipantsHeaderText.Text = UiText("Participants", "参与者");
 
             MessageBox.PlaceholderText = UiText("Type a message", "输入消息");
-            PrivateTargetBox.PlaceholderText = UiText("To: member", "私信目标");
+            PrivateTargetBox.PlaceholderText = UiText("To: name", "私信姓名");
             SendButton.Content = UiText("Send", "发送");
             SetComboItemContent(SendModeBox, "Text", UiText("Texts", "文字"));
             SetComboItemContent(SendModeBox, "Image", UiText("Image", "图片"));
@@ -2171,9 +2114,9 @@ public sealed partial class MainWindow : Window
             SetComboItemContent(SkillLanguageComboBox, "English", "English");
             InfoBarSecondsSlider.Header = UiText("InfoBar seconds", "提示停留秒数");
             SettingsPanelOpacitySlider.Header = UiText("Settings panel opacity", "设置面板透明度");
-            ShowOnlyOwnToggleSwitch.Header = UiText("Only my messages", "只看自己");
-            ShowOnlyOwnToggleSwitch.OnContent = UiText("On", "开");
-            ShowOnlyOwnToggleSwitch.OffContent = UiText("Off", "关");
+            ShowOnlyMessagesToggleSwitch.Header = UiText("Only messages", "只看消息");
+            ShowOnlyMessagesToggleSwitch.OnContent = UiText("On", "开");
+            ShowOnlyMessagesToggleSwitch.OffContent = UiText("Off", "关");
             AttachmentSafetyHeaderText.Text = UiText("Attachment Safety", "附件安全");
             AutoPreviewImagesToggleSwitch.Header = UiText("Auto preview images", "自动预览图片");
             AutoPreviewImagesToggleSwitch.OnContent = UiText("On", "开");
@@ -2181,19 +2124,14 @@ public sealed partial class MainWindow : Window
             AutoLoadAudioToggleSwitch.Header = UiText("Auto load audio", "自动加载音频");
             AutoLoadAudioToggleSwitch.OnContent = UiText("On", "开");
             AutoLoadAudioToggleSwitch.OffContent = UiText("Off", "关");
-            TrustedMembersOnlyToggleSwitch.Header = UiText("Only trusted members auto-preview", "仅信任成员自动预览");
-            TrustedMembersOnlyToggleSwitch.OnContent = UiText("On", "开");
-            TrustedMembersOnlyToggleSwitch.OffContent = UiText("Off", "关");
             PkiHeaderText.Text = UiText("Member PKI", "成员 PKI");
             PkiTrustStoreBox.Header = UiText("Trust store", "信任根");
             PkiIdentityCertBox.Header = UiText("Identity cert chain", "成员证书链");
             PkiIdentityKeyBox.Header = UiText("Identity private key", "成员私钥");
-            PkiRevocationFileBox.Header = UiText("Revocation list", "吊销列表");
             PkiIdentityKeyPassBox.Header = UiText("Identity key passphrase", "成员私钥口令");
             BrowsePkiTrustStoreButton.Content = UiText("Browse", "选择");
             BrowsePkiIdentityCertButton.Content = UiText("Browse", "选择");
             BrowsePkiIdentityKeyButton.Content = UiText("Browse", "选择");
-            BrowsePkiRevocationFileButton.Content = UiText("Browse", "选择");
             ChatBackgroundHeaderText.Text = UiText("Chat Background", "聊天背景");
             ImportChatBackgroundButton.Content = UiText("Import Image", "导入图片");
             ClearChatBackgroundButton.Content = UiText("Clear Image", "清除图片");
@@ -2306,14 +2244,12 @@ public sealed partial class MainWindow : Window
             AppendYaml(builder, "language", ComboTag(SkillLanguageComboBox));
             AppendYaml(builder, "infobar_seconds", NumberString(InfoBarSecondsSlider.Value));
             AppendYaml(builder, "settings_panel_opacity", NumberString(SettingsPanelOpacitySlider.Value));
-            AppendYaml(builder, "show_only_own", showOnlyOwnMessages ? "true" : "false");
+            AppendYaml(builder, "show_only_messages", showOnlyMessages ? "true" : "false");
             AppendYaml(builder, "auto_preview_images", autoPreviewImages ? "true" : "false");
             AppendYaml(builder, "auto_load_audio", autoLoadAudio ? "true" : "false");
-            AppendYaml(builder, "only_trusted_attachment_preview", onlyTrustedAttachmentPreview ? "true" : "false");
             AppendYaml(builder, "pki_trust_store", PkiTrustStoreBox.Text.Trim());
             AppendYaml(builder, "pki_identity_cert", PkiIdentityCertBox.Text.Trim());
             AppendYaml(builder, "pki_identity_key", PkiIdentityKeyBox.Text.Trim());
-            AppendYaml(builder, "pki_revocation_file", PkiRevocationFileBox.Text.Trim());
             AppendYaml(builder, "chat_background_path", chatBackgroundPath ?? "");
             AppendYaml(builder, "chat_background_opacity", NumberString(BackgroundOpacitySlider.Value));
             AppendYaml(builder, "chat_background_crop_x", ComboTag(BackgroundHorizontalComboBox));
@@ -2349,14 +2285,12 @@ public sealed partial class MainWindow : Window
             SetComboByTag(SkillLanguageComboBox, Value(chatValues, "language", "Chinese"));
             SetSlider(InfoBarSecondsSlider, Value(chatValues, "infobar_seconds", "5"));
             SetSlider(SettingsPanelOpacitySlider, Value(chatValues, "settings_panel_opacity", "0.99"));
-            showOnlyOwnMessages = Value(chatValues, "show_only_own", "false").Equals("true", StringComparison.OrdinalIgnoreCase);
-            ShowOnlyOwnToggleSwitch.IsOn = showOnlyOwnMessages;
+            showOnlyMessages = Value(chatValues, "show_only_messages", "true").Equals("true", StringComparison.OrdinalIgnoreCase);
+            ShowOnlyMessagesToggleSwitch.IsOn = showOnlyMessages;
             autoPreviewImages = Value(chatValues, "auto_preview_images", "true").Equals("true", StringComparison.OrdinalIgnoreCase);
             autoLoadAudio = Value(chatValues, "auto_load_audio", "false").Equals("true", StringComparison.OrdinalIgnoreCase);
-            onlyTrustedAttachmentPreview = Value(chatValues, "only_trusted_attachment_preview", "true").Equals("true", StringComparison.OrdinalIgnoreCase);
             AutoPreviewImagesToggleSwitch.IsOn = autoPreviewImages;
             AutoLoadAudioToggleSwitch.IsOn = autoLoadAudio;
-            TrustedMembersOnlyToggleSwitch.IsOn = onlyTrustedAttachmentPreview;
             // Server URL is intentionally not restored from config. It is a
             // per-session endpoint choice, so stale or sensitive endpoints
             // should not silently appear after a restart.
@@ -2364,7 +2298,6 @@ public sealed partial class MainWindow : Window
             PkiTrustStoreBox.Text = Value(chatValues, "pki_trust_store", "");
             PkiIdentityCertBox.Text = Value(chatValues, "pki_identity_cert", "");
             PkiIdentityKeyBox.Text = Value(chatValues, "pki_identity_key", "");
-            PkiRevocationFileBox.Text = Value(chatValues, "pki_revocation_file", "");
             SetSlider(BackgroundOpacitySlider, Value(chatValues, "chat_background_opacity", "0.28"));
             SetComboByTag(BackgroundHorizontalComboBox, Value(chatValues, "chat_background_crop_x", "Center"));
             SetComboByTag(BackgroundVerticalComboBox, Value(chatValues, "chat_background_crop_y", "Center"));

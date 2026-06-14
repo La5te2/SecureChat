@@ -1,4 +1,4 @@
-// Native C API implementation used by WinUI and Web UI. It owns process-wide
+// Native C API implementation used by WinUI. It owns process-wide
 // Host/Client sessions and translates C++ callbacks into C ABI callbacks.
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -468,7 +468,7 @@ int CHAT_CALL chat_send_image(const char* file_path) {
     }
 }
 
-// Sends one image file to a selected member name/id through the active session.
+// Sends one image file to a selected member display name through the active session.
 int CHAT_CALL chat_send_image_to(const char* target, const char* file_path) {
     installNativeCrashHandlersOnce();
     try {
@@ -523,7 +523,7 @@ int CHAT_CALL chat_send_file(const char* file_path) {
     }
 }
 
-// Sends one generic text-file attachment to a selected member name/id.
+// Sends one generic text-file attachment to a selected member display name.
 int CHAT_CALL chat_send_file_to(const char* target, const char* file_path) {
     installNativeCrashHandlersOnce();
     try {
@@ -578,7 +578,7 @@ int CHAT_CALL chat_send_voice(const char* file_path) {
     }
 }
 
-// Sends one voice attachment to a selected member name/id.
+// Sends one voice attachment to a selected member display name.
 int CHAT_CALL chat_send_voice_to(const char* target, const char* file_path) {
     installNativeCrashHandlersOnce();
     try {

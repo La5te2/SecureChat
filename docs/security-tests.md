@@ -12,14 +12,12 @@
 
 ```powershell
 .\build_win.bat
-.\build_web.bat
 ```
 
 预期和实际结果：
 
 - C++ `server.exe`、`host.exe`、`client.exe`、`native.dll` 构建通过；
 - WinUI 构建通过；
-- Web UI 构建通过；
 - 构建输出为 `0 warning / 0 error`。
 
 ### 旧连接层和旧兼容表述扫描
@@ -289,7 +287,7 @@ grep -R "secret-message-123\|secret-plan.txt" server.log logs || true
 
 ### Host 管理步骤
 
-1. 启动一个 Host 和至少一个 Client，确认成员列表显示 `name / id`。
+1. 启动一个 Host 和至少一个 Client，确认成员列表只显示成员名。
 2. Host 输入：
    ```text
    /silence <成员名或id>
@@ -342,8 +340,8 @@ grep -R "secret-message-123\|secret-plan.txt" server.log logs || true
 - 把非 WAV 文件改名为 `.wav` 后用 `/voice` 发送：RIFF/WAVE 校验失败；
 - 发送名为 `../../evil.txt` 的附件：接收端文件名被净化，只落在 `logs/files`；
 - 设置 `SECURECHAT_LOGS_MAX_BYTES=1048576` 后连续发送多个附件：缓存目录清理旧文件或拒绝新附件；
-- WinUI 中发送者是 Unknown 或 Blocked 时接收图片/音频：界面只显示“附件已接收”，不会自动预览；
-- WinUI 中 PKI Verified 成员被当前房间临时标记为 Trusted 后接收图片：若“自动预览图片”和“仅信任成员自动预览”开启，图片通过尺寸和像素校验后自动预览；
+- WinUI 中发送者被右键标记为 Blocked 时接收图片/音频：界面只显示“附件已接收”，不会自动预览；
+- WinUI 中 Allowed 成员接收图片：若“自动预览图片”开启，图片通过尺寸和像素校验后自动预览；
 - WinUI 中接收异常大尺寸图片或异常 WAV：附件卡片存在，但点击预览时显示“预览已阻止”。
 
 截图建议：
@@ -361,7 +359,7 @@ grep -R "secret-message-123\|secret-plan.txt" server.log logs || true
 在授权测试机上扫描自己的服务器：
 
 ```bash
-nmap -Pn -p 22,80,443,25566,25567,5188 <your-server-ip-or-domain>
+nmap -Pn -p 22,80,443,25566,25567 <your-server-ip-or-domain>
 ```
 
 在服务器上对照监听和防火墙：
@@ -374,7 +372,6 @@ sudo ufw status
 ### 端口扫描预期现象
 
 - 公网 Server 部署只需要暴露 TCP `25566`。
-- Web UI `5188` 不应直接暴露公网。
 - Nginx TLS 反向代理部署中，公网只暴露 Nginx `25566`，SecureChat backend `25567` 只监听 `127.0.0.1`。
 
 ### TCP 半连接步骤

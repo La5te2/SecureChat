@@ -1,4 +1,4 @@
-// Client session interface used by CLI, WinUI, and Web wrappers.
+// Client session interface used by CLI and WinUI wrappers.
 // It joins an existing room and sends encrypted relay messages through Server.
 #pragma once
 
@@ -100,7 +100,7 @@ private:
     void handleRelayBinaryChunk(const std::string& senderKey, const Message& msg);
     // Converts raw console/UI input into a protocol message.
     Message parseInput(const std::string& line);
-    // Resolves a member name/id from the latest room_members update.
+    // Resolves a visible member name from the latest room_members update.
     std::string resolveMemberId(const std::string& token);
 
 private:

@@ -4,7 +4,7 @@
 
 ## 总览
 
-当前共有 28 个 `SECURECHAT_*` 变量：
+当前共有 27 个 `SECURECHAT_*` 变量：
 
 ```text
 SECURECHAT_ALLOW_ROOT
@@ -20,7 +20,6 @@ SECURECHAT_IDENTITY_KEY_PASS
 SECURECHAT_LOG_FILE
 SECURECHAT_LOGS_MAX_BYTES
 SECURECHAT_PID_FILE
-SECURECHAT_PKI_REVOCATION_FILE
 SECURECHAT_PKI_TRUST_STORE
 SECURECHAT_PORT
 SECURECHAT_ROOM
@@ -105,7 +104,6 @@ PKI 是 Host/Client 必需配置。不配置完整变量时，Host/Client 启动
 | `SECURECHAT_IDENTITY_CERT_FILE` | 空 | 本机成员身份 PEM 证书链路径；Client 用它签名 `join_room`，Host 用它签名 `group_key`。 |
 | `SECURECHAT_IDENTITY_KEY_FILE` | 空 | 本机成员身份私钥 PEM 路径。 |
 | `SECURECHAT_IDENTITY_KEY_PASS` | 空 | 成员身份私钥密码；只有私钥加密时需要。 |
-| `SECURECHAT_PKI_REVOCATION_FILE` | 空 | 本地受信任的 SHA-256 证书指纹吊销列表，每行一个指纹。 |
 
 示例：
 
@@ -113,7 +111,6 @@ PKI 是 Host/Client 必需配置。不配置完整变量时，Host/Client 启动
 export SECURECHAT_PKI_TRUST_STORE=certs/pki/root-ca.pem
 export SECURECHAT_IDENTITY_CERT_FILE=certs/pki/member-chain.pem
 export SECURECHAT_IDENTITY_KEY_FILE=certs/pki/member-key.pem
-export SECURECHAT_PKI_REVOCATION_FILE=certs/pki/revoked.txt
 ```
 
 成员身份 PKI 的信令字段和验证流程见 `docs/pki-identity.md`。

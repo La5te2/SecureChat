@@ -1,4 +1,4 @@
-// Host session interface used by CLI, WinUI, and Web wrappers.
+// Host session interface used by CLI and WinUI wrappers.
 // Host creates rooms and coordinates group-key distribution as a chat member.
 #pragma once
 
@@ -124,7 +124,7 @@ private:
     void setCurrentHostActorMetadata(Message& msg);
     // Returns a client's display name, falling back to id.
     std::string displayNameForClient(const std::string& id);
-    // Resolves a command token to a client id.
+    // Resolves a visible Client name to a client id.
     std::string resolveClientId(const std::string& token);
     // Asks Server to remove a Client that failed Host-side identity checks.
     void rejectClient(const std::string& clientId, const std::string& reason);

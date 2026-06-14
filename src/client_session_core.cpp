@@ -248,9 +248,14 @@ void ClientSessionCore::sendLine(const std::string& line) {
 }
 
 void ClientSessionCore::sendLineTo(const std::string& target, const std::string& line) {
-    const auto targetId = resolveMemberId(trimCopy(target));
-    if (targetId.empty()) {
+    const auto targetName = trimCopy(target);
+    const auto targetId = resolveMemberId(targetName);
+    if (targetName.empty()) {
         sendLine(line);
+        return;
+    }
+    if (targetId.empty()) {
+        chatEmit(mCallbacks.onError, "Target member name not found: " + targetName);
         return;
     }
     if (targetId == mClientId) {
@@ -262,15 +267,15 @@ void ClientSessionCore::sendLineTo(const std::string& target, const std::string&
         return;
     }
     if (line.rfind("/image ", 0) == 0 || line.rfind("/img ", 0) == 0) {
-        sendImageTo(targetId, trimCopy(line.substr(line.find(' ') + 1)));
+        sendImageTo(targetName, trimCopy(line.substr(line.find(' ') + 1)));
         return;
     }
     if (line.rfind("/file ", 0) == 0) {
-        sendTextFileTo(targetId, trimCopy(line.substr(line.find(' ') + 1)));
+        sendTextFileTo(targetName, trimCopy(line.substr(line.find(' ') + 1)));
         return;
     }
     if (line.rfind("/voice ", 0) == 0) {
-        sendVoiceTo(targetId, trimCopy(line.substr(line.find(' ') + 1)));
+        sendVoiceTo(targetName, trimCopy(line.substr(line.find(' ') + 1)));
         return;
     }
 
@@ -302,17 +307,15 @@ Message ClientSessionCore::parseInput(const std::string& line) {
 }
 
 std::string ClientSessionCore::resolveMemberId(const std::string& token) {
-    // Private relay needs a concrete member id. Users may type either "host",
-    // a client id, or the display name from the latest room_members update.
+    // Private relay needs a concrete member id, but UI/CLI targets are display
+    // names only. This avoids collisions with fixed protocol ids such as "host".
     if (token.empty()) return "";
-    if (token == chat::protocol::HostActorId) return token;
 
     std::lock_guard<std::mutex> lock(mMembersMutex);
-    if (mMemberNamesById.find(token) != mMemberNamesById.end()) return token;
     for (const auto& [id, name] : mMemberNamesById) {
         if (name == token) return id;
     }
-    return token;
+    return "";
 }
 
 bool ClientSessionCore::rememberVerifiedMemberIdentity(
@@ -609,7 +612,12 @@ bool ClientSessionCore::sendImage(const std::string& filePath) {
 }
 
 bool ClientSessionCore::sendImageTo(const std::string& target, const std::string& filePath) {
-    const auto targetId = resolveMemberId(trimCopy(target));
+    const auto targetName = trimCopy(target);
+    const auto targetId = resolveMemberId(targetName);
+    if (!targetName.empty() && targetId.empty()) {
+        chatEmit(mCallbacks.onError, "Target member name not found: " + targetName);
+        return false;
+    }
     return sendAttachmentRelay(
         filePath,
         attachment::Kind::Image,
@@ -625,7 +633,12 @@ bool ClientSessionCore::sendTextFile(const std::string& filePath) {
 }
 
 bool ClientSessionCore::sendTextFileTo(const std::string& target, const std::string& filePath) {
-    const auto targetId = resolveMemberId(trimCopy(target));
+    const auto targetName = trimCopy(target);
+    const auto targetId = resolveMemberId(targetName);
+    if (!targetName.empty() && targetId.empty()) {
+        chatEmit(mCallbacks.onError, "Target member name not found: " + targetName);
+        return false;
+    }
     return sendAttachmentRelay(
         filePath,
         attachment::Kind::Text,
@@ -641,7 +654,12 @@ bool ClientSessionCore::sendVoice(const std::string& filePath) {
 }
 
 bool ClientSessionCore::sendVoiceTo(const std::string& target, const std::string& filePath) {
-    const auto targetId = resolveMemberId(trimCopy(target));
+    const auto targetName = trimCopy(target);
+    const auto targetId = resolveMemberId(targetName);
+    if (!targetName.empty() && targetId.empty()) {
+        chatEmit(mCallbacks.onError, "Target member name not found: " + targetName);
+        return false;
+    }
     return sendAttachmentRelay(
         filePath,
         attachment::Kind::Voice,
@@ -966,7 +984,7 @@ void ClientSessionCore::handleSignalingMessage(const std::string& s) {
             chatEmit(mCallbacks.onStatus, "Waiting for room group key");
         }
         else if (type == "room_members") {
-            // Keep latest member name/id map for resolving To: member input. If
+            // Keep latest member name/id map for resolving To: name input. If
             // Server includes signed member identities, verify them after leaving
             // the mutex so OpenSSL work does not block UI/member map reads.
             std::ostringstream members;
@@ -987,8 +1005,8 @@ void ClientSessionCore::handleSignalingMessage(const std::string& s) {
                             identityCandidates.push_back(member);
                         }
                     }
-                    // Emit "name / id" so UI clients can show a copyable target
-                    // id without parsing the raw signaling JSON.
+                    // Emit name/id so UI clients can keep internal PKI mapping
+                    // without parsing the raw signaling JSON.
                     if (!first) members << "; ";
                     members << username << " / " << id;
                     first = false;
@@ -1106,10 +1124,9 @@ void ClientSessionCore::handleSignalingMessage(const std::string& s) {
             auto msg = chat::secure_relay::decryptMessageWithGroupKey(j, mRoomToken, mGroupKey);
             const auto relayTargetId = msg.payload.value("relayTargetId", "");
             if (!relayTargetId.empty() && relayTargetId != mClientId) {
-                // Wrong-delivered private relay is rejected before the inner
-                // pairwise layer is opened. A malicious Server can copy frames,
-                // but it cannot make this Client accept another member's targetId.
-                chatEmit(mCallbacks.onError, "Dropped encrypted relay for another member");
+                // Wrong-delivered private relay is ignored before the inner
+                // pairwise layer is opened. Keep this silent so non-target
+                // members do not learn that a private message just happened.
                 return;
             }
             if (msg.type == chat::secure_relay::PairwisePrivateType) {

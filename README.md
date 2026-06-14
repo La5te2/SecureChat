@@ -1,17 +1,14 @@
 # SecureChat
 
-SecureChat 是一个双向通信实验项目，包含共享 C++ 核心、Windows WinUI 桌面端、命令行 Host/Client 工具，以及跨平台 ASP.NET Core Web UI。
+SecureChat 是一个双向通信实验项目，包含共享 C++ 核心、Windows WinUI 桌面端，以及命令行 Server/Host/Client 工具。
 
 ## 组件
 
 - `src/` 和 `include/`：C++ 信令服务器、WebSocket encrypted relay 数据通路、附件传输、CLI 和 native API。
 - `app/chat/`：Windows WinUI 桌面客户端。
-- `app/web/`：Windows/Linux 可用的 ASP.NET Core Web UI。
 - `build.bat`：Windows 上只构建 C++。
 - `build_win.bat`：Windows 上构建 C++ 和 WinUI。
-- `build_web.bat`：Windows 上构建 C++ 和 Web UI。
 - `build.sh`：Linux 上（云服务器）只构建 C++。
-- `build_web.sh`：Linux 上（非云服务器）构建 C++ 和 Web UI。
 
 说明：项目依赖 libdatachannel 的 WebSocket/WebSocketServer 实现；聊天数据通路是 WebSocket encrypted relay。
 
@@ -27,16 +24,15 @@ SecureChat 当前定位为课程/论文实验系统；公网运行时应按本�
 
 - 信令支持 `ws://` insecure mode 和 `wss://` secure mode。`ws://` 配置简单、便于本地或无证书场景使用，但传输不加密；真实公网部署应使用 `wss://`。
 - 文本消息和附件 metadata/chunk 已走应用层 AES-256-GCM encrypted relay：Server 只转发 opaque envelope，不能解密应用内容。
-- 普通 Client 的 `clientId` 是 SHA-256 派生的 opaque id，Server 日志不输出成员 display name，避免出现 `user_bob` 这类可读成员标识。
+- 普通 Client 的 `clientId` 在协议内部仍保持 `user_<name>` 形式，方便路由和排障；WinUI/CLI 私发目标只按成员显示名匹配，Server 日志会把成员 id 打成短哈希，避免日志直接出现 `user_bob` 这类可读成员标识。
 - Host/Client 使用贡献式 GKA v3：每个成员为当前 epoch 生成并签名随机贡献，Host 只负责发起 epoch、汇总贡献集合和关闭房间；最终 room group key 由成员本地从贡献集合导出。
 - 成员加入或离开时，Host 会发起新的 GKA epoch；离开成员不再收到后续贡献集合，因此不能导出新的 room group key。
 - 私发文本和私发附件使用双层加密：外层仍走 room group key 保护 relay envelope，但 Server 不再按目标定向投递，而是广播外层密文；内层使用发送者临时 X25519 和目标成员已验证 public key 派生 pairwise key。没有目标成员私钥的 Server、Host 或其他 Client 不能解内层私发内容。
-- PKI 身份认证是 Host/Client 必需配置：成员身份私钥会签名 `join_room` 绑定、GKA 贡献和 Host 的 `group_key`/group-state envelope；接收端验证证书链、吊销状态和签名后才接受成员公钥、贡献集合和新 group key。
+- PKI 身份认证是 Host/Client 必需配置：成员身份私钥会签名 `join_room` 绑定、GKA 贡献和 Host 的 `group_key`/group-state envelope；接收端验证证书链、有效期、Key Usage 和签名后才接受成员公钥、贡献集合和新 group key。
 - Host 可使用 `/silence`、`/unsilence`、`/evict` 或 `/ban` 管理当前房间成员。禁言只阻止目标 Client 发送 encrypted relay；驱逐会踢出成员，并在当前房间生命周期内封禁其已验证成员证书指纹。
 - 可选 Nginx TLS 反向代理模板已提供：Nginx 对公网提供 `wss://`，SecureChat Server 作为本机 WebSocket backend 运行。模板见 `deploy/securechat-nginx-tls.conf` 和 `deploy/securechat-server-backend.service`。
 - 房间密码能阻止普通误入，但不能替代 TLS、限速、防火墙和强认证。
 - 能限制安全组来源 IP 时，不建议长期使用 `0.0.0.0/0`。
-- 不建议把 Web UI 端口 `5188` 直接暴露到公网。
 - 长期运行时应使用普通用户，不要用 `root`；`start_server.sh` 默认拒绝 root 运行，临时诊断才可设置 `SECURECHAT_ALLOW_ROOT=1`。部署步骤见 `docs/deployment-hardening.md`，环境变量参考见 `docs/environment-variables.md`，成员身份 PKI 见 `docs/pki-identity.md`，敌手挑战设计见 `docs/adversary-challenges.md`。
 - `start_server.sh` 默认把 Server 作为 daemon 常驻，且默认不保存 `server.log`。日志可能包含 room id、用户名和连接状态，只在临时排障时显式启用。
 - `start_host.sh` 和 `start_client.sh` 默认前台运行；只有显式 `--daemon` 时才后台运行，并通过短生命周期本地管道传递房间密码。
@@ -59,15 +55,15 @@ docs/cpp-csharp-guide.md
 
 ### 1. 本地局域网功能测试
 
-1. 按 [Windows 构建](#windows-构建) 或 [Linux 构建](#linux-构建) 生成 `server`、`host`、`client`、WinUI 和 Web UI。
-2. 按 [PKI 身份认证](#pki-身份认证) 准备测试 Root CA、Host 证书、Client 证书。Server 不需要成员 PKI 环境变量；Host/Client/WinUI/Web 作为聊天成员必须配置成员证书、成员私钥和信任根。
+1. 按 [Windows 构建](#windows-构建) 或 [Linux 构建](#linux-构建) 生成 `server`、`host`、`client` 和 WinUI。
+2. 按 [PKI 身份认证](#pki-身份认证) 准备测试 Root CA、Host 证书、Client 证书。Server 不需要成员 PKI 环境变量；Host/Client/WinUI 作为聊天成员必须配置成员证书、成员私钥和信任根。
 3. 启动本地 Server，例如 `ws://127.0.0.1:25566`。具体命令见 [运行 Server、Host 和 Client](#运行-serverhost-和-client)。
-4. 用 Host 创建一个 room，再用 Client、第二个 WinUI 或 Web UI 加入同一 room。
-5. 确认成员列表显示 `name / id`，身份框为绿色；点击身份框应复制完整证书指纹。
-6. 测试群发文本、`To: member` 私发文本、图片、WAV 语音和普通文件附件。
-7. 测试附件预览策略：未知成员附件默认只显示“附件已接收”；手动标记为 Trusted 后，再按图片/音频自动预览开关预览。
-8. Host 输入 `/silence <成员名或id>` 后让目标发送文本或附件，应只收到“member is silenced”提示；`/unsilence <成员名或id>` 后恢复发送。
-9. Host 输入 `/evict <成员名或id>` 或 `/ban <成员名或id>`，目标 Client 被断开；同一成员证书在当前房间内再次加入会被拒绝。
+4. 用 Host 创建一个 room，再用 Client 或第二个 WinUI 加入同一 room。
+5. 确认成员列表只显示成员名，默认绿色；点击成员卡片复制完整证书指纹，右键成员卡片切换红色 Blocked/绿色 Allowed。
+6. 测试群发文本、`To: name` 私发文本、图片、WAV 语音和普通文件附件。私发目标只按成员名匹配；找不到目标时不会降级群发。
+7. 测试附件预览策略：绿色成员按“自动预览图片/自动加载音频”开关预览；红色 Blocked 成员只显示“附件已接收”，不自动预览。
+8. Host 输入 `/silence <成员名>` 后让目标发送文本或附件，应只收到“member is silenced”提示；`/unsilence <成员名>` 后恢复发送。
+9. Host 输入 `/evict <成员名>` 或 `/ban <成员名>`，目标 Client 被断开；同一成员证书在当前房间内再次加入会被拒绝。
 10. 让成员离开或断线，观察成员状态、Host 侧 GKA epoch 更新和后续消息可读性。
 
 预期结果：
@@ -109,7 +105,7 @@ ss -lntp | grep -E ':25566|:25567'
 ### 4. PKI 和 GKA 安全测试
 
 1. 不设置 `SECURECHAT_PKI_TRUST_STORE`、`SECURECHAT_IDENTITY_CERT_FILE` 或 `SECURECHAT_IDENTITY_KEY_FILE`，Host/Client 应直接启动失败。
-2. 用错误 Root CA、过期证书、非 `digitalSignature` 用途证书或吊销指纹测试加入流程。
+2. 用错误 Root CA、过期证书或非 `digitalSignature` 用途证书测试加入流程。
 3. 篡改 `join_room.publicKey`、`identity.signature` 或 `identity.nonce`，Host 应拒绝该 Client。
 4. 篡改 `gka_contribution.ciphertext`、`group_key.ciphertext`、`ephemeralPublicKey`、`tag` 或 Host identity，Host/Client 应拒绝对应贡献或 group state。
 5. 在普通 `ws://` 本地测试中抓包，确认中继信令可见但聊天内容、附件 metadata、GKA contribution secret 和 group key 不以明文出现。
@@ -124,12 +120,12 @@ ss -lntp | grep -E ':25566|:25567'
 更完整的敌手步骤见 `docs/adversary-challenges.md` 和 `docs/security-tests.md`。README 只保留最常用的验收入口：
 
 ```bash
-nmap -Pn -p 22,80,443,25566,25567,5188 chat.la5te2.online
+nmap -Pn -p 22,80,443,25566,25567 chat.la5te2.online
 ss -lntp
 sudo ufw status
 ```
 
-预期结果：公网只暴露必要端口；Web UI `5188` 不直接暴露；Nginx 反代后端 `25567` 只监听 `127.0.0.1`。
+预期结果：公网只暴露必要端口；Nginx 反代后端 `25567` 只监听 `127.0.0.1`。
 
 低速、限量 TCP 半连接测试只在自有服务器上执行：
 
@@ -315,7 +311,7 @@ json encryptGroupStateForMember(
 - Host 仍是群成员和房间生命周期管理者，因此可以读取群聊内容、驱逐成员或关闭房间；但当前 `K_G` 不再由 Host 单方随机生成，而是由签名贡献集合导出。
 - 恶意成员可以拒绝提交 GKA contribution，这属于可用性攻击；Host 会在 10 秒 GKA 超时后自动驱逐仍未提交贡献的成员，并只用剩余成员重新发起 epoch。
 - 私发是广播外层 relay 加内层 pairwise 加密：Host/Client 会在解密外层后检查 `relayTargetId`。内层 pairwise key 由发送者临时 X25519 private key 和目标成员已验证 public key 派生，不从 room group key 派生，因此其他成员即使持有当前 `K_G` 也不能解开私发正文或私发附件 chunk。
-- Server 仍可见 metadata，包括 room token、opaque 连接 id、ciphertext 长度和时序。普通 Client id 不再包含 display name，Server 日志也不输出 display name；但这仍会泄露活跃时间和大致内容大小。WSS、默认少日志和部署最小暴露只能降低风险，不能隐藏这些模式。
+- Server 仍可见 metadata，包括 room token、连接 id、ciphertext 长度和时序。成员本地显示的 `clientId` 仍可读，便于私发和排障；Server 日志会对成员 id 做短哈希脱敏，但这仍会泄露活跃时间和大致内容大小。WSS、默认少日志和部署最小暴露只能降低风险，不能隐藏这些模式。
 - 接收端维护 relay nonce/tag replay cache；Client 还检查递增的 group key epoch，拒绝重放或过期 `group_key`。这能阻止常见 Server 重放旧 envelope，但不能阻止 Server 直接断连或丢弃新消息。
 典型中间人攻击是公钥替换：
 
@@ -346,13 +342,7 @@ export SECURECHAT_IDENTITY_KEY_FILE=certs/pki/member-key.pem
 export SECURECHAT_IDENTITY_KEY_PASS='key-password'
 ```
 
-本地吊销列表可选：
-
-```bash
-export SECURECHAT_PKI_REVOCATION_FILE=certs/pki/revoked.txt
-```
-
-当前实现会验证证书链、有效期、Key Usage `digitalSignature`、本地 SHA-256 指纹吊销列表、签名算法一致性和签名内容。Server 只检查 `identity` 字段结构和大小，然后转发；证书验证发生在 Host/Client 本地。
+当前实现会验证证书链、有效期、Key Usage `digitalSignature`、签名算法一致性和签名内容。Server 只检查 `identity` 字段结构和大小，然后转发；证书验证发生在 Host/Client 本地。
 
 运行时：
 
@@ -362,7 +352,7 @@ export SECURECHAT_PKI_REVOCATION_FILE=certs/pki/revoked.txt
 - Host 在 `group_key`/group-state envelope 中签名 room、version、epoch、target、ephemeralPublicKey、ciphertext、tag 和 nonce。
 - Client 验证 Host 身份、解封装 group state、逐个验证贡献签名后才导出 room group key。
 - Server 的 `room_members.memberInfos` 会携带 Client 入房时提交的 signed identity；其他 Client 复验后才把成员 id/name 映射到 pairwise public key。
-- Host 会把已验证成员的证书 SHA-256 指纹和 signed identity 通过加密 `member_identity` 控制消息发给房间成员；接收端会拒绝同一 member id 上的公钥或指纹冲突。WinUI 成员列表用绿色身份框表示已验证成员，点击 `name / id` 框会复制完整证书指纹。
+- Host 会把已验证成员的证书 SHA-256 指纹和 signed identity 通过加密 `member_identity` 控制消息发给房间成员；接收端会拒绝同一 member id 上的公钥或指纹冲突。WinUI 成员列表只显示成员名，点击成员卡片会复制完整证书指纹，右键成员卡片可阻止/恢复该成员附件自动预览。
 
 详细字段见 `docs/pki-identity.md`。
 
@@ -393,7 +383,7 @@ sudo systemctl enable --now nginx
 - 服务器 TLS 证书：Nginx 使用，例如 `/opt/SecureChat/certs/fullchain.pem` 和 `/opt/SecureChat/certs/privkey.pem`；公网域名推荐用 Let's Encrypt/Certbot，方法见 `docs/certificate_methods.md`。
 - 应用层成员 PKI 证书：SecureChat Host/Client 用它签名和验签 `join_room`、GKA contribution 和 group state，变量是 `SECURECHAT_PKI_TRUST_STORE`、`SECURECHAT_IDENTITY_CERT_FILE`、`SECURECHAT_IDENTITY_KEY_FILE`。
 
-如果 Nginx 入口服务器证书是系统已信任 CA 签发，例如 Let's Encrypt，Host/Client 和 WinUI 直接使用 `wss://` URL 即可。自签名或私有 CA 场景下，CLI/Web 进程可通过 `SECURECHAT_TLS_CA_FILE` 指定服务器 CA；WinUI 不提供这个高级项，建议把 CA 导入操作系统信任存储或使用公网受信任证书。
+如果 Nginx 入口服务器证书是系统已信任 CA 签发，例如 Let's Encrypt，Host/Client 和 WinUI 直接使用 `wss://` URL 即可。自签名或私有 CA 场景下，CLI 进程可通过 `SECURECHAT_TLS_CA_FILE` 指定服务器 CA；WinUI 不提供这个高级项，建议把 CA 导入操作系统信任存储或使用公网受信任证书。
 
 Nginx 模板：
 
@@ -425,24 +415,6 @@ build.bat
 build_win.bat
 ```
 
-构建 Web UI：
-
-```bat
-build_web.bat
-```
-
-运行 Windows Web UI：
-
-```bat
-dotnet app\web\bin\Release\net10.0\win-x64\SecureChat.Web.dll --urls http://127.0.0.1:5188
-```
-
-浏览器打开：
-
-```text
-http://127.0.0.1:5188
-```
-
 ## Linux 环境配置
 
 安装基础工具：
@@ -458,20 +430,6 @@ sudo apt install -y build-essential ninja-build git curl wget zip unzip tar pkg-
 sudo snap install cmake --classic
 hash -r
 cmake --version
-```
-
-如果需要 Web UI，安装 .NET：
-
-```bash
-wget --no-check-certificate https://dot.net/v1/dotnet-install.sh -O dotnet-install.sh
-chmod +x dotnet-install.sh
-./dotnet-install.sh --channel 10.0 --install-dir "$HOME/.dotnet"
-
-echo 'export DOTNET_ROOT="$HOME/.dotnet"' >> ~/.bashrc
-echo 'export PATH="$HOME/.dotnet:$PATH"' >> ~/.bashrc
-source ~/.bashrc
-
-dotnet --info
 ```
 
 安装 vcpkg：
@@ -511,17 +469,9 @@ out/build/x64-linux-release/server
 out/build/x64-linux-release/libnative.so
 ```
 
-构建 Web UI：
-
-```bash
-cd ~/SecureChat
-chmod +x build_web.sh
-./build_web.sh
-```
-
 ## 启动手册
 
-Windows 和 Linux 的 Server、Host、Client、WinUI 和 Web UI 启动流程已经单独整理在：
+Windows 和 Linux 的 Server、Host、Client、WinUI 启动流程已经单独整理在：
 
 ```text
 docs/startup-guide.md
@@ -551,7 +501,7 @@ Linux 本机 WS 示例：
 ./out/build/x64-linux-release/client ws://127.0.0.1:25566 secure-room bob
 ```
 
-上面两组命令为了展示参数写在一起。实际运行时应打开三个终端：Server 一个，Host 一个，Client 一个。CLI Host/Client 终端还要先设置 `SECURECHAT_PKI_TRUST_STORE`、`SECURECHAT_IDENTITY_CERT_FILE`、`SECURECHAT_IDENTITY_KEY_FILE`。WinUI 可直接双击启动，并在设置面板选择成员 PKI 文件；Web UI 仍由承载它的 Web 进程环境变量提供成员 PKI。完整步骤见 `docs/startup-guide.md`。
+上面两组命令为了展示参数写在一起。实际运行时应打开三个终端：Server 一个，Host 一个，Client 一个。CLI Host/Client 终端还要先设置 `SECURECHAT_PKI_TRUST_STORE`、`SECURECHAT_IDENTITY_CERT_FILE`、`SECURECHAT_IDENTITY_KEY_FILE`。WinUI 可直接双击启动，并在设置面板选择成员 PKI 文件。完整步骤见 `docs/startup-guide.md`。
 
 ## 公网云服务器部署
 
@@ -604,7 +554,7 @@ Windows 没有对应的 start/stop 脚本，直接运行 `server.exe`、`host.ex
 
 文本消息和附件命令 `/image`、`/file`、`/voice` 都通过 Server relay 转发密文；附件 metadata 和二进制 chunk 会在发送端加密，接收端解密后写入本地附件缓存。聊天数据通路是 WebSocket encrypted relay。
 
-私发可使用 `/to <成员名或成员id> <消息>`，附件也可以写成 `/to <成员名或成员id> /image <path>`、`/to <成员名或成员id> /file <path>` 或 `/to <成员名或成员id> /voice <path>`。WinUI/Web 的发送栏也提供 `To: member` 输入框，留空表示群发，填写成员名或 id 表示私发。私发采用外层 room encrypted relay 广播加内层 pairwise encryption；如果目标成员的 PKI 绑定 public key 尚未通过 `room_members.memberInfos`、GKA group state 或 `member_identity` 验证，发送会失败，不会降级为普通 room group key 私发。
+私发可使用 `/to <成员名> <消息>`，附件也可以写成 `/to <成员名> /image <path>`、`/to <成员名> /file <path>` 或 `/to <成员名> /voice <path>`。WinUI 的发送栏也提供 `To: member` 输入框，留空表示群发，填写成员名表示私发。私发采用外层 room encrypted relay 广播加内层 pairwise encryption；如果目标成员的 PKI 绑定 public key 尚未通过 `room_members.memberInfos`、GKA group state 或 `member_identity` 验证，发送会失败，不会降级为普通 room group key 私发。
 
 Host 管理命令也从普通输入框发送，但不会进入聊天历史：
 
@@ -678,7 +628,7 @@ export SECURECHAT_LOGS_MAX_BYTES=1073741824
 
 附件当前已经实现应用层 E2EE relay：文件名、mime、metadata 和 binary chunk 都在 Host/Client 本地加密，Server 只转发 ciphertext。安全边界是：网络路径和不可信 Server 不应看到附件明文；接收成员本机会解密并缓存附件，因此成员设备、用户手动打开文件、图片/音频解码器和本地文件系统仍是信任边界。附件安全边界不覆盖杀毒扫描、沙箱打开、复杂文档格式隔离或恶意文件内容检测。
 
-WinUI 对附件预览采用当前房间内的身份状态策略：`Unknown` 表示没有 PKI 验证结果，`Verified` 表示成员证书和签名已通过 PKI 验证，`Trusted` 表示 `Verified` 成员又被本机用户允许自动预览，`Blocked` 表示本机用户阻止该成员附件自动预览。`Trusted` 和 `Blocked` 只保存在当前房间内存中，退出、断开或切换房间后清空。默认远端未知成员发来的图片和音频先显示“附件已接收”，只有用户点击“预览”才会触发本地解码器；Verified 成员默认仍不会自动预览，除非用户标记 Trusted，或关闭“仅信任成员自动预览”。设置面板提供“自动预览图片”“自动加载音频”“仅信任成员自动预览”三个开关。WinUI 预览前还会额外检查图片宽高、总像素数、文件大小，以及 WAV 采样率、声道数、时长和 chunk 结构。`MaxPreviewImageBytes`、`MaxPreviewAudioBytes` 只限制本地预览，协议传输大小仍统一由 `SECURECHAT_ATTACHMENT_MAX_BYTES` 控制。
+WinUI 对附件预览采用当前房间内的本机 UI 策略：成员默认 Allowed，成员卡片为绿色；右键成员卡片会切换为 Blocked，卡片变红，该成员图片/音频只显示“附件已接收”，不自动进入本地解码器；再次右键恢复 Allowed。Blocked 只保存在当前房间内存中，退出、断开或切换房间后清空。设置面板提供“自动预览图片”“自动加载音频”两个开关。WinUI 预览前还会额外检查图片宽高、总像素数、文件大小，以及 WAV 采样率、声道数、时长和 chunk 结构。`MaxPreviewImageBytes`、`MaxPreviewAudioBytes` 只限制本地预览，协议传输大小仍统一由 `SECURECHAT_ATTACHMENT_MAX_BYTES` 控制。
 
 因此建议总是从项目根目录启动：
 

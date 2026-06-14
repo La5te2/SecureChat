@@ -53,7 +53,7 @@
 
 ### Server 为什么不验证成员证书？
 
-因为 Server 的设计目标是不参与成员身份语义。Server 只做字段结构和大小检查，然后转发 identity。真正的证书链、签名、吊销验证在 Host/Client 本地完成。
+因为 Server 的设计目标是不参与成员身份语义。Server 只做字段结构和大小检查，然后转发 identity。真正的证书链、有效期、Key Usage 和签名验证在 Host/Client 本地完成。
 
 ### Host 和 Server 的区别是什么？
 
@@ -61,7 +61,7 @@ Server 是常驻监听和 relay 进程，不是聊天成员。Host 是第一个�
 
 ### C# 为什么用 DllImport？
 
-WinUI/Web 是界面层，不直接实现加密和协议。`DllImport` 让 C# 调用 `native.dll` 里的 C++ core，这样桌面 UI、Web UI、CLI 共用同一套通信逻辑。
+WinUI 是界面层，不直接实现加密和协议。`DllImport` 让 C# 调用 `native.dll` 里的 C++ core，这样桌面 UI 和 CLI 共用同一套通信逻辑。
 
 ### 为什么 UI 不能直接在 native 回调里改控件？
 

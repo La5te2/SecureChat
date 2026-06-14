@@ -15,10 +15,9 @@ SecureChat 主要分成三层：
    - `attachment_transfer`：附件大小、文件名、分片、接收缓存。
 2. C API bridge：
    - `native_api.h/.cpp` 把 C++ core 包成 C ABI 函数，例如 `chat_host_start`、`chat_send_line`。
-   - WinUI/Web 通过这些函数调用 C++。
+   - WinUI 通过这些函数调用 C++。
 3. C# UI：
    - `app/chat` 是 WinUI 桌面界面。
-   - `app/web` 是 Web UI。
    - UI 层主要收集输入、显示消息、调用 native API；加密和协议不在 C# 里实现。
 
 验收时如果被问“这个项目怎么跑起来”，按这个顺序答：Server 先监听，Host 通过 Server 创建房间，Client 加入房间，Host/Client 通过 PKI 验证身份并执行贡献式 GKA，之后群聊文本和附件用 group key 加密后由 Server relay；私发会在外层 relay 内再加一层 pairwise 密钥。
@@ -266,19 +265,15 @@ private sealed record VerifiedMemberInfo(string DisplayName, string Fingerprint,
 
 ```csharp
 private enum AttachmentMemberState {
-    Unknown,
-    Verified,
-    Trusted,
+    Allowed,
     Blocked
 }
 ```
 
 `enum` 是固定几个状态。这里表示附件预览策略：
 
-- `Unknown`：没有 PKI 验证结果。
-- `Verified`：PKI 验证通过。
-- `Trusted`：Verified 且用户在当前房间手动信任。
-- `Blocked`：用户在当前房间手动阻止。
+- `Allowed`：默认状态，成员卡片为绿色，可按图片/音频开关自动预览。
+- `Blocked`：用户在当前房间右键阻止，成员卡片为红色，不自动预览。
 
 ### 事件处理函数
 
@@ -338,7 +333,7 @@ internal static extern int chat_send_line(string line);
 
 验收回答：
 
-> UI 不直接实现协议和加密，而是通过 P/Invoke 调用 C++ native core。这样 WinUI/Web 可以共用同一套 C++ 通信逻辑。
+> UI 不直接实现协议和加密，而是通过 P/Invoke 调用 C++ native core。这样 WinUI 和 CLI 可以共用同一套 C++ 通信逻辑。
 
 ### DispatcherQueue
 
@@ -367,8 +362,7 @@ Dictionary<string, VerifiedMemberInfo> verifiedAttachmentMembers;
 项目里：
 
 - `participants`：成员列表显示快照。
-- `trustedAttachmentMembers`：当前房间手动信任成员。
-- `blockedAttachmentMembers`：当前房间手动阻止成员。
+- `blockedAttachmentMembers`：当前房间右键阻止自动预览的成员。
 - `verifiedAttachmentMembers`：PKI 验证通过的成员指纹信息。
 
 ## 老师问“这里的代码是什么意思”时怎么答
@@ -399,7 +393,7 @@ Dictionary<string, VerifiedMemberInfo> verifiedAttachmentMembers;
 
 - 新按钮/输入框：改 `MainWindow.xaml` 和 `MainWindow.xaml.cs`。
 - 新 UI 设置：改 `MainWindow.xaml.cs` 的配置保存/加载。
-- 新发送类型：改 WinUI/Web 调用、`native_api`、Host/Client session、attachment 或 secure relay。
+- 新发送类型：改 WinUI 调用、`native_api`、Host/Client session、attachment 或 secure relay。
 - 新信令字段：改 `common.hpp` 的 Message/协议限制、`signaling_server.cpp` 的 schema、Host/Client 处理。
 - 新加密策略：改 `secure_relay.cpp`，再同步 Host/Client 调用。
 - 新身份策略：改 `identity_pki.cpp`，再同步 UI 显示。
@@ -412,7 +406,7 @@ Dictionary<string, VerifiedMemberInfo> verifiedAttachmentMembers;
 
 ### Server 为什么不验证成员证书？
 
-因为 Server 的设计目标是不可信 relay。Server 只检查 `identity` 字段结构和大小，避免旧客户端或畸形消息进入协议；证书链、签名和吊销由 Host/Client 在本地验证。这样 Server 不需要参与成员身份语义。
+因为 Server 的设计目标是不可信 relay。Server 只检查 `identity` 字段结构和大小，避免旧客户端或畸形消息进入协议；证书链、有效期、Key Usage 和签名由 Host/Client 在本地验证。这样 Server 不需要参与成员身份语义。
 
 ### 为什么 Host 是第一个成员，不是 Server？
 
@@ -420,11 +414,11 @@ Server 是监听和 relay 进程，不发聊天消息、不持有 group key。Ho
 
 ### 为什么 UI 点击成员复制指纹？
 
-界面只显示 `name / id`，避免长指纹撑坏布局。完整指纹用于人工核对身份，所以点击成员框复制。
+界面只显示成员名，避免长 id 或指纹撑坏布局。完整指纹用于人工核对身份，所以点击成员框复制。
 
-### 为什么附件默认不自动预览未知成员？
+### 为什么成员可以右键 Block？
 
-图片和音频解码器也是攻击面。即使内容传输有加密，解密后的本地文件仍可能是恶意构造文件。所以 Unknown/Blocked 不自动预览，Verified 也默认需要用户手动标记 Trusted。
+图片和音频解码器也是攻击面。即使内容传输有加密，解密后的本地文件仍可能是恶意构造文件。WinUI 默认允许成员自动预览以简化演示；用户右键成员卡片后，该成员变为 Blocked，不再自动进入图片或音频解码器。
 
 ### 为什么普通文件不预览？
 
