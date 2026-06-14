@@ -766,4 +766,10 @@ export HTTP_PROXY=http://127.0.0.1:7897
 export HTTPS_PROXY=http://127.0.0.1:7897
 export http_proxy=http://127.0.0.1:7897
 export https_proxy=http://127.0.0.1:7897
+
+export HTTP_PROXY=http://127.0.0.1:10090
+export HTTPS_PROXY=http://127.0.0.1:10090
+export http_proxy=http://127.0.0.1:10090
+export https_proxy=http://127.0.0.1:10090
+
 ```
