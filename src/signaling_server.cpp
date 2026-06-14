@@ -995,6 +995,8 @@ void SignalingServer::broadcastRoomMembers(const std::string& roomId) {
     for (auto& ws : snapshot.recipients) {
         safeSend(ws, msg);
     }
+    std::cout << "[signal] room_members room " << roomId
+              << " recipients=" << snapshot.recipients.size() << std::endl;
 }
 
 void SignalingServer::rejectClient(const std::shared_ptr<rtc::WebSocket>& ws, const std::string& message) {
@@ -1150,11 +1152,20 @@ void SignalingServer::sendToClient(rtc::WebSocket* key, const json& data) {
 }
 
 void SignalingServer::safeSend(const std::shared_ptr<rtc::WebSocket>& ws, const json& data) {
-    if (!ws || ws->isClosed()) return;
+    const auto type = data.value("type", "");
+    if (!ws) {
+        std::cout << "[signal] skipped send type=" << type << " reason=null socket" << std::endl;
+        return;
+    }
+    if (ws->isClosed()) {
+        std::cout << "[signal] skipped send type=" << type << " reason=closed socket" << std::endl;
+        return;
+    }
 
     try {
         ws->send(data.dump());
     }
-    catch (const std::exception&) {
+    catch (const std::exception& e) {
+        std::cout << "[signal] send failed type=" << type << " error=" << e.what() << std::endl;
     }
 }
