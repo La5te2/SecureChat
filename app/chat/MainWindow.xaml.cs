@@ -1297,10 +1297,13 @@ public sealed partial class MainWindow : Window
     {
         sessionMode = mode;
         var isConnected = mode is SessionMode.Host or SessionMode.Join;
-        var hasNativeSession = mode != SessionMode.None;
         HostButton.IsEnabled = mode == SessionMode.None;
         JoinButton.IsEnabled = mode == SessionMode.None;
-        StopButton.IsEnabled = hasNativeSession;
+        // Stop is intentionally always available. Native chat_stop() is
+        // idempotent, and keeping the button clickable lets the user recover
+        // from connection errors where the UI mode is already None but a native
+        // session is still closing.
+        StopButton.IsEnabled = true;
         MessageBox.IsEnabled = isConnected;
         SendModeBox.IsEnabled = isConnected;
         PrivateTargetBox.IsEnabled = isConnected;

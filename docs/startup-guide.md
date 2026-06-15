@@ -63,7 +63,7 @@ $env:SECURECHAT_IDENTITY_KEY_FILE="certs\pki\alice-key.pem"
 窗口 1：启动 Server。
 
 ```powershell
-out\build\x64-release\server.exe 25566
+.\out\build\x64-release\server.exe 25566
 ```
 
 窗口 2：配置 Host 的 PKI，然后创建房间。
@@ -73,7 +73,7 @@ $env:SECURECHAT_PKI_TRUST_STORE="certs\pki\root-ca.pem"
 $env:SECURECHAT_IDENTITY_CERT_FILE="certs\pki\alice-chain.pem"
 $env:SECURECHAT_IDENTITY_KEY_FILE="certs\pki\alice-key.pem"
 
-out\build\x64-release\host.exe --server ws://127.0.0.1:25566 secure-room alice
+.\out\build\x64-release\host.exe --server ws://127.0.0.1:25566 secure-room alice
 ```
 
 看到 `Room password:` 后输入房间密码。输入时不会显示字符。
@@ -85,7 +85,7 @@ $env:SECURECHAT_PKI_TRUST_STORE="certs\pki\root-ca.pem"
 $env:SECURECHAT_IDENTITY_CERT_FILE="certs\pki\bob-chain.pem"
 $env:SECURECHAT_IDENTITY_KEY_FILE="certs\pki\bob-key.pem"
 
-out\build\x64-release\client.exe ws://127.0.0.1:25566 secure-room bob
+.\out\build\x64-release\client.exe ws://127.0.0.1:25566 secure-room bob
 ```
 
 看到 `Room password:` 后输入和 Host 相同的房间密码。
