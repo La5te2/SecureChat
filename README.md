@@ -4,13 +4,13 @@ SecureChat 是一个双向通信实验项目，包含共享 C++ 核心、Windows
 
 ## 组件
 
-- `src/` 和 `include/`：C++ 信令服务器、WebSocket encrypted relay 数据通路、附件传输、CLI 和 native API。
+- `src/` 和 `include/`：C++ 信令服务器、WebSocket 加密中继数据通路、附件传输、CLI 和 native API。
 - `app/chat/`：Windows WinUI 桌面客户端。
 - `build.bat`：Windows 上只构建 C++。
 - `build_win.bat`：Windows 上构建 C++ 和 WinUI。
 - `build.sh`：Linux 上（云服务器）只构建 C++。
 
-说明：项目依赖 libdatachannel 的 WebSocket/WebSocketServer 实现；聊天数据通路是 WebSocket encrypted relay。
+说明：项目依赖 libdatachannel 的 WebSocket/WebSocketServer 实现；聊天数据通路是 WebSocket 加密中继。
 
 ## 安全说明
 
@@ -18,18 +18,18 @@ SecureChat 当前定位为课程/论文实验系统；公网运行时应按本�
 
 公网 Server 常开时，主要暴露面是：
 
-- TCP `25566`：WebSocket 信令和 opaque encrypted relay 端口，用于创建/加入房间、维护成员状态，以及转发密文 envelope。
+- TCP `25566`：WebSocket 信令和不透明加密中继端口，用于创建/加入房间、维护成员状态，以及转发密文 envelope。
 
 需要明确：
 
 - 信令支持 `ws://` insecure mode 和 `wss://` secure mode。`ws://` 配置简单、便于本地或无证书场景使用，但传输不加密；真实公网部署应使用 `wss://`。
-- 文本消息和附件 metadata/chunk 已走应用层 AES-256-GCM encrypted relay：Server 只转发 opaque envelope，不能解密应用内容。
+- 文本消息和附件 metadata/chunk 已走应用层 AES-256-GCM 加密中继：Server 只转发 opaque envelope，不能解密应用内容。
 - 普通 Client 的 `clientId` 在协议内部仍保持 `user_<name>` 形式，方便路由和排障；WinUI/CLI 私发目标只按成员显示名匹配，Server 日志会把成员 id 打成短哈希，避免日志直接出现 `user_bob` 这类可读成员标识。
 - Host/Client 使用贡献式 GKA v3：每个成员为当前 epoch 生成并签名随机贡献，Host 只负责发起 epoch、汇总贡献集合和关闭房间；最终 room group key 由成员本地从贡献集合导出。
 - 成员加入或离开时，Host 会发起新的 GKA epoch；离开成员不再收到后续贡献集合，因此不能导出新的 room group key。
-- 私发文本和私发附件使用双层加密：外层仍走 room group key 保护 relay envelope，但 Server 不再按目标定向投递，而是广播外层密文；内层使用发送者临时 X25519 和目标成员已验证 public key 派生 pairwise key。没有目标成员私钥的 Server、Host 或其他 Client 不能解内层私发内容。
+- 私发文本和私发附件使用双层加密：外层仍走 room group key 保护中继 envelope，但 Server 广播外层密文；内层使用发送者临时 X25519 和目标成员已验证 public key 派生 pairwise key。没有目标成员私钥的 Server、Host 或其他 Client 不能解内层私发内容。
 - PKI 身份认证是 Host/Client 必需配置：成员身份私钥会签名 `join_room` 绑定、GKA 贡献和 Host 的 `group_key`/group-state envelope；接收端验证证书链、有效期、Key Usage 和签名后才接受成员公钥、贡献集合和新 group key。
-- Host 可使用 `/silence`、`/unsilence`、`/evict` 或 `/ban` 管理当前房间成员。禁言只阻止目标 Client 发送 encrypted relay；驱逐会踢出成员，并在当前房间生命周期内封禁其已验证成员证书指纹。
+- Host 可使用 `/silence`、`/unsilence`、`/evict` 或 `/ban` 管理当前房间成员。禁言只阻止目标 Client 发送加密中继消息；驱逐会踢出成员，并在当前房间生命周期内封禁其已验证成员证书指纹。
 - 可选 Nginx TLS 反向代理模板已提供：Nginx 对公网提供 `wss://`，SecureChat Server 作为本机 WebSocket backend 运行。模板见 `deploy/securechat-nginx-tls.conf` 和 `deploy/securechat-server-backend.service`。
 - 房间密码能阻止普通误入，但不能替代 TLS、限速、防火墙和强认证。
 - 能限制安全组来源 IP 时，不建议长期使用 `0.0.0.0/0`。
@@ -38,7 +38,7 @@ SecureChat 当前定位为课程/论文实验系统；公网运行时应按本�
 - `start_host.sh` 和 `start_client.sh` 默认前台运行；只有显式 `--daemon` 时才后台运行，并通过短生命周期本地管道传递房间密码。
 - 接收附件会写入 `logs/`，需要定期清理并避免直接信任未知文件。
 
-信令和 relay 数据通路安全细节见：
+信令和加密中继数据通路安全细节见：
 
 ```text
 docs/signaling-security.md
@@ -69,9 +69,9 @@ docs/cpp-csharp-guide.md
 预期结果：
 
 - 房间只能由 Host 创建，Client 只能加入已有房间。
-- Server 只保存房间注册、成员连接状态和密文 relay 状态，不显示聊天明文、附件名明文或附件 metadata 明文。
+- Server 只保存房间注册、成员连接状态和密文中继状态，不显示聊天明文、附件名明文或附件 metadata 明文。
 - Host/Client 缺少完整 PKI 配置时启动失败。
-- 私发消息通过广播外层 relay 送达房间成员；非目标成员解开外层后会因 `relayTargetId` 不匹配丢弃，且缺少内层 pairwise key，不能读取私发正文或附件 chunk。
+- 私发消息通过广播外层加密中继消息送达房间成员；非目标成员解开外层后会因 `relayTargetId` 不匹配丢弃，且缺少内层 pairwise key，不能读取私发正文或附件 chunk。
 
 ### 2. 公网 WSS 测试
 
@@ -168,7 +168,7 @@ K_AB = HKDF-SHA256(S_AB,
 C = AES-256-GCM.Enc(K_AB, nonce, plaintext, AAD_pairwise)
 ```
 
-外层 `encrypted_relay` 仍使用 `K_G`，用于统一走 Server relay；应用层 senderName、senderKind 和 private targetId 都在外层密文 payload 内。私发的内层 `pairwise_private` 才是真正保护私发正文或附件 chunk 的成员专属密钥。
+外层 `encrypted_relay` 仍使用 `K_G`，用于统一走 Server 加密中继；应用层 senderName、senderKind 和 private targetId 都在外层密文 payload 内。私发的内层 `pairwise_private` 才是真正保护私发正文或附件 chunk 的成员专属密钥。
 
 ### X25519 是什么
 
@@ -218,7 +218,7 @@ group_key_envelope = AES-256-GCM-Encrypt(
 )
 ```
 
-Client 收到 `group_key_envelope` 后用自己的 `c_priv` 和 envelope 中的 `ephemeralPublicKey` 重新派生 `K_W`，再解密得到 group state。Client 验证每个成员贡献签名后，用 `deriveGroupKeyFromContributions()` 导出 `K_G`。之后文本和附件都使用 `K_G` 做应用层 AES-256-GCM encrypted relay。
+Client 收到 `group_key_envelope` 后用自己的 `c_priv` 和 envelope 中的 `ephemeralPublicKey` 重新派生 `K_W`，再解密得到 group state。Client 验证每个成员贡献签名后，用 `deriveGroupKeyFromContributions()` 导出 `K_G`。之后文本和附件都使用 `K_G` 做应用层 AES-256-GCM 加密中继。
 
 代码入口：
 
@@ -226,7 +226,7 @@ Client 收到 `group_key_envelope` 后用自己的 `c_priv` 和 envelope 中的 
 - `src/client_session_core.cpp`：Client 收到 `gka_request` 后提交签名贡献，收到 `group_key` 后验证 group state 并导出 `K_G`。
 - `src/host_session_core.cpp`：Host 发起 GKA epoch，汇总签名贡献集合，并把 group state 单独封装给每个 Client。
 - `src/signaling_server.cpp`：Server 校验字段、转发 `gka_request`、`gka_contribution` 和 `group_key` envelope，但不生成、不解密、不理解 group key。
-- `src/secure_relay.cpp`：X25519 ECDH、HKDF-SHA256、AES-256-GCM 封装和 relay 加解密实现。
+- `src/secure_relay.cpp`：X25519 ECDH、HKDF-SHA256、AES-256-GCM 封装和中继消息加解密实现。
 
 关键实现片段：
 
@@ -310,9 +310,9 @@ json encryptGroupStateForMember(
 - 其他合法群成员会持有同一个 `K_G`，因此群聊内容对群成员本身不保密。恶意成员可以保存、截图或转发自己收到的明文。
 - Host 仍是群成员和房间生命周期管理者，因此可以读取群聊内容、驱逐成员或关闭房间；但当前 `K_G` 不再由 Host 单方随机生成，而是由签名贡献集合导出。
 - 恶意成员可以拒绝提交 GKA contribution，这属于可用性攻击；Host 会在 10 秒 GKA 超时后自动驱逐仍未提交贡献的成员，并只用剩余成员重新发起 epoch。
-- 私发是广播外层 relay 加内层 pairwise 加密：Host/Client 会在解密外层后检查 `relayTargetId`。内层 pairwise key 由发送者临时 X25519 private key 和目标成员已验证 public key 派生，不从 room group key 派生，因此其他成员即使持有当前 `K_G` 也不能解开私发正文或私发附件 chunk。
+- 私发是广播外层加密中继消息加内层 pairwise 加密：Host/Client 会在解密外层后检查 `relayTargetId`。内层 pairwise key 由发送者临时 X25519 private key 和目标成员已验证 public key 派生，不从 room group key 派生，因此其他成员即使持有当前 `K_G` 也不能解开私发正文或私发附件 chunk。
 - Server 仍可见 metadata，包括 room token、连接 id、ciphertext 长度和时序。成员本地显示的 `clientId` 仍可读，便于私发和排障；Server 日志会对成员 id 做短哈希脱敏，但这仍会泄露活跃时间和大致内容大小。WSS、默认少日志和部署最小暴露只能降低风险，不能隐藏这些模式。
-- 接收端维护 relay nonce/tag replay cache；Client 还检查递增的 group key epoch，拒绝重放或过期 `group_key`。这能阻止常见 Server 重放旧 envelope，但不能阻止 Server 直接断连或丢弃新消息。
+- 接收端维护中继 nonce/tag replay cache；Client 还检查递增的 group key epoch，拒绝重放或过期 `group_key`。这能阻止常见 Server 重放旧 envelope，但不能阻止 Server 直接断连或丢弃新消息。
 典型中间人攻击是公钥替换：
 
 ```text
@@ -483,7 +483,7 @@ docs/startup-guide.md
 2. 在 Host 进程配置成员 PKI，或者在 WinUI 设置面板选择成员 PKI 文件，然后创建房间。
 3. 在 Client 进程配置成员 PKI，或者在 WinUI 设置面板选择成员 PKI 文件，然后加入同一个房间。
 
-Server 不是群成员，不需要房间密码，也不配置成员 PKI。Host 和 Client 都是群成员，必须配置成员 PKI，并在启动后输入相同的房间密码。
+Server 负责监听、房间注册和密文中继，只配置监听和传输层相关参数。Host 和 Client 是可见群成员，必须配置成员 PKI，并在启动后输入相同的房间密码。
 
 Windows 本机 WS 示例：
 
@@ -530,15 +530,15 @@ Windows 测试公网 TCP：
 Test-NetConnection 124.70.71.65 -Port 25566
 ```
 
-聊天文本和附件的应用数据都走 TCP `25566` 上的 WebSocket encrypted relay，不需要 STUN 或 UDP 候选端口。
+聊天文本和附件的应用数据都走 TCP `25566` 上的 WebSocket 加密中继，不需要 STUN 或 UDP 候选端口。
 
 ## 运行 Server、Host 和 Client 的规则
 
-`server` 是常驻的不可信协调者，不是群成员，不会显示在成员列表中；Host 和 Client 都是需要输入房间密码的可见参与者。
+`server` 是常驻的不可信协调者，负责监听、房间注册和密文中继；成员列表展示的是需要输入房间密码的 Host 和 Client。
 
 同一个 Server 实例可以承载多个不同 `roomId`，但同一个 Server 实例内 `roomId` 不能重复；不同 Server 或不同端口上的房间名可以重复。一台机器可以启动多个 Server，只要监听端口不同。
 
-Host 创建 roomId 后成为第一个群成员和房间生命周期管理者。Client 加入时把临时 X25519 public key 发给 Server，Server 只转交给 Host；Host 发起 GKA epoch，当前成员提交签名随机贡献，Host 汇总后把 group state 用每个 Client 的 public key 单独封装后交给 Server 转发。Server 不生成群密钥，不解密 group state envelope，也不参与密钥协商语义。
+Host 创建 roomId 后成为第一个群成员和房间生命周期管理者。Client 加入时把临时 X25519 public key 发给 Server，Server 转交给 Host；Host 发起 GKA epoch，当前成员提交签名随机贡献，Host 汇总后把 group state 用每个 Client 的 public key 单独封装后交给 Server 转发。群密钥生成、group state 解封装和密钥协商语义由 Host/Client 本地完成。
 
 当前房间不做持久化：Host 关闭 WinUI、结束 Host 进程、Ctrl+C 或点击 stop session 都会关闭房间，Server 会通知 Clients 退出该 room，但 Server 进程本身继续监听。Client 主动离开、断线或被 Host 驱逐后，Host 会移除其 public key 并发起新的 GKA epoch；禁言不改变成员资格，因此不触发重密钥。
 
@@ -552,9 +552,9 @@ Linux 脚本规则：
 
 Windows 没有对应的 start/stop 脚本，直接运行 `server.exe`、`host.exe`、`client.exe`，或者启动 WinUI。详细命令见 `docs/startup-guide.md`。
 
-文本消息和附件命令 `/image`、`/file`、`/voice` 都通过 Server relay 转发密文；附件 metadata 和二进制 chunk 会在发送端加密，接收端解密后写入本地附件缓存。聊天数据通路是 WebSocket encrypted relay。
+文本消息和附件命令 `/image`、`/file`、`/voice` 都通过 Server 中继转发密文；附件 metadata 和二进制 chunk 会在发送端加密，接收端解密后写入本地附件缓存。聊天数据通路是 WebSocket 加密中继。
 
-私发可使用 `/to <成员名> <消息>`，附件也可以写成 `/to <成员名> /image <path>`、`/to <成员名> /file <path>` 或 `/to <成员名> /voice <path>`。WinUI 的发送栏也提供 `To: member` 输入框，留空表示群发，填写成员名表示私发。私发采用外层 room encrypted relay 广播加内层 pairwise encryption；如果目标成员的 PKI 绑定 public key 尚未通过 `room_members.memberInfos`、GKA group state 或 `member_identity` 验证，发送会失败，不会降级为普通 room group key 私发。
+私发可使用 `/to <成员名> <消息>`，附件也可以写成 `/to <成员名> /image <path>`、`/to <成员名> /file <path>` 或 `/to <成员名> /voice <path>`。WinUI 的发送栏也提供 `To: member` 输入框，留空表示群发，填写成员名表示私发。私发采用外层房间加密中继广播加内层 pairwise encryption；如果目标成员的 PKI 绑定 public key 尚未通过 `room_members.memberInfos`、GKA group state 或 `member_identity` 验证，发送会失败，不会降级为普通 room group key 私发。
 
 Host 管理命令也从普通输入框发送，但不会进入聊天历史：
 

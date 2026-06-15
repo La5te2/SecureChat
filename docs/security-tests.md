@@ -52,7 +52,7 @@ rg -n "PeerConnection|DataChannel|offer|answer|ice|ICE|STUN|TURN|legacy|compat|S
 
 ## 手动实验 1：WS 明文信令抓包
 
-目的：证明 `ws://` 模式下信令明文可见，但应用层消息和附件内容仍是 encrypted relay。
+目的：证明 `ws://` 模式下信令明文可见，但应用层消息和附件内容仍是加密中继消息。
 
 ### 步骤
 
@@ -327,7 +327,7 @@ grep -R "secret-message-123\|secret-plan.txt" server.log logs || true
 - 正确目标对重复 `encrypted_relay` 输出 `Dropped replayed encrypted relay`，不重复展示消息或附件；
 - Client 对旧 `group_key` 输出 stale/replayed 相关错误，不回滚到旧 room group key；
 - Host 输出 `Ignored unknown client_left`，成员列表不变，不触发新的 group key rotation。
-- Client 对非终止类 relay 错误只显示错误提示，不主动退出；入房失败和 `host disconnected` 仍是终止事件。
+- Client 对非终止类中继错误只显示错误提示，不主动退出；入房失败和 `host disconnected` 仍是终止事件。
 
 ## 手动实验 6：附件安全
 

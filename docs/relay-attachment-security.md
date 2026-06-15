@@ -7,12 +7,12 @@
 当前采用三个明确角色：
 
 ```text
-Server：只提供监听、房间注册、成员连接状态、密文 relay；不创建群密钥，不参与密钥协商语义，不是群成员
+Server：提供监听、房间注册、成员连接状态维护和密文中继
 Host：创建 roomId，是第一个群成员和房间生命周期管理者；发起 GKA epoch，汇总签名贡献集合；使用协商出的对称 group key 加解密群聊消息和附件，私发时使用 pairwise 内层密钥
 Client：加入 room，提交成员 public key，参与 GKA epoch；使用 group key 加解密群聊消息和附件，私发时用目标成员已验证 public key 派生 pairwise key
 ```
 
-`Server` 的职责是公网可达、房间注册、成员状态维护，以及 opaque encrypted relay 转发。`Host` 和 `Client` 才是可见聊天成员。这样论文中的安全边界更清楚：攻破或托管 `Server` 不应得到应用层文本、附件明文或 room group key。
+`Server` 的职责是公网可达、房间注册、成员状态维护，以及不透明加密中继转发。`Host` 和 `Client` 才是可见聊天成员。这样论文中的安全边界更清楚：攻破或托管 `Server` 不应得到应用层文本、附件明文或 room group key。
 
 同一个 Server 实例可以承载多个不同 room token，但同一个 Server 实例内 token 不能重复；不同 Server 或不同端口上的房间名可以重复。一台主机可以开多个 Server，只要监听端口不同。Host/Client 本地保留真实 roomId，Server 注册和路由只看到由 roomId 和房间密码派生出的 opaque room token。
 
@@ -21,10 +21,10 @@ Client：加入 room，提交成员 public key，参与 GKA epoch；使用 group
 文本和附件的数据路径是：
 
 ```text
-Host member  <->  Server opaque encrypted_relay  <->  Client member(s)
+Host member  <->  Server opaque encrypted_relay 加密中继  <->  Client member(s)
 ```
 
-Server 会校验 WebSocket 会话所属 room token 和 sender connection id，然后转发 envelope；Server 不解密 ciphertext。Host/Client 使用当前 room group key 解密群聊应用消息；私发在外层 group key relay 内还需要目标成员 pairwise private key。
+Server 会校验 WebSocket 会话所属 room token 和 sender connection id，然后转发 envelope；Server 不解密 ciphertext。Host/Client 使用当前 room group key 解密群聊应用消息；私发在外层 group key 中继消息内还需要目标成员 pairwise private key。
 
 已完成的数据通路分离：
 
@@ -77,7 +77,7 @@ Server 会校验 WebSocket 会话所属 room token 和 sender connection id，�
 
 应用层 senderName、senderKind 和 targetId 都在解密后的 Message payload 内。群发 payload 中 targetId 为空；私发 payload 中 targetId 为 `host` 或某个 clientId。Server 不读取 targetId，也不按私发目标定向转发 `encrypted_relay`。
 
-私发使用双层保护。外层仍是 room group key 的 `encrypted_relay`，用于统一走 Server broadcast relay；内层是 `pairwise_private`，由发送者临时 X25519 private key 和目标成员已验证 public key 派生 pairwise key 后加密原始文本或附件消息。Host/Client 先检查解密 payload 中的 `relayTargetId`，目标不是自己时丢弃；即使恶意 Server 把外层 envelope 复制给其他成员，其他成员也缺少内层 pairwise 私钥材料，不能解开私发正文或附件 chunk。
+私发使用双层保护。外层仍是 room group key 的 `encrypted_relay`，用于统一走 Server 广播加密中继；内层是 `pairwise_private`，由发送者临时 X25519 private key 和目标成员已验证 public key 派生 pairwise key 后加密原始文本或附件消息。Host/Client 先检查解密 payload 中的 `relayTargetId`，目标不是自己时丢弃；即使恶意 Server 把外层 envelope 复制给其他成员，其他成员也缺少内层 pairwise 私钥材料，不能解开私发正文或附件 chunk。
 
 Server 仍可见 room token、sender connection id、ciphertext 长度和转发时序。这些元数据不会暴露消息内容，但会暴露活跃时间和大致附件大小。
 
@@ -107,7 +107,7 @@ Host 发给单个 Client 的 group-state envelope：
 }
 ```
 
-`identity` 是 `join_room`、GKA contribution 和 `group_key` 的必需字段。Server 转发 `group_key` 前会用 WebSocket 会话状态覆盖 `roomId`、`senderId` 和 `targetId`，避免发送方伪造这些明文 metadata。转发 `encrypted_relay` 时，Server 只覆盖 `roomId` 和 `senderId`；senderName、senderKind、targetId 都留在加密 payload 内。如果发送方是被 Host 禁言的 Client，Server 在 relay 前拒绝该 envelope。AAD 不作为 JSON 字段传输，而是在 Host/Client 本地按固定格式重新构造。
+`identity` 是 `join_room`、GKA contribution 和 `group_key` 的必需字段。Server 转发 `group_key` 前会用 WebSocket 会话状态覆盖 `roomId`、`senderId` 和 `targetId`，避免发送方伪造这些明文 metadata。转发 `encrypted_relay` 时，Server 只覆盖 `roomId` 和 `senderId`；senderName、senderKind、targetId 都留在加密 payload 内。如果发送方是被 Host 禁言的 Client，Server 在中继前拒绝该 envelope。AAD 不作为 JSON 字段传输，而是在 Host/Client 本地按固定格式重新构造。
 
 `room_members.memberInfos` 会携带 Host/Client 入房时提交的 `publicKey` 和 signed `identity`。接收端不信任 Server 对成员公钥的陈述，而是重新验证 identity 签名后才把 member id/name 映射到 pairwise public key。GKA group state 中的 contribution identity 也会被复验。Host 的加密 `member_identity` 控制消息同样不能静默覆盖已有的已验证公钥或证书指纹。
 

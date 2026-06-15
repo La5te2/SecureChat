@@ -20,7 +20,7 @@ SecureChat 主要分成三层：
    - `app/chat` 是 WinUI 桌面界面。
    - UI 层主要收集输入、显示消息、调用 native API；加密和协议不在 C# 里实现。
 
-验收时如果被问“这个项目怎么跑起来”，按这个顺序答：Server 先监听，Host 通过 Server 创建房间，Client 加入房间，Host/Client 通过 PKI 验证身份并执行贡献式 GKA，之后群聊文本和附件用 group key 加密后由 Server relay；私发会在外层 relay 内再加一层 pairwise 密钥。
+验收时如果被问“这个项目怎么跑起来”，按这个顺序答：Server 先监听，Host 通过 Server 创建房间，Client 加入房间，Host/Client 通过 PKI 验证身份并执行贡献式 GKA，之后群聊文本和附件用 group key 加密后由 Server 加密中继转发；私发会在外层加密中继消息内再加一层 pairwise 密钥。
 
 ## C++ 语法速查
 
@@ -370,7 +370,7 @@ Dictionary<string, VerifiedMemberInfo> verifiedAttachmentMembers;
 使用三句话模板：
 
 1. 这段代码属于哪一层：
-   - Server / Host / Client / secure relay / PKI / attachment / WinUI。
+   - Server / Host / Client / secure relay（安全中继）/ PKI / attachment / WinUI。
 2. 输入和输出是什么：
    - 例如输入 WebSocket JSON，输出转发 envelope；输入文件路径，输出加密附件 chunk。
 3. 为什么这样做：
@@ -378,7 +378,7 @@ Dictionary<string, VerifiedMemberInfo> verifiedAttachmentMembers;
 
 例子：
 
-> 这段在 `relayEncrypted`，属于 Server relay 层。输入是成员发来的 encrypted_relay JSON，输出是广播给房间内其他成员的同一个密文 envelope。Server 会绑定 room token 和 senderId，但不会读取 senderName、targetId 或 ciphertext，这样 Server 只做中转，不参与聊天明文。
+> 这段在 `relayEncrypted`，属于 Server 加密中继层。输入是成员发来的 encrypted_relay JSON，输出是广播给房间内其他成员的同一个密文 envelope。Server 会绑定 room token 和 senderId，但不会读取 senderName、targetId 或 ciphertext，这样 Server 只做中转，不参与聊天明文。
 
 ## 老师要求现场加一个功能时怎么拆
 
@@ -410,7 +410,7 @@ Dictionary<string, VerifiedMemberInfo> verifiedAttachmentMembers;
 
 ### 为什么 Host 是第一个成员，不是 Server？
 
-Server 是监听和 relay 进程，不发聊天消息、不持有 group key。Host 是创建 room 的第一个聊天成员，负责管理房间生命周期并发起 GKA epoch。
+Server 是监听和中继进程，不发聊天消息、不持有 group key。Host 是创建 room 的第一个聊天成员，负责管理房间生命周期并发起 GKA epoch。
 
 ### 为什么 UI 点击成员复制指纹？
 

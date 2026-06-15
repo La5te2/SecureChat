@@ -2,7 +2,7 @@
 
 本文档用于设计和记录 SecureChat 的授权安全测试。所有测试都应只在本项目的本地环境、受控实验网络或自己控制的云服务器上进行，不用于攻击第三方系统。
 
-当前系统的安全主线是：Server 作为不可信协调者和密文 relay，Host/Client 使用贡献式 GKA v3 协商 room group key，并用 AES-256-GCM 加密群聊文本和附件；私发文本和附件在外层 room relay 内再使用 pairwise key。下面的挑战用于验证这个模型能保护什么、不能保护什么。
+当前系统的安全主线是：Server 作为不可信协调者和密文中继，Host/Client 使用贡献式 GKA v3 协商 room group key，并用 AES-256-GCM 加密群聊文本和附件；私发文本和附件在外层房间加密中继消息内再使用 pairwise key。下面的挑战用于验证这个模型能保护什么、不能保护什么。
 
 从安装、构建、启动到基础功能验收的主流程见 `README.md` 的“完整测试流程”；本文档只展开敌手挑战的攻击步骤、预期现象和留证方式。
 
@@ -19,7 +19,7 @@
 
 ### 安全目标映射
 
-- 机密性：文本和附件 metadata/chunk 使用应用层 AES-256-GCM encrypted relay；Server 只转发 ciphertext。
+- 机密性：文本和附件 metadata/chunk 使用应用层 AES-256-GCM 加密中继；Server 只转发 ciphertext。
 - 完整性：文本和附件 metadata/chunk 使用 AES-256-GCM AEAD；room/sender metadata 由 Server 绑定到 WebSocket 会话状态。
 - 密钥协商：GKA v3 使用临时 X25519 public key、成员签名 contribution、Host 发起 epoch、成员加入/离开后 key rotation。
 - 认证与访问控制：房间密码限制加入；WSS 提供 Server 证书校验；PKI 成员身份认证强制把成员证书签名绑定到 `join_room` public key 和 `group_key` envelope。
@@ -43,7 +43,7 @@
 - 局域网 Server + Host + Client 文本收发。
 - 局域网图片、语音、文本文件附件收发。
 - 公网 Server + 群主 Host + Client 加入。
-- Server encrypted relay 下文本和附件收发，确认 Server 日志不含应用明文。
+- Server 加密中继下文本和附件收发，确认 Server 日志不含应用明文。
 - 私发文本和私发附件只投递给目标成员，并且复制给其他成员也无法解开内层 pairwise 密文。
 - 恶意 Server 错投私发时，诚实接收端检查 `relayTargetId` 并丢弃。
 - Host `/silence` 后目标不能继续发送文本或附件，`/unsilence` 后恢复。
@@ -69,7 +69,7 @@
 
 ### 攻击目标
 
-验证 `ws://` 模式下，网络路径上的被动监听者可以看到信令明文和 relay metadata。
+验证 `ws://` 模式下，网络路径上的被动监听者可以看到信令明文和中继 metadata。
 
 ### 前置条件
 
@@ -118,7 +118,7 @@
 
 ### 攻击目标
 
-验证 `wss://` 能保护 Host/Client 到 Server 的 WebSocket 传输层，降低被动监听者读取信令和 relay metadata 的能力。
+验证 `wss://` 能保护 Host/Client 到 Server 的 WebSocket 传输层，降低被动监听者读取信令和中继 metadata 的能力。
 
 ### 前置条件
 
@@ -234,7 +234,7 @@ Host 验证 `join_room` identity 时会发现签名覆盖的 public key 与被�
    ```
 2. Host/Client 发送包含明显关键词的文本，例如 `secret-message-123`。
 3. 发送一个带明显文件名的附件，例如 `secret-plan.txt`。
-4. 检查 Server 日志和抓包中的 relay envelope。
+4. 检查 Server 日志和抓包中的中继 envelope。
 
 ### 预期现象
 
@@ -286,7 +286,7 @@ Server 不应可见：
 
 - AEAD 认证 tag 保护 ciphertext 完整性。
 - AAD 绑定 room 和 sender metadata。
-- Server 绑定 relay metadata 到当前 WebSocket 会话状态。
+- Server 绑定中继 metadata 到当前 WebSocket 会话状态。
 
 ### 验证证据
 
@@ -319,23 +319,23 @@ Server 不应可见：
 
 - Client C 解密外层后检查 `relayTargetId`，发现目标不是自己，丢弃并提示 dropped，不展示私信正文。
 - 即使攻击者修改客户端逻辑跳过外层目标检查，也缺少目标成员 pairwise private key，无法通过内层 AES-GCM 认证。
-- Client B 对重复 relay 输出 `Dropped replayed encrypted relay`，不重复展示消息或附件。
+- Client B 对重复中继消息输出 `Dropped replayed encrypted relay`，不重复展示消息或附件。
 - Client 对旧 `group_key` 输出 stale/replayed 相关错误，不回滚到旧 room group key。
 - Host 对未知 `client_left` 记录忽略，不移除现有成员，不触发新的 group key rotation。
-- Client 对非终止类 relay 错误只显示提示，不主动 shutdown。
+- Client 对非终止类中继错误只显示提示，不主动 shutdown。
 - 如果 Server 对真实已知成员伪造断线或直接断开连接，Host 仍会移除该成员并轮换 group key；这是可用性和状态层风险，不是内容机密性突破。
 
 ### 系统缓解
 
-- `relayTargetId` 来自 encrypted relay envelope 的 AEAD AAD 绑定 metadata，解密后进入 payload 供 Host/Client 检查。
+- `relayTargetId` 来自加密中继 envelope 的 AEAD AAD 绑定 metadata，解密后进入 payload 供 Host/Client 检查。
 - `pairwise_private` 内层密钥由发送者临时 X25519 和目标成员已验证 public key 派生，不从 room group key 派生。
-- Host/Client 维护 relay nonce/tag replay cache；Client 额外检查递增 group key epoch。
+- Host/Client 维护中继 nonce/tag replay cache；Client 额外检查递增 group key epoch。
 - Host 的 `removeClient` 只对已知成员执行移除和重密钥，未知 id 被忽略。
 
 ### 验证证据
 
 - Client C 没有显示私信正文的截图或日志。
-- 重放 relay / stale group_key 被拒绝的日志。
+- 重放中继消息 / stale group_key 被拒绝的日志。
 - Host 记录 `Ignored unknown client_left`，且成员列表和 group key rotation 日志无变化。
 - 原始未修改 envelope 在正确房间可正常解密。
 
@@ -566,7 +566,7 @@ Server 不应可见：
 
 ### 前置条件
 
-- Server 可观察连接和 relay envelope。
+- Server 可观察连接和中继 envelope。
 - Host/Client 正常通信。
 
 ### 实验步骤
@@ -624,7 +624,7 @@ Server 不应可见：
 
 - 公网聊天入口只应暴露 `25566`。
 - Nginx TLS 反向代理部署中，公网应看到 Nginx `25566`，不应直接访问后端 `25567`。
-- Server 进程不是群成员，端口扫描只能证明服务暴露面，不能读取聊天明文。
+- Server 进程承担监听和密文中继职责，端口扫描只能证明服务暴露面，不能读取聊天明文。
 
 ### 实验步骤：TCP 半连接
 

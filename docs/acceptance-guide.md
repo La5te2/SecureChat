@@ -24,7 +24,7 @@
 
 示例回答：
 
-> 这段代码在 `SignalingServer::relayEncrypted`，属于 Server relay 层。输入是成员发来的 encrypted_relay JSON，输出是广播给房间内其他成员的密文 envelope。Server 会根据 WebSocket 连接状态重写 room token 和 senderId，但不解密 ciphertext，也不读取应用层 targetId，所以它只做中转，不参与聊天明文。
+> 这段代码在 `SignalingServer::relayEncrypted`，属于 Server 加密中继层。输入是成员发来的 encrypted_relay JSON，输出是广播给房间内其他成员的密文 envelope。Server 会根据 WebSocket 连接状态重写 room token 和 senderId，但不解密 ciphertext，也不读取应用层 targetId，所以它只做中转，不参与聊天明文。
 
 ## 老师要求“现在加一个功能”
 
@@ -57,7 +57,7 @@
 
 ### Host 和 Server 的区别是什么？
 
-Server 是常驻监听和 relay 进程，不是聊天成员。Host 是第一个聊天成员和房间管理者，负责创建 roomId、验证成员身份、发起 GKA epoch 和关闭房间。
+Server 是常驻监听和中继进程，不是聊天成员。Host 是第一个聊天成员和房间管理者，负责创建 roomId、验证成员身份、发起 GKA epoch 和关闭房间。
 
 ### C# 为什么用 DllImport？
 

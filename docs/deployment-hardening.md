@@ -73,7 +73,7 @@ Nginx 可以作为公网 TLS 入口，SecureChat Server 只监听本机 backend�
 Host/Client -- WSS --> Nginx :25566 -- local WS --> SecureChat Server 127.0.0.1:25567
 ```
 
-这种模式下，Nginx 负责 TLS 终止和 WebSocket upgrade。SecureChat Server 只监听本机地址，继续负责房间注册、成员状态和 encrypted relay。
+这种模式下，Nginx 负责 TLS 终止和 WebSocket upgrade。SecureChat Server 只监听本机地址，继续负责房间注册、成员状态和加密中继。
 
 ### 安装 Nginx
 

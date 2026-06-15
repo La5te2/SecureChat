@@ -361,7 +361,7 @@ Host 验证 Client 身份后，会记录该成员证书的 SHA-256 指纹和 sub
 }
 ```
 
-该控制消息本身仍走应用层 encrypted relay。接收端只接受 relay metadata 显示发送者是 Host 的 `member_identity`，并会重新验证其中的 signed identity；如果同一个 member id 已经有已验证 public key 或证书指纹，后续冲突会被拒绝，不会静默覆盖。WinUI 成员列表只显示成员名，默认绿色；点击成员卡片会复制完整证书指纹；右键成员卡片会切换红色 Blocked/绿色 Allowed，用于控制该成员附件是否自动预览。
+该控制消息本身仍走应用层加密中继。接收端只接受中继 metadata 显示发送者是 Host 的 `member_identity`，并会重新验证其中的 signed identity；如果同一个 member id 已经有已验证 public key 或证书指纹，后续冲突会被拒绝，不会静默覆盖。WinUI 成员列表只显示成员名，默认绿色；点击成员卡片会复制完整证书指纹；右键成员卡片会切换红色 Blocked/绿色 Allowed，用于控制该成员附件是否自动预览。
 
 私发使用该已验证 member id/name 到 X25519 public key 的映射。用户输入的私发目标只按成员显示名匹配；发送端找不到目标成员的已验证 public key 时，私发会失败并提示错误，不会降级为仅 room group key 加密或群发。
 
@@ -375,7 +375,7 @@ Host 验证 Client 身份后，会记录该成员证书的 SHA-256 指纹和 sub
 - `src/identity_pki.cpp`：证书链验证、签名与验签。
 - `src/client_session_core.cpp`：Client 在 `join_room` 和 GKA contribution 中签名身份，收到 `group_key` 后验证 Host 身份、验证 contribution set，并复验 `room_members.memberInfos` / `member_identity` 中的成员 public key。
 - `src/host_session_core.cpp`：Host 验证 Client 身份，验证 GKA contribution，签名 `group_key`/group-state envelope，广播 verified member identity，并拒绝验证失败的 Client。
-- `src/signaling_server.cpp`：Server 只校验 `identity` 字段结构和大小，转发 opaque identity object；不验证证书，不参与密钥协商语义。
+- `src/signaling_server.cpp`：Server 校验 `identity` 字段结构和大小，转发 opaque identity object；证书验证和密钥协商语义由 Host/Client 处理。
 
 ## 与 WSS 的关系
 
@@ -395,7 +395,7 @@ WSS 和 PKI 解决的问题不同：
 - 证书 Key Usage 是否允许 `digitalSignature`；
 - `join_room`、GKA contribution 或 `group_key` 的 identity 签名是否正确。
 
-这些验证都发生在 Host/Client 本地。这样设计的原因是 Server 是不可信 relay，不能成为成员身份语义的信任根。Nginx 或 Server 使用的 TLS 服务器证书只证明传输入口身份，不是这里的应用层成员身份证书。
+这些验证都发生在 Host/Client 本地。这样设计的原因是 Server 是不可信中继，不能成为成员身份语义的信任根。Nginx 或 Server 使用的 TLS 服务器证书只证明传输入口身份，不是这里的应用层成员身份证书。
 
 ## 成员 id 命名
 
