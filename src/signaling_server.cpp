@@ -1,5 +1,5 @@
-// Signaling server implementation. It validates public signaling JSON, manages
-// room membership, and forwards encrypted relay/group-key envelopes.
+// 信令 Server 实现。它校验公开信令 JSON、管理房间成员关系，
+// 并转发加密中继和 group-key 封装。
 #include "signaling_server.hpp"
 
 #include "secure_relay.hpp"
@@ -26,11 +26,11 @@ constexpr std::size_t maxIdentityCertChainBytes = 128 * 1024;
 constexpr std::size_t maxIdentitySignatureBytes = 4096;
 constexpr auto maintenanceInterval = std::chrono::seconds(15);
 constexpr auto healthLogInterval = std::chrono::minutes(1);
-// Give terminal error frames enough time to leave the WebSocket before closing.
-// Public WSS/reverse-proxy paths can otherwise show Clients only a bare close.
+// 关闭前给终止性 error 帧留出足够时间离开 WebSocket。
+// 否则公网 WSS/反向代理路径可能让 Client 只看到裸 close。
 constexpr auto terminalErrorFlushDelay = std::chrono::milliseconds(600);
-// Printed at startup so deployment logs can prove which Server binary is
-// actually running after a git pull/rebuild/restart cycle.
+// 启动时打印该标记，使部署日志能确认 git pull/rebuild/restart 后
+// 实际运行的是哪个 Server 二进制。
 constexpr const char* serverBuildMarker = "securechat-server-20260614-ws-frame-budget";
 
 std::string envValue(const char* name) {
@@ -64,8 +64,8 @@ std::string sha256HexForLog(const std::string& value) {
 }
 
 std::string logActorId(const std::string& actorId) {
-    // Keep application-visible member ids readable in Host/Client UI, but avoid
-    // writing names such as "user_bob" into Server logs.
+    // Host/Client UI 内部仍可使用可读成员 id，
+    // 但 Server 日志避免写入 "user_bob" 这类名称。
     if (actorId.empty()) return "<empty>";
     if (actorId == chat::protocol::HostActorId) return "host";
     return "id#" + sha256HexForLog("securechat-log-actor:" + actorId).substr(0, 12);
@@ -111,9 +111,9 @@ std::string stringField(const json& data, const char* key, std::size_t maxLength
 }
 
 void closeAfterTerminalError(std::shared_ptr<rtc::WebSocket> ws) {
-    // rtc::WebSocket::send is asynchronous. Closing immediately after sending a
-    // terminal error can race the error frame and make Clients see only "closed".
-    // The socket is already removed from room state before this helper is used.
+    // rtc::WebSocket::send 是异步的。发送终止性错误后立即关闭，
+    // 可能与 error 帧竞态，导致 Client 只看到 "closed"。
+    // 调用该辅助函数前，socket 已经从房间状态中移除。
     if (!ws) return;
     std::thread([socket = std::move(ws)]() {
         std::this_thread::sleep_for(terminalErrorFlushDelay);
@@ -128,9 +128,8 @@ void closeAfterTerminalError(std::shared_ptr<rtc::WebSocket> ws) {
 }
 
 void identityField(const json& data, bool required) {
-    // Server checks only the shape and size of application identity data. The
-    // certificate chain and signature are verified by Host or Client after the
-    // Server forwards this opaque field.
+    // Server 只检查应用身份数据的形状和大小。
+    // 证书链和签名在 Server 转发该不透明字段后，由 Host 或 Client 验证。
     auto it = data.find("identity");
     if (it == data.end()) {
         if (required) throw std::runtime_error("missing identity");
@@ -151,8 +150,8 @@ void identityField(const json& data, bool required) {
 }
 
 void requireFieldsForType(const json& data, const std::string& type) {
-    // Signaling is public network input. Keep a per-type schema so unknown
-    // fields cannot become accidental protocol extensions or spoofing channels.
+    // 信令属于公开网络输入。按类型保持 schema，
+    // 避免未知字段变成意外协议扩展或伪造通道。
     if (type == "create_room") {
         if (!hasOnlyFields(data, {"type", "roomId", "username", "password", "publicKey", "identity"})) {
             throw std::runtime_error("create_room has unknown field");
@@ -302,17 +301,17 @@ void validateIncomingSignaling(const json& data) {
 SignalingServer::SignalingServer(uint16_t port) {
     rtc::WebSocketServer::Configuration config;
     config.port = port;
-    // Normal standalone mode listens on all interfaces. Reverse-proxy TLS
-    // deployments can set SECURECHAT_BIND_ADDRESS=127.0.0.1 so only Nginx/Caddy
-    // can reach the plain backend WebSocket.
+    // 普通独立模式监听所有网卡。
+    // 反向代理 TLS 部署可设置 SECURECHAT_BIND_ADDRESS=127.0.0.1，
+    // 使只有 Nginx/Caddy 能访问明文后端 WebSocket。
     const auto bindAddress = envValue("SECURECHAT_BIND_ADDRESS");
     config.bindAddress = bindAddress.empty() ? "0.0.0.0" : bindAddress;
-    // Do not let half-open or abandoned WebSocket handshakes keep the public
-    // signaling port alive but unable to accept fresh clients.
+    // 避免半开或被遗弃的 WebSocket 握手占住公网信令端口，
+    // 导致端口仍存活却无法接收新 Client。
     config.connectionTimeout = std::chrono::seconds(15);
-    // Match libdatachannel's WebSocket frame cap to our signaling JSON budget.
-    // PKI cert chains make room_members/group_key frames larger than tiny
-    // defaults on some builds, especially over public WSS.
+    // 将 libdatachannel 的 WebSocket 帧上限与信令 JSON 预算对齐。
+    // PKI 证书链会让 room_members/group_key 帧大于某些构建中的较小默认值，
+    // 公网 WSS 场景尤其明显。
     config.maxMessageSize = chat::protocol::MaxSignalingMessageBytes;
 
     if (envEnabled("SECURECHAT_SIGNALING_TLS")) {
@@ -322,8 +321,8 @@ SignalingServer::SignalingServer(uint16_t port) {
         if (certFile.empty() || keyFile.empty()) {
             throw std::runtime_error("SECURECHAT_TLS_CERT_FILE and SECURECHAT_TLS_KEY_FILE are required when SECURECHAT_SIGNALING_TLS=1");
         }
-        // WSS protects room passwords and relay envelopes in transit. It does
-        // not replace application-layer E2EE.
+        // WSS 保护传输中的房间密码和 relay 封装，
+        // 但不能替代应用层端到端加密。
         config.enableTls = true;
         config.certificatePemFile = certFile;
         config.keyPemFile = keyFile;
@@ -416,13 +415,13 @@ void SignalingServer::addClient(std::shared_ptr<rtc::WebSocket> ws) {
 
 void SignalingServer::handleMessage(rtc::WebSocket* key, const std::string& payload) {
     try {
-        // The signaling server accepts messages from every room participant.
-        // Reject oversized, deeply nested, or non-object JSON before routing.
+        // 信令 Server 接收来自每个房间参与者的消息。
+        // 路由前拒绝超大、过深嵌套或非对象 JSON。
         auto data = chat::protocol::parseJsonObjectWithBudget(
             payload,
             chat::protocol::MaxSignalingMessageBytes,
             "signaling message");
-        // Size/depth checks protect the parser; schema checks protect routing.
+        // 大小/深度检查保护解析器；schema 检查保护路由逻辑。
         validateIncomingSignaling(data);
         const std::string type = data.value("type", "");
 
@@ -466,8 +465,8 @@ void SignalingServer::handleMessage(rtc::WebSocket* key, const std::string& payl
 }
 
 void SignalingServer::handleCreateRoom(rtc::WebSocket* key, const json& data) {
-    // Room creation is a registration operation: Server records one unique room
-    // id and the Host socket. It does not create a group key or become a member.
+    // 房间创建是注册操作：Server 记录一个唯一 room id 和 Host socket。
+    // Server 不创建群密钥，也不成为成员。
     const std::string roomId = data.value("roomId", "");
     const std::string username = data.value("username", "host");
     const std::string password = data.value("password", "");
@@ -498,8 +497,8 @@ void SignalingServer::handleCreateRoom(rtc::WebSocket* key, const json& data) {
             roomAlreadyExists = true;
         }
         else {
-            // The local AuthService/RoomRegistry give stable ids and password
-            // checks for this process. They are not a chat plaintext database.
+            // 本地 AuthService/RoomRegistry 为当前进程提供稳定 id 和密码检查。
+            // 它们不是聊天明文数据库。
             account = mAuth.registerOrLogin(username, "local-account");
             mRegistry.createRoom(roomId, account, password);
             ws = client->ws;
@@ -516,8 +515,8 @@ void SignalingServer::handleCreateRoom(rtc::WebSocket* key, const json& data) {
     }
 
     if (roomAlreadyExists) {
-        // Send outside mMutex. WebSocket callbacks can be re-entrant, and a
-        // slow/broken peer must not block the signaling server's client map.
+        // 在 mMutex 外发送。WebSocket 回调可能重入，
+        // 慢速或故障对端不能阻塞信令 Server 的 Client 映射。
         safeSend(ws, {{"type", "error"}, {"message", "room already exists"}});
         return;
     }
@@ -534,9 +533,9 @@ void SignalingServer::handleCreateRoom(rtc::WebSocket* key, const json& data) {
 }
 
 void SignalingServer::handleJoinRoom(rtc::WebSocket* key, const json& data) {
-    // A Client publishes a temporary X25519 public key and application identity.
-    // Server stores the public key for routing, then forwards it to Host. Host
-    // decides whether the PKI signature really binds this key to the member.
+    // Client 发布临时 X25519 公钥和应用身份。
+    // Server 保存公钥用于路由，然后转发给 Host。
+    // Host 判断 PKI 签名是否真正把该密钥绑定到成员。
     const std::string roomId = data.value("roomId", "");
     const std::string username = data.value("username", "");
     const std::string password = data.value("password", "");
@@ -576,8 +575,8 @@ void SignalingServer::handleJoinRoom(rtc::WebSocket* key, const json& data) {
                 clientId = "__room_full__";
             }
             else {
-                // clientId is the Server-assigned stable routing id for this
-                // room. It is exposed to members so private relay can target it.
+                // clientId 是 Server 为该房间分配的稳定路由 id。
+                // 它会暴露给成员，使私发中继可以寻址。
                 account = mAuth.registerOrLogin(username, "local-account");
                 mRegistry.joinClient(roomId, account);
                 clientId = account.userId;
@@ -637,8 +636,7 @@ void SignalingServer::handleJoinRoom(rtc::WebSocket* key, const json& data) {
     };
     if (data.contains("identity")) joined["identity"] = data["identity"];
     if (hostIdentity.is_object()) joined["hostIdentity"] = hostIdentity;
-    // Echo the Client's own identity back so the Client sees the exact fields
-    // accepted by Server schema validation.
+    // 回显 Client 自己的 identity，使 Client 看到 Server schema 校验接受的精确字段。
     safeSend(clientWs, joined);
 
     json newClient = {
@@ -649,15 +647,15 @@ void SignalingServer::handleJoinRoom(rtc::WebSocket* key, const json& data) {
         {"publicKey", publicKey}
     };
     if (data.contains("identity")) newClient["identity"] = data["identity"];
-    // Host receives the identity object and public key, verifies the PKI binding,
-    // then either sends group_key or rejects the Client.
+    // Host 接收 identity 对象和公钥，验证 PKI 绑定，
+    // 然后发送 group_key 或拒绝该 Client。
     safeSend(hostWs, newClient);
     broadcastRoomMembers(roomId);
 }
 
 void SignalingServer::handleRejectClient(rtc::WebSocket* key, const json& data) {
-    // Only Host may reject a Client. This keeps Server from inventing identity
-    // failures while still letting Host enforce application-layer PKI.
+    // 只有 Host 可以拒绝 Client。这样 Server 无法编造身份失败，
+    // 同时 Host 仍能执行应用层 PKI 策略。
     std::shared_ptr<rtc::WebSocket> senderWs;
     std::shared_ptr<rtc::WebSocket> targetWs;
     std::string roomId;
@@ -711,9 +709,9 @@ void SignalingServer::handleRejectClient(rtc::WebSocket* key, const json& data) 
 }
 
 void SignalingServer::handleClientSilence(rtc::WebSocket* key, const json& data, bool silenced) {
-    // Silence is room-local send control requested by Host. It does not decrypt
-    // chat data and does not remove the member; it only blocks future encrypted
-    // relay sends from that Client connection.
+    // silence 是 Host 请求的房间本地发送控制。
+    // 它不解密聊天数据，也不移除成员；
+    // 只阻止该 Client 连接后续发送加密中继。
     std::shared_ptr<rtc::WebSocket> senderWs;
     std::shared_ptr<rtc::WebSocket> targetWs;
     std::string roomId;
@@ -765,8 +763,8 @@ void SignalingServer::handleClientSilence(rtc::WebSocket* key, const json& data,
 }
 
 void SignalingServer::relayGkaRequest(rtc::WebSocket* key, const json& data) {
-    // GKA request contains only an epoch number. Server may see the epoch, but
-    // it does not receive contribution secrets or derived group keys.
+    // GKA request 只包含 epoch 编号。
+    // Server 可以看到 epoch，但不会收到 contribution secret 或派生出的群密钥。
     std::shared_ptr<rtc::WebSocket> senderWs;
     std::vector<std::shared_ptr<rtc::WebSocket>> recipients;
     json envelope = data;
@@ -808,8 +806,8 @@ void SignalingServer::relayGkaRequest(rtc::WebSocket* key, const json& data) {
 }
 
 void SignalingServer::relayGkaContribution(rtc::WebSocket* key, const json& data) {
-    // Contributions are encrypted to Host. Server routes by the sender connection
-    // and forwards one opaque envelope to Host.
+    // 贡献值加密给 Host。
+    // Server 按发送者连接路由，并向 Host 转发一个不透明封装。
     std::shared_ptr<rtc::WebSocket> senderWs;
     std::shared_ptr<rtc::WebSocket> hostWs;
     json envelope = data;
@@ -856,8 +854,8 @@ void SignalingServer::relayGkaContribution(rtc::WebSocket* key, const json& data
 }
 
 void SignalingServer::relayGroupKey(rtc::WebSocket* key, const json& data) {
-    // group_key envelopes are Host-to-one-Client only. Server rewrites routing
-    // metadata from connection state and forwards the opaque envelope unchanged.
+    // group_key 封装仅用于 Host 到单个 Client。
+    // Server 根据连接状态重写路由元数据，并原样转发不透明封装。
     std::shared_ptr<rtc::WebSocket> senderWs;
     std::shared_ptr<rtc::WebSocket> targetWs;
     json envelope = data;
@@ -886,9 +884,9 @@ void SignalingServer::relayGroupKey(rtc::WebSocket* key, const json& data) {
                 else {
                     roomId = sender->roomId;
                     targetWs = target->second;
-                    // Bind clear routing fields to the actual Host connection.
-                    // Client later authenticates these fields through Host's
-                    // PKI signature and the AES-GCM AAD in secure_relay.
+                    // 将明文路由字段绑定到真实 Host 连接。
+                    // Client 随后通过 Host 的 PKI 签名和 secure_relay 中的
+                    // AES-GCM AAD 认证这些字段。
                     envelope["roomId"] = roomId;
                     envelope["senderId"] = chat::protocol::HostActorId;
                     envelope["targetId"] = targetId;
@@ -907,9 +905,8 @@ void SignalingServer::relayGroupKey(rtc::WebSocket* key, const json& data) {
 }
 
 void SignalingServer::relayEncrypted(rtc::WebSocket* key, const json& data) {
-    // Relays opaque application ciphertext. The Server validates membership
-    // and sender connection state, but never sees application sender names,
-    // private targets, or the room group key needed to decrypt.
+    // 中继不透明应用密文。Server 校验成员关系和发送者连接状态，
+    // 但看不到应用层发送者名称、私发目标或解密所需的房间群密钥。
     std::shared_ptr<rtc::WebSocket> senderWs;
     std::vector<std::shared_ptr<rtc::WebSocket>> recipients;
     json envelope = data;
@@ -937,9 +934,8 @@ void SignalingServer::relayEncrypted(rtc::WebSocket* key, const json& data) {
                     errorMessage = "member is silenced";
                 }
                 else {
-                    // Phase 12 metadata minimization: bind only the opaque room
-                    // token and sender connection id. Every encrypted relay is
-                    // broadcast; private targets are filtered after decryption.
+                    // 阶段 12 元数据最小化：只绑定不透明 room token 和发送者连接 id。
+                    // 每个加密中继都会广播；私发目标在解密后过滤。
                     envelope["roomId"] = roomId;
                     envelope["senderId"] = senderId;
                     if (room->host && room->host.get() != key) recipients.push_back(room->host);
@@ -966,9 +962,9 @@ void SignalingServer::relayEncrypted(rtc::WebSocket* key, const json& data) {
 }
 
 void SignalingServer::cleanup(rtc::WebSocket* key) {
-    // Cleanup runs for normal close and network errors. It removes only the
-    // disconnected socket's room indexes, then sends notifications outside the
-    // mutex to avoid blocking other clients.
+    // 普通关闭和网络错误都会执行清理。
+    // 它只移除断连 socket 的房间索引，然后在 mutex 外发送通知，
+    // 避免阻塞其他 Client。
     std::string roomId;
     std::string role;
     std::string clientId;
@@ -989,8 +985,8 @@ void SignalingServer::cleanup(rtc::WebSocket* key) {
         if (roomIt != mRooms.end()) {
             auto& room = roomIt->second;
             if (role == "host" && room.host.get() == key) {
-                // Current room lifetime policy: Host leaving closes the room.
-                // Persistent rooms would need stored membership and key recovery.
+                // 当前房间生命周期策略是 Host 离开即关闭房间。
+                // 持久房间需要保存成员关系并支持密钥恢复。
                 for (auto& item : room.clients) notifyClients.push_back(item.second);
                 mRooms.erase(roomIt);
                 mRegistry.closeRoom(roomId);
@@ -1025,8 +1021,8 @@ void SignalingServer::cleanup(rtc::WebSocket* key) {
 }
 
 void SignalingServer::broadcastRoomMembers(const std::string& roomId) {
-    // Sends both human-readable member labels and structured ids. UI displays
-    // names, while Host/Client keep ids internally for PKI and relay routing.
+    // 同时发送人类可读成员标签和结构化 id。
+    // UI 显示名称，Host/Client 在内部保留 id 用于 PKI 和中继路由。
     RoomSnapshot snapshot;
     {
         std::lock_guard<std::mutex> lock(mMutex);
@@ -1100,9 +1096,8 @@ void SignalingServer::maintenanceLoop() {
             }
         }
 
-        // Close callbacks should normally remove these entries. The periodic
-        // sweep is a fallback for missed callbacks or sockets that disappear
-        // without a clean close notification.
+        // close 回调通常应移除这些条目。
+        // 周期性清扫用于处理漏掉回调或未干净发送 close 通知就消失的 socket。
         for (auto* key : closedClients) {
             cleanup(key);
         }
@@ -1152,9 +1147,9 @@ SignalingServer::RoomSnapshot SignalingServer::roomSnapshotLocked(const std::str
             {"username", client.username},
             {"role", "client"}
         };
-        // memberInfos is not trusted by receivers. It carries the Client's
-        // original signed identity/publicKey so other Clients can verify the
-        // binding themselves and avoid trusting Host for pairwise key mapping.
+        // memberInfos 不被接收者直接信任。
+        // 它携带 Client 原始签名 identity/publicKey，
+        // 使其他 Client 能自行验证绑定，避免在双方私发密钥映射上信任 Host。
         if (!client.publicKey.empty() && client.identity.is_object()) {
             info["publicKey"] = client.publicKey;
             info["identity"] = client.identity;
@@ -1216,9 +1211,8 @@ void SignalingServer::safeSend(const std::shared_ptr<rtc::WebSocket>& ws, const 
         if (client) sendMutex = client->sendMutex;
     }
 
-    // Host actions and membership broadcasts can be produced by different
-    // signaling callback threads. Serialize writes to one socket so TLS/WSS
-    // frames are not interleaved under libdatachannel.
+    // Host 操作和成员关系广播可能由不同信令回调线程产生。
+    // 对同一个 socket 序列化写入，避免 libdatachannel 下的 TLS/WSS 帧交错。
     std::unique_lock<std::mutex> sendLock;
     if (sendMutex) {
         sendLock = std::unique_lock<std::mutex>(*sendMutex);
@@ -1229,8 +1223,8 @@ void SignalingServer::safeSend(const std::shared_ptr<rtc::WebSocket>& ws, const 
         if (type == "room_members" ||
             type == chat::secure_relay::GkaRequestType ||
             type == chat::secure_relay::GroupKeyType) {
-            // These frames carry PKI/member/GKA material and are the first
-            // messages likely to exceed tiny WebSocket defaults on stale builds.
+            // 这些帧携带 PKI/member/GKA 材料，
+            // 通常是旧构建中最先超过较小 WebSocket 默认上限的消息。
             std::cout << "[signal] sending type=" << type
                       << " bytes=" << serialized.size()
                       << " limit=" << chat::protocol::MaxSignalingMessageBytes

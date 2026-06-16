@@ -1,5 +1,4 @@
-// Attachment transport declarations: local file validation, safe receive paths,
-// binary chunk metadata, and receive-side cache state.
+// 附件传输声明：本地文件校验、安全接收路径、二进制分片元数据和接收端缓存状态。
 #pragma once
 
 #include "common.hpp"
@@ -13,21 +12,21 @@
 #include <unordered_map>
 #include <vector>
 
-// chat::attachment owns rule-neutral file transport primitives:
-// UTF-8 paths, transfer metadata, binary chunking, and receive-side cache state.
+// chat::attachment 管理与角色无关的文件传输基础能力：
+// UTF-8 路径、传输元数据、二进制分片和接收端缓存状态。
 namespace chat::attachment {
 
 inline constexpr std::size_t RelayChunkBytes = 192 * 1024;
 
-// Attachment kinds share the same transport path but keep separate limits and UI events.
+// 不同附件类型共用同一传输路径，但保留独立限制和 UI 事件类型。
 enum class Kind {
     Image,
     Text,
     Voice
 };
 
-// One staged incoming transfer, keyed by the encrypted relay sender actor id.
-// Session code consumes this snapshot to emit UI events.
+// 一个已暂存的入站传输，以加密中继发送者 actor id 为键。
+// 会话代码读取该快照后向 UI 发出事件。
 struct ReceiveSlot {
     Kind kind = Kind::Text;
     std::string transferId;
@@ -37,31 +36,31 @@ struct ReceiveSlot {
     std::size_t receivedSize = 0;
 };
 
-// Result of appending one decrypted binary relay chunk into a staged transfer.
+// 向暂存传输追加一个已解密二进制中继分片后的结果。
 struct ReceiveChunkResult {
     bool found = false;
     bool complete = false;
     ReceiveSlot slot;
 };
 
-// Tracks pending receive slots and persists their following binary chunks. It
-// deliberately knows nothing about Host/Client roles, forwarding, or UI rendering.
+// 跟踪待接收槽位，并把后续二进制分片写入磁盘。
+// 该类不感知 Host/Client 角色、转发逻辑或 UI 渲染。
 class ReceiveStore {
 public:
-    // Stages metadata from *_meta JSON and chooses the local cache path.
+    // 暂存 *_meta JSON 中的元数据，并选择本地缓存路径。
     ReceiveSlot stage(
         const std::string& key,
         Kind kind,
         const std::string& transferId,
         const std::string& name,
         std::size_t expectedSize);
-    // Reports whether a sender currently has binary payload expected.
+    // 返回某个发送者当前是否还有待接收的二进制载荷。
     bool has(const std::string& key) const;
-    // Returns the active transfer id for protocol marker validation.
+    // 返回活动传输 id，用于校验协议标记。
     std::string activeTransferId(const std::string& key) const;
-    // Drops any pending transfer for a disconnected sender.
+    // 清除断连发送者的所有待接收传输。
     void clear(const std::string& key);
-    // Appends one binary chunk to disk and clears the slot once the transfer is complete.
+    // 向磁盘追加一个二进制分片；传输完成后清空槽位。
     ReceiveChunkResult appendChunk(const std::string& key, const rtc::binary& data);
 
 private:
@@ -69,48 +68,48 @@ private:
     std::unordered_map<std::string, ReceiveSlot> mSlots;
 };
 
-// Builds a filesystem path from UTF-8 text supplied by the C API or protocol layer.
+// 根据 C API 或协议层传入的 UTF-8 文本构造文件系统路径。
 std::filesystem::path pathFromUtf8(const std::string& path);
 
-// Extracts the display file name from a Windows or POSIX path.
+// 从 Windows 或 POSIX 路径中提取用于显示的文件名。
 std::string fileNameFromPath(const std::string& path);
 
-// Removes path separators and other Windows-invalid characters from incoming metadata.
+// 从入站元数据中移除路径分隔符和 Windows 非法字符。
 std::string safeTransferName(const std::string& name, const std::string& fallback);
 
-// Returns the local receive cache directory for one attachment kind.
+// 返回某类附件对应的本地接收缓存目录。
 std::string receiveDirectory(Kind kind);
 
-// Adds a timestamp to avoid overwriting received attachments with the same name.
+// 添加时间戳，避免同名接收附件互相覆盖。
 std::string transferPath(const std::string& directory, const std::string& name, const std::string& fallback);
 
-// Returns the UI/native event kind that corresponds to one attachment kind.
+// 返回某类附件对应的 UI/native 事件类型。
 std::string eventKind(Kind kind);
 
-// Returns the maximum transfer size accepted for one attachment kind.
+// 返回某类附件允许的最大传输大小。
 std::size_t maxTransferBytes(Kind kind);
 
-// Extracts and validates the expected binary size from a *_meta payload.
+// 从 *_meta 载荷中提取并校验预期二进制大小。
 std::size_t expectedSizeFromMeta(const Message& msg, Kind kind);
 
-// Extracts and validates the transfer id from protocol payload.
+// 从协议载荷中提取并校验传输 id。
 std::string transferIdFromMessage(const Message& msg);
 
-// Creates a compact id for matching *_meta, *_binary marker, and cancel messages.
+// 创建紧凑 id，用于匹配 *_meta、*_binary 标记和取消消息。
 std::string makeTransferId();
 
-// Checks whether bytes on disk match the header required by the declared kind.
+// 检查磁盘文件字节是否符合声明类型要求的文件头。
 bool hasExpectedFileSignature(const std::string& filePath, Kind kind);
 
-// Reads a local attachment and enforces the per-kind transfer limit.
+// 读取本地附件，并执行对应类型的传输大小限制。
 std::vector<unsigned char> readFileBytes(const std::string& filePath, Kind kind);
 
-// Encodes binary data for an attachment chunk carried inside encrypted relay.
+// 为加密中继中的附件分片编码二进制数据。
 std::string base64Encode(const unsigned char* data, std::size_t size);
 std::string base64Encode(const std::vector<unsigned char>& data, std::size_t offset, std::size_t size);
 rtc::binary base64DecodeToRtcBytes(const std::string& value);
 
-// Builds the JSON metadata message that must be sent before binary payload chunks.
+// 构造必须先于二进制载荷分片发送的 JSON 元数据消息。
 Message makeBinaryMeta(
     const std::string& type,
     const std::string& from,
@@ -118,7 +117,7 @@ Message makeBinaryMeta(
     const std::string& mime,
     std::size_t size);
 
-// Builds a failure/cancel message so receivers can clear pending transfer UI/state.
+// 构造失败/取消消息，使接收端清理待传输 UI 和状态。
 Message makeTransferCancel(const std::string& from, const std::string& transferId, const std::string& reason);
 
-} // namespace chat::attachment
+} // 命名空间 chat::attachment

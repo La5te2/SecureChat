@@ -1,5 +1,5 @@
-// In-memory account helper used by SignalingServer to assign stable user ids.
-// This is process-local state, not a persistent user database.
+// SignalingServer 用来分配稳定 user id 的内存账户辅助模块。
+// 这是进程本地状态，不是持久化用户数据库。
 #pragma once
 
 #include <cstddef>
@@ -14,7 +14,7 @@ struct UserAccount {
 
 class AuthService {
 public:
-    // Creates a new in-memory account or validates an existing username/password.
+    // 创建新的内存账户，或验证已有用户名/密码。
     UserAccount registerOrLogin(const std::string& username, const std::string& password);
 
 private:

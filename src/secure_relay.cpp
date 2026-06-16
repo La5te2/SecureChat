@@ -1,5 +1,5 @@
-// Cryptographic relay implementation. It encrypts chat payloads with AES-GCM
-// and wraps room group keys with X25519 plus HKDF.
+// 密码学中继实现。它使用 AES-GCM 加密聊天载荷，
+// 并使用 X25519 与 HKDF 封装房间群密钥。
 #include "secure_relay.hpp"
 
 #include <openssl/evp.h>
@@ -76,8 +76,8 @@ std::vector<unsigned char> aadForEnvelope(
     const std::string& targetId) {
     (void)senderKind;
     (void)targetId;
-    // Phase 12 keeps only the room token and sender connection id in clear AAD.
-    // Application sender name, role, and private target live inside ciphertext.
+    // 阶段 12 只把 room token 和发送者连接 id 放入明文 AAD。
+    // 应用层发送者名称、角色和私发目标都位于密文中。
     const std::string aad = std::string("securechat-relay-v3|") + roomId + "|" + senderId;
     return {aad.begin(), aad.end()};
 }
@@ -86,8 +86,8 @@ std::vector<unsigned char> aadForGroupKey(
     const std::string& roomId,
     const std::string& targetId,
     std::uint64_t epoch) {
-    // The group key envelope is also bound to room and target id. Replaying a
-    // wrapped key to another member fails before the group key is accepted.
+    // group key 封装同样绑定房间和目标 id。
+    // 把封装后的密钥重放给其他成员会在接受群密钥前失败。
     const std::string aad = std::string("securechat-gka-v3|") +
         roomId + "|" +
         targetId + "|" +
@@ -100,9 +100,8 @@ std::vector<unsigned char> aadForGkaContribution(
     const std::string& senderId,
     std::uint64_t epoch,
     const std::string& ephemeralPublicKey) {
-    // Contributions are sent from a member to Host before the next K_G exists.
-    // AAD binds the opaque room token, sender connection id, epoch, and sender
-    // one-time X25519 public key to the ciphertext.
+    // 贡献值在下一把 K_G 产生前由成员发送给 Host。
+    // AAD 把不透明 room token、发送者连接 id、epoch 和发送者一次性 X25519 公钥绑定到密文。
     const std::string aad = std::string("securechat-gka-contribution-v1|") +
         roomId + "|" +
         senderId + "|" +
@@ -118,9 +117,8 @@ std::vector<unsigned char> aadForPairwise(
     const std::string& senderFingerprint,
     const std::string& targetFingerprint,
     const std::string& ephemeralPublicKey) {
-    // Pairwise AAD binds the inner ciphertext to both member identities and the
-    // sender's one-time X25519 public key. If Host/Server swaps a public key or
-    // member identity, AES-GCM authentication fails at the target.
+    // 双方私发 AAD 把内层密文绑定到双方成员身份和发送者一次性 X25519 公钥。
+    // 如果 Host/Server 替换公钥或成员身份，目标端的 AES-GCM 认证会失败。
     const std::string aad = std::string("securechat-pairwise-v1|") +
         roomId + "|" +
         senderId + "|" +
@@ -148,8 +146,8 @@ PkeyPtr rawX25519PublicKey(const std::vector<unsigned char>& publicKey) {
 std::vector<unsigned char> deriveX25519Secret(
     const std::vector<unsigned char>& privateKey,
     const std::vector<unsigned char>& peerPublicKey) {
-    // X25519 derives a shared secret from one local private key and one peer
-    // public key. The raw secret is never used directly as an AES key.
+    // X25519 由本地私钥和对端公钥导出共享秘密。
+    // 原始共享秘密不会直接作为 AES 密钥使用。
     auto local = rawX25519PrivateKey(privateKey);
     auto peer = rawX25519PublicKey(peerPublicKey);
     if (!local || !peer) throw std::runtime_error("X25519 key allocation failed");
@@ -177,8 +175,8 @@ std::array<unsigned char, keyBytes> hkdfSha256(
     const std::vector<unsigned char>& secret,
     const std::string& salt,
     const std::string& info) {
-    // HKDF turns the X25519 shared secret into a uniformly shaped AES-256 key
-    // and domain-separates this use from any future protocol use of X25519.
+    // HKDF 把 X25519 共享秘密转换成格式均匀的 AES-256 密钥，
+    // 并把该用途同未来可能出现的其他 X25519 协议用途做域分离。
     std::array<unsigned char, keyBytes> out{};
     PkeyCtxPtr ctx(EVP_PKEY_CTX_new_id(EVP_PKEY_HKDF, nullptr), EVP_PKEY_CTX_free);
     if (!ctx ||
@@ -208,8 +206,8 @@ json encryptWithAesGcm(
     const std::array<unsigned char, keyBytes>& key,
     const std::vector<unsigned char>& aad,
     json envelope) {
-    // AES-GCM provides confidentiality plus integrity. nonce/ciphertext/tag are
-    // stored in JSON as base64 so they can pass through WebSocket text frames.
+    // AES-GCM 同时提供机密性和完整性。
+    // nonce、ciphertext 和 tag 以 base64 写入 JSON，便于通过 WebSocket 文本帧传输。
     const auto nonce = randomBytes(nonceBytes);
     CipherCtx ctx(EVP_CIPHER_CTX_new(), EVP_CIPHER_CTX_free);
     if (!ctx) throw std::runtime_error("AES-GCM context allocation failed");
@@ -256,8 +254,8 @@ std::string decryptWithAesGcm(
     const json& envelope,
     const std::array<unsigned char, keyBytes>& key,
     const std::vector<unsigned char>& aad) {
-    // Decryption succeeds only if the tag matches the ciphertext and the exact
-    // same AAD. Tag failure means tampering, wrong key, or wrong routing metadata.
+    // 只有 tag 同 ciphertext 以及完全相同的 AAD 匹配时，解密才会成功。
+    // tag 校验失败表示发生篡改、密钥错误或路由元数据错误。
     const auto nonce = base64Decode(envelope.value("nonce", ""));
     const auto ciphertext = base64Decode(envelope.value("ciphertext", ""));
     const auto tag = base64Decode(envelope.value("tag", ""));
@@ -295,8 +293,8 @@ std::string decryptWithAesGcm(
 }
 
 MemberKeyPair generateMemberKeyPair() {
-    // Each Host/Client session creates a fresh temporary X25519 pair. The public
-    // half is signed by PKI before Host trusts it for GKA.
+    // 每个 Host/Client 会话都会创建新的临时 X25519 密钥对。
+    // 其中公钥部分经过 PKI 签名后，Host 才会把它用于 GKA。
     PkeyCtxPtr ctx(EVP_PKEY_CTX_new_id(EVP_PKEY_X25519, nullptr), EVP_PKEY_CTX_free);
     EVP_PKEY* raw = nullptr;
     if (!ctx || EVP_PKEY_keygen_init(ctx.get()) != 1 || EVP_PKEY_keygen(ctx.get(), &raw) != 1) {
@@ -328,8 +326,8 @@ std::string generateGroupContribution() {
 }
 
 std::string deriveRoomToken(const std::string& roomId, const std::string& roomPassword) {
-    // The Server only needs a stable room routing token. Hashing room id with the
-    // room password hides the human-readable room name from Server logs/state.
+    // Server 只需要稳定的房间路由 token。
+    // 对 room id 和房间密码做哈希后，人类可读房间名不会进入 Server 日志/状态。
     const std::string input = "securechat-room-token-v1|" + roomId + "|" + roomPassword;
     unsigned char digest[SHA256_DIGEST_LENGTH] = {};
     SHA256(
@@ -463,9 +461,8 @@ json encryptMessageWithGroupKey(
     const std::string& senderKind,
     const std::string& targetId,
     const std::vector<unsigned char>& groupKey) {
-    // senderName/senderKind/targetId are intentionally not emitted in clear
-    // anymore. The Server sees only a room token and sender connection id; the
-    // encrypted Message payload carries application identity and private target.
+    // senderName、senderKind 和 targetId 不以明文发出。
+    // Server 只看到 room token 和发送者连接 id；加密 Message 载荷携带应用身份和私发目标。
     const auto key = keyArrayFromVector(groupKey);
     const auto aad = aadForEnvelope(roomId, senderId, senderKind, targetId);
     return encryptWithAesGcm(message.toJson(), key, aad, {
@@ -482,9 +479,8 @@ Message decryptMessageWithGroupKey(
     const json& envelope,
     const std::string& roomId,
     const std::vector<unsigned char>& groupKey) {
-    // Rebuild the same AAD from envelope metadata before decrypting. In v3 this
-    // authenticates only the opaque room token and sender connection id; sender
-    // display name, role, and target live inside the encrypted Message payload.
+    // 解密前从 envelope 元数据重建同一份 AAD。
+    // 当前版本只认证不透明 room token 和发送者连接 id；发送者显示名、角色和目标位于加密 Message 载荷中。
     if (envelope.value("type", "") != EnvelopeType) {
         throw std::runtime_error("not an encrypted relay envelope");
     }
@@ -500,9 +496,8 @@ Message decryptMessageWithGroupKey(
     const auto targetId = envelope.value("targetId", "");
     const auto plaintext = decryptWithAesGcm(envelope, key, aadForEnvelope(roomId, senderId, senderKind, targetId));
     auto message = Message::fromJson(plaintext);
-    // Only senderId remains clear and authenticated by the relay envelope.
-    // Private target stays encrypted in message.payload["targetId"] so Server
-    // does not learn who a private message is for.
+    // 只有 senderId 由 relay envelope 明文携带并认证。
+    // 私发目标保存在加密的 message.payload["targetId"] 中，使 Server 无法知道私信发给谁。
     message.payload["relaySenderId"] = senderId;
     message.payload["relaySenderKind"] = message.payload.value("actorKind", "");
     message.payload["relaySenderName"] = message.payload.value("displayName", "");
@@ -526,8 +521,8 @@ Message encryptMessageForPairwise(
     const auto recipientPublic = base64Decode(targetPublicKey);
     auto ephemeral = generateMemberKeyPair();
     const auto secret = deriveX25519Secret(ephemeral.privateKey, recipientPublic);
-    // Do not derive pairwise keys from K_G: every room member has K_G. Use a new
-    // sender ephemeral X25519 secret with the target's PKI-bound public key.
+    // 不从 K_G 派生 pairwise 密钥，因为每个房间成员都拥有 K_G。
+    // 发送者使用新的临时 X25519 secret 和目标的 PKI 绑定公钥派生私发密钥。
     const auto pairwiseKey = hkdfSha256(
         secret,
         "securechat-pairwise-v1:" + roomId + "|" + senderId + "|" + targetId,
@@ -614,8 +609,8 @@ json encryptGroupStateForMember(
     const std::string& targetId,
     const std::string& targetPublicKey,
     std::uint64_t epoch) {
-    // Wraps the verified GKA contribution set to one Client using ephemeral
-    // X25519. The target derives K_G locally from this state after verification.
+    // 使用临时 X25519 为某个 Client 封装已验证的 GKA 贡献值集合。
+    // 目标成员验证后再从该状态本地派生 K_G。
     if (!groupState.is_object()) throw std::runtime_error("GKA group state must be an object");
     const auto recipientPublic = base64Decode(targetPublicKey);
     auto ephemeral = generateMemberKeyPair();
@@ -639,8 +634,8 @@ json decryptGroupStateForMember(
     const std::string& roomId,
     const std::string& clientId,
     const std::vector<unsigned char>& privateKey) {
-    // A Client only accepts GKA state addressed to its own server-assigned id.
-    // It still verifies contribution signatures before deriving K_G.
+    // Client 只接受发给自己 Server 分配 id 的 GKA 状态。
+    // 派生 K_G 前仍会验证 contribution 签名。
     if (envelope.value("type", "") != GroupKeyType ||
         envelope.value("version", 0) != 3 ||
         envelope.value("roomId", "") != roomId ||

@@ -23,6 +23,7 @@ app/**/uploads/
 todolist.md
 artifacts/
 docs/report/*
+dist/
 
 # Secret Certs
 certs/

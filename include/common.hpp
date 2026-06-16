@@ -1,5 +1,4 @@
-// Shared protocol types and JSON validation helpers used by Server, Host,
-// Client, and the native UI bridge.
+// Server、Host、Client 和 native UI 桥接层共用的协议类型与 JSON 校验工具。
 #pragma once
 
 #include <nlohmann/json.hpp>
@@ -14,15 +13,13 @@
 using json = nlohmann::json;
 
 namespace chat::protocol {
-// Actor ids/kinds are relay metadata. Host has a fixed id; Clients receive
-// per-room ids from SignalingServer.
+// actor id/kind 属于中继元数据。Host 使用固定 id；Client 从 SignalingServer 获取房间内 id。
 inline constexpr const char* HostActorId = "host";
 inline constexpr const char* ClientActorKind = "participant";
 inline constexpr const char* HostActorKind = "host";
 inline constexpr const char* ControlledActorKind = "controlled";
 
-// JSON budgets protect every network-facing parser before messages reach
-// Host/Client protocol handlers.
+// JSON 预算在消息进入 Host/Client 协议处理器之前保护所有面向网络的解析器。
 inline constexpr std::size_t MaxApplicationMessageBytes = 1024 * 1024;
 inline constexpr std::size_t MaxSignalingMessageBytes = 512 * 1024;
 inline constexpr std::size_t MaxJsonPayloadDepth = 16;
@@ -73,8 +70,7 @@ inline json parseJsonObjectWithBudget(
 }
 
 inline bool isAllowedMessageField(const std::string& key) {
-    // Keep application Message schema closed so decrypted payloads cannot grow
-    // accidental extension fields without explicit review.
+    // 保持应用层 Message schema 封闭，避免解密后载荷未经显式审查就扩展出意外字段。
     return key == "type" ||
         key == "from" ||
         key == "to" ||
@@ -112,7 +108,7 @@ inline void validateMessageSchema(const json& object) {
 }
 }
 
-// Application payload exchanged through encrypted relay and local handlers.
+// 通过加密中继和本地处理器交换的应用层载荷。
 struct Message {
     std::string type;
     std::string from;
@@ -126,7 +122,7 @@ struct Message {
     std::string data;
     json payload = json::object();
 
-    // Parses a protocol message from its JSON wire representation.
+    // 从 JSON 线格式解析协议消息。
     static Message fromJson(const std::string& jsonStr) {
         auto j = chat::protocol::parseJsonObjectWithBudget(
             jsonStr,
@@ -148,7 +144,7 @@ struct Message {
         return msg;
     }
 
-    // Serializes a protocol message to its compact JSON wire representation.
+    // 将协议消息序列化为紧凑 JSON 线格式。
     std::string toJson() const {
         json j;
         j["type"] = type;
@@ -166,7 +162,7 @@ struct Message {
     }
 };
 
-// Converts libdatachannel string or binary message variants to std::string.
+// 将 libdatachannel 的字符串或二进制消息变体转换为 std::string。
 inline std::string rtcMessageToString(const rtc::message_variant& data) {
     if (auto str = std::get_if<std::string>(&data)) return *str;
     if (auto bin = std::get_if<rtc::binary>(&data)) {
@@ -176,7 +172,7 @@ inline std::string rtcMessageToString(const rtc::message_variant& data) {
     return "";
 }
 
-// Builds a plain chat message.
+// 构造普通文本聊天消息。
 inline Message makeTextMessage(const std::string& from, const std::string& content) {
     Message msg;
     msg.type = "text";

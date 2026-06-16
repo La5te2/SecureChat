@@ -1,5 +1,4 @@
-// Room registry implementation. It stores only process-local room membership
-// and a hash of the room password used for equality checks.
+// 房间注册表实现。它只保存进程本地房间成员关系，以及用于等值检查的房间密码哈希。
 #include "room_registry.hpp"
 
 #include <openssl/crypto.h>
@@ -12,8 +11,7 @@
 
 namespace {
 std::array<unsigned char, 32> hashRoomPassword(const std::string& roomId, const std::string& password) {
-    // The registry only needs equality checks. Store a domain-separated digest
-    // instead of retaining the room password as a long-lived plaintext string.
+    // 注册表只需要等值检查。保存带域分离的摘要，而不是长期保留房间密码明文字符串。
     std::array<unsigned char, 32> digest{};
     using CtxPtr = std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)>;
     CtxPtr ctx(EVP_MD_CTX_new(), EVP_MD_CTX_free);
@@ -36,8 +34,7 @@ std::array<unsigned char, 32> hashRoomPassword(const std::string& roomId, const 
 }
 
 void RoomRegistry::createRoom(const std::string& roomId, const UserAccount& host, const std::string& password) {
-    // Called only after SignalingServer has confirmed the room id is not already
-    // active on this Server instance.
+    // 仅在 SignalingServer 确认该 room id 尚未在当前 Server 实例上活动后调用。
     if (roomId.empty()) throw std::runtime_error("missing roomId");
     if (mRooms.find(roomId) != mRooms.end()) throw std::runtime_error("room already exists");
 
@@ -53,7 +50,7 @@ bool RoomRegistry::passwordMatches(const std::string& roomId, const std::string&
     if (it == mRooms.end()) return false;
 
     const auto suppliedHash = hashRoomPassword(roomId, password);
-    // Use constant-time comparison so wrong guesses do not leak prefix matches.
+    // 使用常量时间比较，避免错误猜测泄露前缀匹配信息。
     return CRYPTO_memcmp(
         it->second.passwordHash.data(),
         suppliedHash.data(),
@@ -61,7 +58,7 @@ bool RoomRegistry::passwordMatches(const std::string& roomId, const std::string&
 }
 
 RoomMember RoomRegistry::joinClient(const std::string& roomId, const UserAccount& client) {
-    // Rejoining the same user id refreshes process-local membership state.
+    // 同一 user id 重新加入时刷新进程本地成员状态。
     auto& room = requireRoom(roomId);
     auto& member = room.clients[client.userId];
     member = RoomMember{client, RoomRole::Client};
@@ -69,12 +66,12 @@ RoomMember RoomRegistry::joinClient(const std::string& roomId, const UserAccount
 }
 
 void RoomRegistry::closeRoom(const std::string& roomId) {
-    // Closing a room drops all process-local membership state.
+    // 关闭房间会丢弃所有进程本地成员状态。
     mRooms.erase(roomId);
 }
 
 RoomRegistry::RoomState& RoomRegistry::requireRoom(const std::string& roomId) {
-    // Internal helper for operations that require an active room with a Host.
+    // 需要存在带 Host 的活动房间时使用的内部辅助函数。
     auto it = mRooms.find(roomId);
     if (it == mRooms.end() || !it->second.host) throw std::runtime_error("room not found");
     return it->second;

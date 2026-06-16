@@ -1,10 +1,10 @@
-// C ABI exported by native.dll. C# frontends call these functions through
-// P/Invoke without depending on C++ class layouts or name mangling.
+// native.dll 导出的 C ABI。C# 前端通过 P/Invoke 调用这些函数，
+// 不依赖 C++ 类布局或名称修饰。
 #pragma once
 
 #ifdef _WIN32
-// Windows exports native.dll symbols and uses stdcall so P/Invoke signatures
-// match the generated function names and stack cleanup rules.
+// Windows 导出 native.dll 符号并使用 stdcall，使 P/Invoke 签名匹配
+// 生成的函数名和栈清理规则。
 #define CHAT_API __declspec(dllexport)
 #define CHAT_CALL __stdcall
 #else
@@ -16,38 +16,38 @@
 extern "C" {
 #endif
 
-// Event callback contract: native code owns the char* memory only for the call.
-// Managed callers must copy strings before returning.
+// 事件回调约定：native 代码只在本次调用期间拥有 char* 内存。
+// 托管调用方必须在返回前复制字符串。
 typedef void(CHAT_CALL* chat_event_callback)(const char* kind, const char* message, void* user_data);
 
-// Registers the process-wide callback used by WinUI wrappers to receive native events.
+// 注册 WinUI 包装层接收 native 事件所用的进程级回调。
 CHAT_API void CHAT_CALL chat_set_event_callback(chat_event_callback callback, void* user_data);
-// Sets or clears a process environment variable inside the native runtime.
-// WinUI uses this before starting a session so std::getenv-based C++ code sees
-// settings entered in the GUI instead of requiring a PowerShell-launched process.
+// 在 native runtime 内设置或清除进程环境变量。
+// WinUI 在启动会话前调用它，使基于 std::getenv 的 C++ 代码能看到
+// GUI 中输入的设置，而不要求从 PowerShell 启动进程。
 CHAT_API int CHAT_CALL chat_set_environment_variable(const char* name, const char* value);
-// Starts a Host member and creates room_id on an already running Server.
+// 启动 Host 成员，并在已经运行的 Server 上创建 room_id。
 CHAT_API int CHAT_CALL chat_host_start(const char* server_url, const char* room_id, const char* username, const char* password);
-// Starts a Client member and joins room_id through an already running Server.
+// 启动 Client 成员，并通过已经运行的 Server 加入 room_id。
 CHAT_API int CHAT_CALL chat_join_start(const char* url, const char* room_id, const char* username, const char* password);
-// Sends a room text line or slash command through the active native session.
+// 通过活动 native 会话发送房间文本行或斜杠命令。
 CHAT_API int CHAT_CALL chat_send_line(const char* line);
-// Sends a text line or slash attachment command to one member display name.
+// 向某个成员显示名发送文本行或斜杠附件命令。
 CHAT_API int CHAT_CALL chat_send_line_to(const char* target, const char* line);
-// Broadcasts one attachment of the selected media kind.
+// 广播一个指定媒体类型的附件。
 CHAT_API int CHAT_CALL chat_send_image(const char* file_path);
-// Sends one image attachment to one member display name.
+// 向某个成员显示名发送一个图片附件。
 CHAT_API int CHAT_CALL chat_send_image_to(const char* target, const char* file_path);
 CHAT_API int CHAT_CALL chat_send_file(const char* file_path);
-// Sends one generic file attachment to one member display name.
+// 向某个成员显示名发送一个普通文件附件。
 CHAT_API int CHAT_CALL chat_send_file_to(const char* target, const char* file_path);
 CHAT_API int CHAT_CALL chat_send_voice(const char* file_path);
-// Sends one voice attachment to one member display name.
+// 向某个成员显示名发送一个语音附件。
 CHAT_API int CHAT_CALL chat_send_voice_to(const char* target, const char* file_path);
-// Stops the active Host or Client session without unloading the native module.
+// 停止活动 Host 或 Client 会话，但不卸载 native 模块。
 CHAT_API void CHAT_CALL chat_stop();
-// Final process-exit cleanup for GUI hosts. This clears callback state and
-// releases retired native objects that are intentionally kept after normal stop.
+// GUI 宿主进程退出时的最终清理。它清除回调状态，并释放普通 stop 后
+// 有意保留的已退役 native 对象。
 CHAT_API void CHAT_CALL chat_shutdown();
 
 #ifdef __cplusplus

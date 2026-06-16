@@ -1,5 +1,5 @@
-// Host session interface used by CLI and WinUI wrappers.
-// Host creates rooms and coordinates group-key distribution as a chat member.
+// CLI 和 WinUI 包装层使用的 Host 会话接口。
+// Host 作为聊天成员创建房间并协调群密钥分发。
 #pragma once
 
 #include "attachment_transfer.hpp"
@@ -24,12 +24,12 @@
 #include <unordered_set>
 #include <vector>
 
-// Chat member that creates a room and coordinates group-key distribution.
-// The Host is not the listening server; it connects to SignalingServer like
-// every other member, then signs/verifies PKI and manages the room group key.
+// 创建房间并协调群密钥分发的聊天成员。
+// Host 不是监听服务器；它和其他成员一样连接 SignalingServer，
+// 然后执行 PKI 签名/验签并管理房间群密钥。
 class HostSessionCore {
 public:
-    // Creates a host session bound to one signaling URL and room identity.
+    // 创建绑定到一个信令 URL 和房间身份的 Host 会话。
     HostSessionCore(
         std::string wsUrl,
         std::string roomId,
@@ -38,97 +38,97 @@ public:
         rtc::WebSocket::Configuration wsConfig = {});
     ~HostSessionCore();
 
-    // Installs UI or console callbacks used for events and logs.
+    // 安装用于事件和日志的 UI 或控制台回调。
     void setCallbacks(ChatCallbacks callbacks);
-    // Connects to the Server and creates the configured room.
+    // 连接 Server 并创建已配置房间。
     void start();
-    // Stops signaling and active room state.
+    // 停止信令连接和活动房间状态。
     void stop();
-    // Reports whether the host session has been asked to stop.
+    // 返回该 Host 会话是否已经被请求停止。
     bool shouldStop() const;
-    // Sends a text or attachment command from host to the room.
+    // 从 Host 向房间发送文本或附件命令。
     void sendLine(const std::string& line);
-    // Sends an image file through encrypted Server relay.
+    // 通过加密 Server 中继发送图片文件。
     bool sendImage(const std::string& filePath);
-    // Sends a text file through encrypted Server relay.
+    // 通过加密 Server 中继发送文本文件。
     bool sendTextFile(const std::string& filePath);
-    // Sends a recorded voice clip through encrypted Server relay.
+    // 通过加密 Server 中继发送录音语音片段。
     bool sendVoice(const std::string& filePath);
-    // Sends a text or attachment command to one member. Empty target means room broadcast.
+    // 向一个成员发送文本或附件命令；目标为空表示房间广播。
     void sendLineTo(const std::string& target, const std::string& line);
-    // Sends one attachment to one member. Empty target means room broadcast.
+    // 向一个成员发送附件；目标为空表示房间广播。
     bool sendImageTo(const std::string& target, const std::string& filePath);
     bool sendTextFileTo(const std::string& target, const std::string& filePath);
     bool sendVoiceTo(const std::string& target, const std::string& filePath);
 private:
-    // Handles Host-only room moderation commands typed into the normal input box.
+    // 处理普通输入框中输入的 Host 专用房间管理命令。
     bool handleHostCommand(const std::string& line);
-    // Moves raw WebSocket frames off the libdatachannel callback thread.
+    // 将原始 WebSocket 帧移出 libdatachannel 回调线程。
     void enqueueSignalingMessage(std::string payload);
-    // Serial protocol worker; does JSON parsing, PKI verification, and GKA work.
+    // 串行协议 worker，负责 JSON 解析、PKI 验证和 GKA 工作。
     void signalingWorkerLoop();
-    // Stops and joins the protocol worker without touching the WebSocket.
+    // 停止并 join 协议 worker，不直接操作 WebSocket。
     void stopSignalingWorker();
-    // Dispatches room creation, membership, encrypted relay, and error events.
+    // 分发房间创建、成员关系、加密中继和错误事件。
     void handleSignalingMessage(const std::string& s);
-    // Removes a client member and updates local room state.
+    // 移除一个 Client 成员并更新本地房间状态。
     void removeClient(const std::string& id);
-    // Toggles room-local send permission for one current Client.
+    // 切换当前某个 Client 在房间内的发送权限。
     void setClientSilenced(const std::string& target, bool silenced);
-    // Kicks one Client and bans its verified certificate fingerprint for this room.
+    // 踢出一个 Client，并在当前房间封禁其已验证证书指纹。
     void evictClient(const std::string& target);
-    // Sends one Host-authorized moderation frame to the Server.
+    // 向 Server 发送一个经 Host 授权的管理帧。
     void sendClientModeration(const std::string& type, const std::string& clientId);
-    // Sends one encrypted relay message through the untrusted Server.
+    // 通过不可信 Server 发送一条加密中继消息。
     bool sendRelayMessage(const Message& msg, const std::string& senderId, const std::string& senderName, const std::string& senderKind, const std::string& targetId);
-    // Wraps a private Message in a pairwise inner encryption layer for targetId.
+    // 为 targetId 把私发 Message 包装进双方私发内层加密。
     Message wrapPairwiseForTarget(const Message& msg, const std::string& targetId);
-    // Opens a pairwise-private wrapper addressed to Host.
+    // 打开一个发给 Host 的双方私发包装。
     Message decryptPairwiseFromClient(const Message& msg);
-    // Remembers relay nonce/tag pairs so replayed Server frames are ignored.
+    // 记录中继 nonce/tag 对，使 Server 重放帧被忽略。
     bool rememberRelayEnvelope(const json& envelope);
-    // Wraps one committed GKA state for a member and asks Server to relay it.
+    // 为某个成员封装已提交的 GKA 状态，并请求 Server 中继。
     bool sendGroupStateToClient(
         const std::string& clientId,
         const std::string& clientPublicKey,
         const json& groupState,
         std::uint64_t epoch);
-    // Starts a fresh contributory GKA epoch after membership changes.
+    // 成员关系变化后启动新的贡献式 GKA epoch。
     void rotateGroupKey(const std::string& reason);
-    // Requests Client contributions for the current pending epoch.
+    // 请求 Client 为当前待处理 epoch 提交 contribution。
     void sendGkaRequestToClients();
-    // Starts/stops the Host-side watchdog for members that stall a GKA epoch.
+    // 启动/停止 Host 侧看门狗，用于处理拖延 GKA epoch 的成员。
     void startGkaTimeoutWorker();
     void stopGkaTimeoutWorker();
-    // Waits for pending GKA deadlines and evicts members that never contributed.
+    // 等待待处理 GKA 截止时间，并驱逐一直未贡献的成员。
     void gkaTimeoutLoop();
-    // Removes all still-missing contributors for epoch and restarts GKA once.
+    // 移除该 epoch 中仍缺失的所有贡献者，并重新启动一次 GKA。
     void evictGkaTimeoutMembers(std::uint64_t epoch);
-    // Builds and signs this Host member's contribution for one epoch.
+    // 为一个 epoch 构造并签名本 Host 成员的 contribution。
     json makeLocalGkaContribution(std::uint64_t epoch) const;
-    // Verifies one contribution and stores it in the pending epoch map.
+    // 验证一个 contribution，并存入待处理 epoch 映射。
     bool rememberGkaContribution(const json& contribution, const std::string& expectedMemberId);
-    // Commits K_G once every current member has supplied a verified contribution.
+    // 当所有当前成员都提交已验证 contribution 后提交 \(K_G\)。
     void tryCommitGkaEpoch();
-    // Sends one local attachment as encrypted metadata followed by encrypted chunks.
+    // 以加密元数据加后续加密分片的形式发送一个本地附件。
     bool sendAttachmentRelay(const std::string& filePath, chat::attachment::Kind kind, const std::string& metaType, const std::string& binaryType, const std::string& mime, const std::string& targetId);
-    // Handles one decrypted encrypted_relay application message.
+    // 处理一条已解密的 encrypted_relay 应用消息。
     void handleRelayMessage(const Message& msg);
-    // Reassembles one encrypted attachment chunk into the local cache.
+    // 将一个加密附件分片重组成本地缓存文件。
     void handleRelayBinaryChunk(const std::string& senderKey, const Message& msg);
-    // Returns the active host chat actor label.
+    // 返回当前活动 Host 聊天 actor 标签。
     std::string currentHostActorName();
-    // Adds stable actor identity metadata while keeping from/displayName human-readable.
+    // 添加稳定 actor 身份元数据，同时保持 from/displayName 可读。
     void setActorMetadata(Message& msg, const std::string& actorId, const std::string& actorKind, const std::string& displayName);
-    // Marks a host-originated chat/media message with actor metadata.
+    // 为 Host 发出的聊天/媒体消息标记 actor 元数据。
     void setCurrentHostActorMetadata(Message& msg);
-    // Returns a client's display name, falling back to id.
+    // 返回 Client 显示名；缺失时回退到 id。
     std::string displayNameForClient(const std::string& id);
-    // Resolves a visible Client name to a client id.
+    // 将可见 Client 名解析为 client id。
     std::string resolveClientId(const std::string& token);
-    // Asks Server to remove a Client that failed Host-side identity checks.
+    // 请求 Server 移除未通过 Host 侧身份检查的 Client。
     void rejectClient(const std::string& clientId, const std::string& reason);
-    // Announces Host-verified member certificate fingerprints through encrypted relay.
+    // 通过加密中继广播 Host 已验证的成员证书指纹。
     void announceVerifiedMember(
         const std::string& memberId,
         const std::string& displayName,
@@ -141,8 +141,8 @@ private:
 private:
     std::string mWsUrl;
     std::string mRoomId;
-    // Opaque routing token derived from roomId + room password. Server sees this
-    // token as roomId; the human-readable room id stays local for UI and PKI.
+    // 由 roomId + 房间密码派生的不透明路由 token。Server 把该 token 当作 roomId；
+    // 人类可读 room id 只留在本地 UI 和 PKI 语义中。
     std::string mRoomToken;
     std::string mUsername;
     std::string mPassword;
@@ -150,8 +150,8 @@ private:
     ChatCallbacks mCallbacks;
     std::shared_ptr<rtc::WebSocket> mWs;
     std::atomic_bool mStopped = false;
-    // Set after room_created is accepted by Server. WinUI uses close events
-    // before this point as connection/admission failures, not active sessions.
+    // 在 Server 接受 room_created 后置位。WinUI 把此前的 close 事件视为
+    // 连接/准入失败，而不是活动会话中断。
     std::atomic_bool mRoomCreated = false;
     std::mutex mClientsMutex;
     std::unordered_map<std::string, std::string> mClientNames;
@@ -171,9 +171,8 @@ private:
     chat::secure_relay::MemberKeyPair mMemberKeys;
     chat::identity_pki::IdentityContext mIdentity;
     std::vector<unsigned char> mGroupKey;
-    // Pending GKA state is touched by both WebSocket callbacks and the watchdog
-    // thread. This mutex keeps epoch changes, contribution storage, and timeout
-    // decisions consistent.
+    // 待处理 GKA 状态会被 WebSocket 回调和 watchdog 线程共同访问。
+    // 该 mutex 保证 epoch 变更、contribution 存储和超时决策一致。
     std::mutex mGkaMutex;
     std::condition_variable mGkaCv;
     std::thread mGkaTimeoutThread;
@@ -183,6 +182,6 @@ private:
     std::chrono::steady_clock::time_point mPendingGkaDeadline{};
     std::unordered_set<std::string> mPendingGkaMembers;
     std::unordered_map<std::string, json> mPendingGkaContributions;
-    // Core attachment receive state, keyed by encrypted relay sender actor id.
+    // 核心附件接收状态，以加密中继发送者 actor id 为键。
     chat::attachment::ReceiveStore mPendingTransfers;
 };

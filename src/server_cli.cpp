@@ -1,5 +1,4 @@
-// Command-line Server entry point. It starts SignalingServer and keeps it alive
-// until a termination signal is received.
+// 命令行 Server 入口。它启动 SignalingServer，并保持运行直到收到终止信号。
 #include "console_utils.hpp"
 #include "signaling_server.hpp"
 
@@ -16,7 +15,7 @@ namespace {
 std::atomic_bool gStopRequested = false;
 
 void handleStopSignal(int) {
-    // Signal handlers must stay simple; set an atomic flag and let main loop stop.
+    // 信号处理器必须保持简单；只设置原子标志，让主循环自行停止。
     gStopRequested.store(true);
 }
 
@@ -28,8 +27,8 @@ void printUsage() {
 }
 
 int main(int argc, char** argv) {
-    // Server CLI owns only process lifetime. SignalingServer handles listener,
-    // rooms, membership, and relay after construction.
+    // Server CLI 只负责进程生命周期。SignalingServer 构造后负责监听器、
+    // 房间、成员关系和中继。
     configureConsoleUtf8();
     const auto args = commandLineArgsUtf8(argc, argv);
     if (args.size() != 2) {
@@ -53,7 +52,7 @@ int main(int argc, char** argv) {
             std::this_thread::sleep_for(std::chrono::milliseconds(300));
         }
 
-        // Notify connected members before stopping the WebSocket listener.
+        // 停止 WebSocket 监听器前先通知已连接成员。
         signaling.closeAllRooms("server stopped");
         signaling.stop();
         std::cout << "Server stopped." << std::endl;

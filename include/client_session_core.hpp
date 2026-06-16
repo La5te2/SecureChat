@@ -1,5 +1,5 @@
-// Client session interface used by CLI and WinUI wrappers.
-// It joins an existing room and sends encrypted relay messages through Server.
+// CLI 和 WinUI 包装层使用的 Client 会话接口。
+// 它加入已有房间，并通过 Server 发送加密中继消息。
 #pragma once
 
 #include "attachment_transfer.hpp"
@@ -24,12 +24,11 @@
 #include <unordered_set>
 #include <vector>
 
-// Regular room member. It joins an existing room, signs its temporary X25519
-// public key, receives the Host-wrapped room group key, and then sends encrypted
-// relay envelopes through SignalingServer.
+// 普通房间成员。它加入已有房间，签名自己的临时 X25519 公钥，
+// 接收 Host 封装的房间群密钥，然后通过 SignalingServer 发送加密中继封装。
 class ClientSessionCore {
 public:
-    // Creates a client session bound to one signaling URL and room identity.
+    // 创建绑定到一个信令 URL 和房间身份的 Client 会话。
     ClientSessionCore(
         std::string url,
         std::string room,
@@ -38,49 +37,49 @@ public:
         rtc::WebSocket::Configuration wsConfig = {});
     ~ClientSessionCore();
 
-    // Installs UI or console callbacks used for events and logs.
+    // 安装用于事件和日志的 UI 或控制台回调。
     void setCallbacks(ChatCallbacks callbacks);
-    // Connects to the Server and joins the configured room.
+    // 连接 Server 并加入已配置房间。
     void start();
-    // Stops signaling and active transfer state.
+    // 停止信令连接和活动传输状态。
     void stop();
-    // Reports whether the client session has been asked to stop.
+    // 返回该 Client 会话是否已经被请求停止。
     bool shouldStop() const;
-    // Sends a text or attachment command to the host.
+    // 向 Host 发送文本或附件命令。
     void sendLine(const std::string& line);
-    // Sends an image file through encrypted Server relay.
+    // 通过加密 Server 中继发送图片文件。
     bool sendImage(const std::string& filePath);
-    // Sends a text file through encrypted Server relay.
+    // 通过加密 Server 中继发送文本文件。
     bool sendTextFile(const std::string& filePath);
-    // Sends a recorded voice clip through encrypted Server relay.
+    // 通过加密 Server 中继发送录音语音片段。
     bool sendVoice(const std::string& filePath);
-    // Sends a text or attachment command to one member. Empty target means room broadcast.
+    // 向一个成员发送文本或附件命令；目标为空表示房间广播。
     void sendLineTo(const std::string& target, const std::string& line);
-    // Sends one attachment to one member. Empty target means room broadcast.
+    // 向一个成员发送附件；目标为空表示房间广播。
     bool sendImageTo(const std::string& target, const std::string& filePath);
     bool sendTextFileTo(const std::string& target, const std::string& filePath);
     bool sendVoiceTo(const std::string& target, const std::string& filePath);
 
 private:
-    // Queues a local shutdown with a user-visible reason.
+    // 排队一次本地关闭，并携带用户可见原因。
     void requestShutdown(const std::string& reason);
-    // Moves raw WebSocket frames off the libdatachannel callback thread.
+    // 将原始 WebSocket 帧移出 libdatachannel 回调线程。
     void enqueueSignalingMessage(std::string payload);
-    // Serial protocol worker; does JSON parsing, PKI verification, and GKA work.
+    // 串行协议 worker，负责 JSON 解析、PKI 验证和 GKA 工作。
     void signalingWorkerLoop();
-    // Stops and joins the protocol worker without touching the WebSocket.
+    // 停止并 join 协议 worker，不直接操作 WebSocket。
     void stopSignalingWorker();
-    // Dispatches joined, room membership, encrypted relay, and error events.
+    // 分发 joined、房间成员、加密中继和错误事件。
     void handleSignalingMessage(const std::string& s);
-    // Sends one encrypted relay message through the untrusted Server.
+    // 通过不可信 Server 发送一条加密中继消息。
     bool sendRelayMessage(const Message& msg, const std::string& senderId, const std::string& senderName, const std::string& senderKind, const std::string& targetId);
-    // Wraps a private Message in a pairwise inner encryption layer for targetId.
+    // 为 targetId 把私发 Message 包装进双方私发内层加密。
     Message wrapPairwiseForTarget(const Message& msg, const std::string& targetId);
-    // Opens a pairwise-private wrapper addressed to this Client.
+    // 打开一个发给本 Client 的双方私发包装。
     Message decryptPairwiseFromMember(const Message& msg);
-    // Remembers relay nonce/tag pairs so replayed Server frames are ignored.
+    // 记录中继 nonce/tag 对，使 Server 重放帧被忽略。
     bool rememberRelayEnvelope(const json& envelope);
-    // Verifies and stores one member identity/publicKey mapping for pairwise sends.
+    // 验证并保存一个成员 identity/publicKey 映射，用于双方私发。
     bool rememberVerifiedMemberIdentity(
         const std::string& memberId,
         const std::string& displayName,
@@ -88,26 +87,26 @@ private:
         const json& identity,
         const std::string& advertisedFingerprint,
         const std::string& source);
-    // Sends this Client's signed random contribution for one GKA epoch.
+    // 发送本 Client 针对一个 GKA epoch 的签名随机 contribution。
     void sendGkaContribution(std::uint64_t epoch);
-    // Verifies a decrypted GKA state and installs the derived room group key.
+    // 验证已解密的 GKA 状态，并安装派生出的房间群密钥。
     bool installGroupState(const json& groupState, std::uint64_t epoch);
-    // Sends one local attachment as encrypted metadata followed by encrypted chunks.
+    // 以加密元数据加后续加密分片的形式发送一个本地附件。
     bool sendAttachmentRelay(const std::string& filePath, chat::attachment::Kind kind, const std::string& metaType, const std::string& binaryType, const std::string& mime, const std::string& targetId);
-    // Handles one decrypted encrypted_relay application message.
+    // 处理一条已解密的 encrypted_relay 应用消息。
     void handleRelayMessage(const Message& msg);
-    // Reassembles one encrypted attachment chunk into the local cache.
+    // 将一个加密附件分片重组成本地缓存文件。
     void handleRelayBinaryChunk(const std::string& senderKey, const Message& msg);
-    // Converts raw console/UI input into a protocol message.
+    // 将原始控制台/UI 输入转换为协议消息。
     Message parseInput(const std::string& line);
-    // Resolves a visible member name from the latest room_members update.
+    // 根据最新 room_members 更新解析可见成员名。
     std::string resolveMemberId(const std::string& token);
 
 private:
     std::string mWsUrl;
     std::string mRoomId;
-    // Opaque routing token derived from roomId + room password. Server sees this
-    // token as roomId; the human-readable room id stays local for UI and PKI.
+    // 由 roomId + 房间密码派生的不透明路由 token。Server 把该 token 当作 roomId；
+    // 人类可读 room id 只留在本地 UI 和 PKI 语义中。
     std::string mRoomToken;
     std::string mUsername;
     std::string mPassword;
@@ -130,14 +129,14 @@ private:
     std::deque<std::string> mSignalingQueue;
     std::thread mSignalingThread;
     std::atomic_bool mSignalingWorkerStopping = false;
-    // True only after the Server accepts join_room and assigns a clientId.
-    // A close before this point is an admission/connect failure, not a chat drop.
+    // 仅在 Server 接受 join_room 并分配 clientId 后为 true。
+    // 此前关闭表示准入/连接失败，而不是聊天中断。
     std::atomic_bool mJoinedRoom = false;
-    // Set once an explicit Server/Host error frame is received. If the transport
-    // closes without this flag, the UI can report that the peer closed silently.
+    // 收到明确的 Server/Host error 帧后置位。若传输关闭时没有该标记，
+    // UI 可以报告对端静默关闭。
     std::atomic_bool mSawErrorFrame = false;
     std::atomic_bool mShutdownRequested = false;
     std::atomic_bool mStopped = false;
-    // Core attachment receive state, keyed by sender actor id.
+    // 核心附件接收状态，以发送者 actor id 为键。
     chat::attachment::ReceiveStore mPendingTransfers;
 };

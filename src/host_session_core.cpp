@@ -1,5 +1,5 @@
-// Host session implementation. It creates rooms, verifies Client PKI identities,
-// distributes room group keys, and handles encrypted relay messages.
+// Host 会话实现。它创建房间、验证 Client 的 PKI 身份，
+// 分发房间群密钥，并处理加密中继消息。
 #include "host_session_core.hpp"
 
 #include "attachment_transfer.hpp"
@@ -21,7 +21,7 @@ namespace attachment = chat::attachment;
 
 constexpr auto GkaContributionTimeout = std::chrono::seconds(10);
 
-// Returns a copy without surrounding ASCII whitespace.
+// 返回去除首尾 ASCII 空白后的副本。
 std::string trimCopy(std::string value) {
     const auto first = value.find_first_not_of(" \t\r\n");
     if (first == std::string::npos) return "";
@@ -30,8 +30,8 @@ std::string trimCopy(std::string value) {
 }
 
 bool parseDirectPrefix(const std::string& line, std::string& target, std::string& body) {
-    // Splits "/to bob ..." before normal command parsing so private text and
-    // private attachments reuse the same send functions as room broadcast.
+    // 在普通命令解析前拆分 "/to bob ..."，
+    // 使私发文本和私发附件复用与房间广播相同的发送函数。
     if (line.rfind("/to ", 0) != 0) return false;
     const auto rest = trimCopy(line.substr(4));
     const auto split = rest.find_first_of(" \t\r\n");
@@ -47,16 +47,15 @@ bool parseDirectPrefix(const std::string& line, std::string& target, std::string
 
 void markPrivateTarget(Message& msg, const std::string& targetId, const std::string& targetName) {
     if (targetId.empty()) return;
-    // The encrypted payload carries UI intent; the clear envelope carries only
-    // the routing id that Server needs for opaque private delivery.
+    // 加密载荷携带 UI 意图；
+    // 明文 envelope 只携带 Server 进行不透明私发投递所需的路由 id。
     msg.payload["private"] = true;
     msg.payload["targetId"] = targetId;
     msg.payload["targetName"] = targetName.empty() ? targetId : targetName;
 }
 
 bool attachmentKindForMeta(const std::string& type, attachment::Kind& kind) {
-    // Converts decrypted attachment metadata message types into the shared
-    // receive-store enum used by Host and Client.
+    // 将已解密附件元数据消息类型转换为 Host 和 Client 共用的 receive-store 枚举。
     if (type == "image_meta") {
         kind = attachment::Kind::Image;
         return true;
@@ -73,14 +72,14 @@ bool attachmentKindForMeta(const std::string& type, attachment::Kind& kind) {
 }
 
 bool isAttachmentBinaryType(const std::string& type) {
-    // Binary chunks are still JSON relay messages; this helper identifies the
-    // encrypted payload chunks that should be appended to a staged transfer.
+    // 二进制分片仍是 JSON 中继消息；
+    // 该辅助函数识别应追加到暂存传输中的加密载荷分片。
     return type == "image_binary" || type == "file_binary" || type == "voice_binary";
 }
 
 std::string actorIdFromMessage(const Message& msg) {
-    // Prefer stable actor ids over display names when grouping attachment
-    // chunks from the same sender.
+    // 对同一发送者的附件分片分组时，优先使用稳定 actor id，
+    // 而不是显示名。
     if (msg.payload.is_object() && msg.payload.contains("actorId") && msg.payload["actorId"].is_string()) {
         const auto id = msg.payload["actorId"].get<std::string>();
         if (!id.empty()) return id;
@@ -90,7 +89,7 @@ std::string actorIdFromMessage(const Message& msg) {
 
 }
 
-// Stores signaling endpoint for a plain SecureChat host session.
+// 保存普通 SecureChat Host 会话的信令端点。
 HostSessionCore::HostSessionCore(
     std::string wsUrl,
     std::string roomId,
@@ -102,22 +101,22 @@ HostSessionCore::HostSessionCore(
       mUsername(std::move(username)),
       mPassword(std::move(password)),
       mWsConfig(std::move(wsConfig)) {
-    // The Server registers only this opaque token. It cannot recover the room
-    // name without the password, while local PKI signatures still bind mRoomId.
+    // Server 只注册该不透明 token。没有房间密码时无法恢复房间名，
+    // 同时本地 PKI 签名仍绑定 mRoomId。
     mRoomToken = chat::secure_relay::deriveRoomToken(mRoomId, mPassword);
-    // K_G is not generated directly by Host anymore. The first usable room key
-    // is derived from the epoch-1 contribution set after room_created.
+    // K_G 不再由 Host 直接生成。
+    // 第一把可用房间密钥在 room_created 后由 epoch-1 contribution 集合派生。
     chat::websocket_config::applyClientTlsFromEnvironment(mWsConfig);
-    // Host identity signs group_key envelopes and verifies Client join identities.
+    // Host 身份用于签名 group_key envelope，并验证 Client 入房身份。
     mIdentity = chat::identity_pki::loadFromEnvironment();
-    // Host also owns a member X25519 pair so Clients can send true pairwise
-    // private messages to Host without reusing the room group key as the only key.
+    // Host 同样拥有成员 X25519 密钥对，使 Client 能向 Host 发送真正的 pairwise 私信，
+    // 而不把房间群密钥作为唯一密钥。
     mMemberKeys = chat::secure_relay::generateMemberKeyPair();
 }
 
 HostSessionCore::~HostSessionCore() {
-    // Destruction may happen during UI shutdown. Close transports and join the
-    // watchdog without emitting another user-facing "Session stopped" event.
+    // 析构可能发生在 UI 关闭期间。
+    // 关闭传输并 join watchdog，但不再发送面向用户的 "Session stopped" 事件。
     mStopped.store(true);
     stopSignalingWorker();
     stopGkaTimeoutWorker();
@@ -126,12 +125,12 @@ HostSessionCore::~HostSessionCore() {
     }
 }
 
-// Replaces UI/CLI event callbacks used by the session.
+// 替换该会话使用的 UI/CLI 事件回调。
 void HostSessionCore::setCallbacks(ChatCallbacks callbacks) {
     mCallbacks = std::move(callbacks);
 }
 
-// Opens the signaling WebSocket and creates the chat room.
+// 打开信令 WebSocket 并创建聊天房间。
 void HostSessionCore::start() {
     mStopped.store(false);
     mSignalingWorkerStopping.store(false);
@@ -155,7 +154,7 @@ void HostSessionCore::start() {
         };
         msg["identity"] = mIdentity.signJoinRoom(mRoomId, mUsername, mMemberKeys.publicKey);
         mWs->send(msg.dump());
-        // Keep the room password only long enough to create the room.
+        // 房间密码只保留到完成房间创建为止。
         std::fill(mPassword.begin(), mPassword.end(), '\0');
         mPassword.clear();
     });
@@ -166,9 +165,8 @@ void HostSessionCore::start() {
 
     mWs->onClosed([this]() {
         chatEmit(mCallbacks.onStatus, "Signaling closed");
-        // Host connection attempts can fail asynchronously after the UI has
-        // entered "hosting" state. Mirror Client shutdown events so frontends
-        // can restore their controls when the signaling channel disappears.
+        // Host 连接尝试可能在 UI 进入 "hosting" 状态后异步失败。
+        // 与 Client 关闭事件保持一致，使前端能在信令通道消失时恢复控件。
         if (!mStopped.exchange(true)) {
             if (!mRoomCreated.load()) {
                 chatEmit(
@@ -189,7 +187,7 @@ void HostSessionCore::start() {
     mWs->open(mWsUrl);
 }
 
-// Closes all host-owned transports and marks the session stopped.
+// 关闭所有 Host 持有的传输，并标记会话已停止。
 void HostSessionCore::stop() {
     if (mStopped.exchange(true)) return;
     stopSignalingWorker();
@@ -201,7 +199,7 @@ void HostSessionCore::stop() {
     chatEmit(mCallbacks.onStatus, "Session stopped");
 }
 
-// Reports whether the outer CLI/API loop should stop polling this session.
+// 返回外层 CLI/API 循环是否应停止轮询该会话。
 bool HostSessionCore::shouldStop() const {
     return mStopped.load() || (mWs && mWs->isClosed());
 }
@@ -230,10 +228,9 @@ void HostSessionCore::signalingWorkerLoop() {
             mSignalingQueue.pop_front();
         }
 
-        // Host-side message handling verifies member PKI, decrypts GKA
-        // contributions, and may commit a new group key. Keep that work off the
-        // libdatachannel WSS callback thread so consecutive contribution frames
-        // are not blocked by certificate verification.
+        // Host 侧消息处理会验证成员 PKI、解密 GKA contribution，
+        // 并可能提交新的群密钥。将这些工作移出 libdatachannel WSS 回调线程，
+        // 避免连续 contribution 帧被证书验证阻塞。
         handleSignalingMessage(payload);
     }
 }
@@ -247,7 +244,7 @@ void HostSessionCore::stopSignalingWorker() {
     }
 }
 
-// Parses one host input line and sends chat, commands, or attachments.
+// 解析一行 Host 输入，并发送聊天、命令或附件。
 void HostSessionCore::sendLine(const std::string& line) {
     if (handleHostCommand(line)) return;
 
@@ -296,8 +293,8 @@ void HostSessionCore::sendLine(const std::string& line) {
 }
 
 void HostSessionCore::sendLineTo(const std::string& target, const std::string& line) {
-    // Host privately addresses current Clients by display name only. The
-    // resolved protocol id stays inside encrypted payloads, so Server only broadcasts.
+    // Host 对当前 Client 私发时只使用显示名寻址。
+    // 解析出的协议 id 保留在加密载荷中，因此 Server 只进行广播。
     const auto targetNameInput = trimCopy(target);
     const auto targetId = resolveClientId(targetNameInput);
     if (targetNameInput.empty()) {
@@ -336,8 +333,8 @@ void HostSessionCore::sendLineTo(const std::string& target, const std::string& l
 }
 
 bool HostSessionCore::handleHostCommand(const std::string& line) {
-    // Moderation commands are local Host controls, not chat messages. They reuse
-    // the normal input box so CLI and WinUI get the same behavior.
+    // 管理命令是本地 Host 控制，不是聊天消息。
+    // 它们复用普通输入框，使 CLI 和 WinUI 行为一致。
     std::istringstream input(trimCopy(line));
     std::string command;
     input >> command;
@@ -364,7 +361,7 @@ bool HostSessionCore::handleHostCommand(const std::string& line) {
     return true;
 }
 
-// Sends an image to all room members through encrypted Server relay.
+// 通过加密 Server 中继向所有房间成员发送图片。
 bool HostSessionCore::sendImage(const std::string& filePath) {
     return sendImageTo("", filePath);
 }
@@ -385,7 +382,7 @@ bool HostSessionCore::sendImageTo(const std::string& target, const std::string& 
         targetId);
 }
 
-// Sends a text handout to all room members through encrypted Server relay.
+// 通过加密 Server 中继向所有房间成员发送文本资料。
 bool HostSessionCore::sendTextFile(const std::string& filePath) {
     return sendTextFileTo("", filePath);
 }
@@ -406,7 +403,7 @@ bool HostSessionCore::sendTextFileTo(const std::string& target, const std::strin
         targetId);
 }
 
-// Sends a short WAV voice clip to all room members through encrypted Server relay.
+// 通过加密 Server 中继向所有房间成员发送短 WAV 语音。
 bool HostSessionCore::sendVoice(const std::string& filePath) {
     return sendVoiceTo("", filePath);
 }
@@ -470,9 +467,8 @@ bool HostSessionCore::sendRelayMessage(
 }
 
 Message HostSessionCore::wrapPairwiseForTarget(const Message& msg, const std::string& targetId) {
-    // Host uses the target's PKI-verified X25519 public key for the inner private
-    // layer. This keeps private sends fail-closed instead of silently downgrading
-    // to room-group-key-only delivery.
+    // Host 使用目标经过 PKI 验证的 X25519 公钥构造内层私发加密。
+    // 这让私发保持失败即关闭，而不是静默降级为只用房间群密钥投递。
     std::string targetPublicKey;
     std::string targetFingerprint;
     {
@@ -496,9 +492,9 @@ Message HostSessionCore::wrapPairwiseForTarget(const Message& msg, const std::st
 }
 
 Message HostSessionCore::decryptPairwiseFromClient(const Message& msg) {
-    // Clients encrypt private messages to Host's member public key. Host accepts
-    // the inner payload only when the sender id has a verified certificate
-    // fingerprint recorded from join_room.
+    // Client 使用 Host 的成员公钥加密发给 Host 的私信。
+    // 只有发送者 id 已有从 join_room 记录的已验证证书指纹时，
+    // Host 才接受内层载荷。
     const auto senderId = msg.payload.value("relaySenderId", "");
     if (senderId.empty() || senderId == chat::protocol::HostActorId) {
         throw std::runtime_error("invalid pairwise sender");
@@ -528,9 +524,8 @@ Message HostSessionCore::decryptPairwiseFromClient(const Message& msg) {
 }
 
 bool HostSessionCore::rememberRelayEnvelope(const json& envelope) {
-    // Replay is different from decryption failure: a replayed ciphertext can be
-    // valid under AES-GCM. Track recent nonce/tag pairs so a Server cannot replay
-    // an old command, text, or attachment chunk in this session.
+    // 重放不同于解密失败：被重放的密文在 AES-GCM 下可能仍有效。
+    // 跟踪近期 nonce/tag 对，使 Server 无法在本会话中重放旧命令、文本或附件分片。
     constexpr std::size_t maxRememberedRelayIds = 4096;
     const auto replayId = chat::secure_relay::replayIdForEnvelope(envelope);
     if (replayId.empty()) return true;
@@ -552,8 +547,8 @@ bool HostSessionCore::sendGroupStateToClient(
     const std::string& clientPublicKey,
     const json& groupState,
     std::uint64_t epoch) {
-    // Host forwards the verified contribution set, not a Host-chosen raw key.
-    // The Client decrypts this state, verifies signatures, and derives K_G itself.
+    // Host 转发的是已验证 contribution 集合，而不是 Host 自选的原始密钥。
+    // Client 解密该状态、验证签名，并自行派生 K_G。
     if (!mWs || mWs->isClosed()) {
         chatEmit(mCallbacks.onStatus, "Signaling channel is not open yet");
         return false;
@@ -565,8 +560,7 @@ bool HostSessionCore::sendGroupStateToClient(
         clientId,
         clientPublicKey,
         epoch);
-    // Host signs the final envelope so Client can reject any modified fields
-    // before accepting a room group key.
+    // Host 对最终 envelope 签名，使 Client 在接受房间群密钥前能拒绝任何被修改字段。
     mIdentity.signGroupKeyEnvelope(envelope);
     mWs->send(envelope.dump());
     chatEmit(mCallbacks.onStatus, "GKA state sent to " + displayNameForClient(clientId));
@@ -574,8 +568,8 @@ bool HostSessionCore::sendGroupStateToClient(
 }
 
 void HostSessionCore::rotateGroupKey(const std::string& reason) {
-    // Rotation now starts a contributory GKA epoch. Host contributes randomness
-    // like every other member; it no longer selects K_G alone.
+    // 轮换现在会启动贡献式 GKA epoch。
+    // Host 像其他成员一样贡献随机性，不再单独选择 K_G。
     std::unordered_set<std::string> currentMembers;
     {
         std::lock_guard<std::mutex> lock(mClientsMutex);
@@ -591,8 +585,8 @@ void HostSessionCore::rotateGroupKey(const std::string& reason) {
         mPendingGkaMembers = std::move(currentMembers);
         mPendingGkaContributions.clear();
         mPendingGkaContributions[chat::protocol::HostActorId] = makeLocalGkaContribution(mPendingGkaEpoch);
-        // A malicious or broken member must not hold the room forever. The
-        // watchdog will evict any Client still missing at this deadline.
+        // 恶意或故障成员不能无限期拖住房间。
+        // 看门狗会驱逐在该截止时间后仍未提交的 Client。
         mPendingGkaDeadline = std::chrono::steady_clock::now() + GkaContributionTimeout;
     }
     mGkaCv.notify_all();
@@ -618,14 +612,14 @@ void HostSessionCore::sendGkaRequestToClients() {
         {"epoch", epoch}
     };
     mWs->send(msg.dump());
-    // Diagnostic status: if a Client joins but never prints "GKA request
-    // received", the Server/proxy path did not deliver this control frame.
+    // 诊断状态：如果 Client 入房后从未打印 "GKA request received"，
+    // 则 Server/proxy 路径没有投递该控制帧。
     chatEmit(mCallbacks.onStatus, "GKA request sent: epoch " + std::to_string(epoch));
 }
 
 void HostSessionCore::startGkaTimeoutWorker() {
-    // Starts one lightweight watchdog for this Host session. It does no network
-    // work until rotateGroupKey() publishes a pending epoch and deadline.
+    // 为该 Host 会话启动一个轻量看门狗。
+    // 在 rotateGroupKey() 发布待处理 epoch 和截止时间前，它不做网络工作。
     {
         std::lock_guard<std::mutex> lock(mGkaMutex);
         mGkaTimeoutStop = false;
@@ -636,8 +630,8 @@ void HostSessionCore::startGkaTimeoutWorker() {
 }
 
 void HostSessionCore::stopGkaTimeoutWorker() {
-    // Cancels any pending epoch and joins the watchdog so shutdown cannot leave a
-    // background thread holding callbacks or WebSocket state.
+    // 取消所有待处理 epoch 并 join 看门狗，
+    // 避免关闭后留下持有回调或 WebSocket 状态的后台线程。
     {
         std::lock_guard<std::mutex> lock(mGkaMutex);
         mGkaTimeoutStop = true;
@@ -653,9 +647,8 @@ void HostSessionCore::stopGkaTimeoutWorker() {
 }
 
 void HostSessionCore::gkaTimeoutLoop() {
-    // Waits for the current GKA deadline. A new epoch or a successful commit
-    // wakes this loop through mGkaCv, so it only evicts members for the exact
-    // epoch that actually timed out.
+    // 等待当前 GKA 截止时间。新 epoch 或成功提交会通过 mGkaCv 唤醒该循环，
+    // 因此它只会针对真正超时的精确 epoch 驱逐成员。
     std::unique_lock<std::mutex> lock(mGkaMutex);
     while (!mGkaTimeoutStop) {
         if (mPendingGkaEpoch == 0) {
@@ -679,9 +672,9 @@ void HostSessionCore::gkaTimeoutLoop() {
 }
 
 void HostSessionCore::evictGkaTimeoutMembers(std::uint64_t epoch) {
-    // Converts a stalled GKA epoch into an explicit membership change. Missing
-    // contributors are removed and their current-room certificate fingerprints
-    // are banned, then a new epoch starts with the remaining members.
+    // 将停滞的 GKA epoch 转换为显式成员关系变化。
+    // 缺失贡献者会被移除，其当前房间证书指纹会被封禁，
+    // 随后剩余成员启动新的 epoch。
     std::vector<std::string> missingMembers;
     {
         std::lock_guard<std::mutex> lock(mGkaMutex);
@@ -692,9 +685,8 @@ void HostSessionCore::evictGkaTimeoutMembers(std::uint64_t epoch) {
             }
         }
         if (missingMembers.empty()) return;
-        // This epoch cannot commit because at least one member stalled. Clear it
-        // before removing members; rotateGroupKey() will build a fresh epoch with
-        // the remaining current membership.
+        // 该 epoch 因至少一个成员停滞而无法提交。
+        // 移除成员前先清空它；rotateGroupKey() 会用剩余当前成员构造新 epoch。
         mPendingGkaEpoch = 0;
         mPendingGkaMembers.clear();
         mPendingGkaContributions.clear();
@@ -893,9 +885,9 @@ bool HostSessionCore::sendAttachmentRelay(
     const std::string& binaryType,
     const std::string& mime,
     const std::string& targetId) {
-    // Attachments are encrypted as metadata plus chunk messages. Passing a
-    // targetId remains inside encrypted payloads. Server broadcasts every relay
-    // frame, and the intended recipient opens the inner pairwise layer.
+    // 附件会被加密为元数据加分片消息。
+    // targetId 保留在加密载荷中；Server 广播每个中继帧，
+    // 预期接收者打开内层双方私发加密。
     const auto bytes = attachment::readFileBytes(filePath, kind);
     const auto actor = currentHostActorName();
     const auto targetName = targetId.empty() ? std::string() : displayNameForClient(targetId);
@@ -944,13 +936,13 @@ bool HostSessionCore::sendAttachmentRelay(
     return true;
 }
 
-// Handles signaling WebSocket messages addressed to the host room owner.
+// 处理发给 Host 房主的信令 WebSocket 消息。
 void HostSessionCore::handleSignalingMessage(const std::string& s) {
     if (mStopped.load()) return;
 
     try {
-        // Signaling and relay messages are untrusted network input. Apply the
-        // same size/depth budget before reading typed fields from the JSON object.
+        // 信令和中继消息都是不可信网络输入。
+        // 从 JSON 对象读取类型字段前，先应用相同的大小/深度预算。
         auto j = chat::protocol::parseJsonObjectWithBudget(
             s,
             chat::protocol::MaxSignalingMessageBytes,
@@ -969,8 +961,8 @@ void HostSessionCore::handleSignalingMessage(const std::string& s) {
                 if (!member.is_object()) continue;
                 if (!first) members << "; ";
                 const auto id = member.value("id", "");
-                // Emit name/id so UI clients can keep internal PKI mapping
-                // without exposing raw signaling JSON to the UI.
+                // 发出 name/id，使 UI Client 不暴露原始信令 JSON
+                // 也能保留内部 PKI 映射。
                 members << member.value("username", id) << " / " << id;
                 first = false;
             }
@@ -997,8 +989,8 @@ void HostSessionCore::handleSignalingMessage(const std::string& s) {
             }
             if (!clientId.empty()) {
                 try {
-                    // Host is the trust decision point for joining Clients. Server
-                    // forwarded this identity object but did not verify it.
+                    // Host 是 Client 入房的信任决策点。
+                    // Server 只转发该 identity 对象，并未验证它。
                     auto identity = j.find("identity");
                     if (identity == j.end()) throw std::runtime_error("client identity is missing");
                     identityObject = *identity;
@@ -1036,8 +1028,8 @@ void HostSessionCore::handleSignalingMessage(const std::string& s) {
             }
             if (!clientId.empty()) {
                 chatEmit(mCallbacks.onStatus, "Client joined: " + username);
-                // A new member means a new room group key so the member receives
-                // only the current key version through its verified public key.
+                // 新成员加入意味着需要新的房间群密钥，
+                // 该成员只能通过已验证公钥收到当前密钥版本。
                 rotateGroupKey("member joined");
             }
         }
@@ -1067,7 +1059,7 @@ void HostSessionCore::handleSignalingMessage(const std::string& s) {
             }
         }
         else if (type == chat::secure_relay::EnvelopeType) {
-            // Host decrypts application relay exactly like a normal member.
+            // Host 像普通成员一样解密应用中继。
             if (!chat::secure_relay::hasUsableGroupKey(mGroupKey)) {
                 chatEmit(mCallbacks.onError, "Room group key is not ready");
                 return;
@@ -1076,8 +1068,8 @@ void HostSessionCore::handleSignalingMessage(const std::string& s) {
             auto msg = chat::secure_relay::decryptMessageWithGroupKey(j, mRoomToken, mGroupKey);
             const auto relayTargetId = msg.payload.value("relayTargetId", "");
             if (!relayTargetId.empty() && relayTargetId != chat::protocol::HostActorId) {
-                // Private relay is broadcast at the outer layer. Non-target
-                // members discard it silently to avoid revealing private-send events.
+                // 私发中继在外层以广播方式发送。
+                // 非目标成员会静默丢弃它，避免暴露私发事件。
                 return;
             }
             if (msg.type == chat::secure_relay::PairwisePrivateType) {
@@ -1106,7 +1098,7 @@ void HostSessionCore::handleSignalingMessage(const std::string& s) {
     }
 }
 
-// Removes a client member and clears any staged attachment transfer from it.
+// 移除一个 Client 成员，并清除来自它的所有暂存附件传输。
 void HostSessionCore::removeClient(const std::string& id) {
     if (id.empty()) return;
     if (mStopped.load()) return;
@@ -1128,14 +1120,14 @@ void HostSessionCore::removeClient(const std::string& id) {
         mSilencedClientIds.erase(id);
     }
     if (!knownClient) {
-        // A malicious or confused Server may report stale/unknown client_left.
-        // Ignoring it avoids unnecessary group-key rotation and UI churn.
+        // 恶意或混乱的 Server 可能报告过期/未知 client_left。
+        // 忽略它可避免不必要的群密钥轮换和 UI 抖动。
         chatEmit(mCallbacks.onStatus, "Ignored unknown client_left: " + id);
         return;
     }
     mPendingTransfers.clear(id);
     chatEmit(mCallbacks.onStatus, "Client left: " + displayName);
-    // Leaving members must not read future messages, so Host rotates K_G.
+    // 离开成员不应读取未来消息，因此 Host 会轮换 K_G。
     rotateGroupKey("member left");
 }
 
@@ -1235,8 +1227,8 @@ void HostSessionCore::sendClientModeration(const std::string& type, const std::s
 }
 
 void HostSessionCore::handleRelayMessage(const Message& msg) {
-    // member_identity is a Host-originated control message sent to Clients only;
-    // if it loops back, the Host ignores it.
+    // member_identity 是 Host 发起且只发给 Client 的控制消息；
+    // 如果它回环到 Host，Host 会忽略。
     if (msg.type == "member_identity") {
         return;
     }
@@ -1249,8 +1241,8 @@ void HostSessionCore::handleRelayMessage(const Message& msg) {
     attachment::Kind kind = attachment::Kind::Text;
     const auto senderKey = actorIdFromMessage(msg);
     if (attachmentKindForMeta(msg.type, kind)) {
-        // Metadata opens a receive slot. The following binary chunks must carry
-        // the same transferId or they are rejected.
+        // 元数据会打开接收槽位。后续二进制分片必须携带相同 transferId，
+        // 否则会被拒绝。
         const auto transferId = attachment::transferIdFromMessage(msg);
         const auto pending = mPendingTransfers.stage(
             senderKey,
@@ -1282,8 +1274,8 @@ void HostSessionCore::handleRelayMessage(const Message& msg) {
 }
 
 void HostSessionCore::handleRelayBinaryChunk(const std::string& senderKey, const Message& msg) {
-    // Binary chunks are already decrypted application Messages here. This function
-    // checks transfer continuity and appends bytes to the local cache file.
+    // 这里的二进制分片已经是解密后的应用 Message。
+    // 该函数检查传输连续性，并把字节追加到本地缓存文件。
     std::string transferId;
     try {
         transferId = attachment::transferIdFromMessage(msg);
@@ -1326,7 +1318,7 @@ void HostSessionCore::setCurrentHostActorMetadata(Message& msg) {
         msg.from.empty() ? chat::protocol::HostActorId : msg.from);
 }
 
-// Stores stable actor identity separately from the human-readable sender label.
+// 将稳定 actor 身份与人类可读发送者标签分开保存。
 void HostSessionCore::setActorMetadata(
     Message& msg,
     const std::string& actorId,
@@ -1337,14 +1329,14 @@ void HostSessionCore::setActorMetadata(
     msg.payload["displayName"] = displayName;
 }
 
-// Chooses the visible participant name from the signaling username.
+// 从信令用户名中选择可见参与者名称。
 std::string HostSessionCore::displayNameForClient(const std::string& id) {
     std::lock_guard<std::mutex> lock(mClientsMutex);
     auto name = mClientNames.find(id);
     return name == mClientNames.end() ? id : name->second;
 }
 
-// Resolves a visible member name into the underlying client id when possible.
+// 尽可能将可见成员名解析为底层 client id。
 std::string HostSessionCore::resolveClientId(const std::string& token) {
     if (token.empty()) return "";
     std::lock_guard<std::mutex> lock(mClientsMutex);
@@ -1387,9 +1379,8 @@ void HostSessionCore::announceVerifiedMember(
     msg.payload["state"] = "verified";
     msg.payload["verifiedBy"] = chat::protocol::HostActorId;
 
-    // The announcement is an encrypted control message. Server can relay it but
-    // cannot read it. Clients still verify the embedded identity signature so an
-    // untrusted Host cannot silently substitute another member's public key.
+    // 该公告是加密控制消息。Server 可以中继，但无法读取。
+    // Client 仍会验证其中的身份签名，使不可信 Host 无法静默替换其他成员公钥。
     sendRelayMessage(msg, chat::protocol::HostActorId, mUsername, chat::protocol::HostActorKind, "");
 }
 

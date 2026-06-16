@@ -1,5 +1,4 @@
-// Attachment transport implementation. It validates local files, sanitizes
-// incoming names, chunks payloads, and stores received attachment caches.
+// 附件传输实现。它校验本地文件、净化入站名称、分片载荷并保存接收附件缓存。
 #include "attachment_transfer.hpp"
 
 #include <openssl/evp.h>
@@ -26,7 +25,7 @@ constexpr std::uintmax_t defaultReceiveCacheBytes = 512ull * 1024ull * 1024ull;
 
 std::atomic_uint64_t gTransferCounter = 0;
 
-// Keep UI-facing paths UTF-8 so Windows code pages cannot corrupt Chinese names.
+// 面向 UI 的路径保持 UTF-8，避免 Windows 代码页破坏中文名称。
 std::string pathToUtf8(const std::filesystem::path& path) {
     return path.u8string();
 }
@@ -139,8 +138,8 @@ void ensurePrivateDirectory(const std::filesystem::path& dir) {
         throw std::runtime_error("could not create attachment cache directory");
     }
 
-    // On POSIX this makes received attachment caches owner-only. On Windows the
-    // standard permissions call may be a no-op, so failures are ignored.
+    // 在 POSIX 上这会让接收附件缓存仅所有者可访问。在 Windows 上标准权限调用
+    // 可能是空操作，因此忽略失败。
     std::filesystem::permissions(
         dir,
         std::filesystem::perms::owner_all,
@@ -278,11 +277,10 @@ void validateSignatureOrThrow(const std::vector<unsigned char>& bytes, Kind kind
     }
 }
 
-} // namespace
+} // 匿名命名空间
 
 std::filesystem::path pathFromUtf8(const std::string& path) {
-    // Convert protocol/API UTF-8 into a filesystem path without using the active
-    // Windows ANSI code page.
+    // 将协议/API 的 UTF-8 转为文件系统路径，不使用当前 Windows ANSI 代码页。
     return std::filesystem::u8path(path);
 }
 
@@ -292,8 +290,8 @@ std::string fileNameFromPath(const std::string& path) {
 }
 
 std::string safeTransferName(const std::string& name, const std::string& fallback) {
-    // Incoming attachment names are display metadata, not trusted paths. Strip
-    // separators and reserved names before choosing a cache filename.
+    // 入站附件名称只是显示元数据，不是可信路径。选择缓存文件名前先剥离
+    // 分隔符和保留名。
     const auto trimmed = trimCopy(name);
     const auto candidate = trimmed.empty() ? fallback : fileNameFromPath(trimmed);
     std::string safe;
@@ -321,7 +319,7 @@ std::string safeTransferName(const std::string& name, const std::string& fallbac
 }
 
 std::string receiveDirectory(Kind kind) {
-    // Keep received files separated by kind to simplify UI lookup and cleanup.
+    // 按类型分开放置接收文件，简化 UI 查找和清理。
     const auto leaf = kind == Kind::Image ? "images" : (kind == Kind::Voice ? "voice" : "files");
     const auto root = receiveRootDirectory();
     ensurePrivateDirectory(root);
@@ -351,7 +349,7 @@ std::size_t maxTransferBytes(Kind kind) {
 }
 
 std::size_t expectedSizeFromMeta(const Message& msg, Kind kind) {
-    // Metadata size drives receive-cache pruning and chunk completion checks.
+    // 元数据中的大小用于接收缓存清理和分片完成检查。
     if (!msg.payload.is_object() || !msg.payload.contains("size")) {
         throw std::runtime_error("attachment meta size is missing");
     }
@@ -390,7 +388,7 @@ std::string transferIdFromMessage(const Message& msg) {
 }
 
 std::string makeTransferId() {
-    // Transfer ids only need to be unique within this process/session.
+    // transfer id 只需要在当前进程/会话内唯一。
     const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
     const auto counter = ++gTransferCounter;
     std::ostringstream out;
@@ -404,8 +402,8 @@ ReceiveSlot ReceiveStore::stage(
     const std::string& transferId,
     const std::string& name,
     std::size_t expectedSize) {
-    // Metadata arrives before chunks. Stage the sanitized output path and
-    // expected size so later chunks cannot choose their own filesystem target.
+    // 元数据先于分片到达。先暂存净化后的输出路径和预期大小，
+    // 防止后续分片自行选择文件系统目标。
     if (transferId.empty()) {
         throw std::runtime_error("attachment transfer id is missing");
     }
@@ -452,9 +450,8 @@ void ReceiveStore::clear(const std::string& key) {
 }
 
 ReceiveChunkResult ReceiveStore::appendChunk(const std::string& key, const rtc::binary& data) {
-    // Appends exactly one decrypted chunk for the sender's active transfer.
-    // Completion clears the pending slot so the next attachment must start
-    // with fresh metadata.
+    // 为该发送者的活动传输精确追加一个已解密分片。
+    // 完成后清空待处理槽位，使下一个附件必须从新元数据开始。
     std::lock_guard<std::mutex> lock(mMutex);
     auto pending = mSlots.find(key);
     if (pending == mSlots.end()) return {};
@@ -479,9 +476,8 @@ ReceiveChunkResult ReceiveStore::appendChunk(const std::string& key, const rtc::
     for (auto byte : data) {
         bytes.push_back(static_cast<unsigned char>(byte));
     }
-    // Reject disguised images/voice before the UI or forwarding path treats
-    // arbitrary bytes as media. Normal sends use 64 KB first chunks, enough
-    // to verify PNG/JPEG/BMP and WAV headers immediately.
+    // 在 UI 或转发路径把任意字节当作媒体处理前，拒绝伪装图片/语音。
+    // 正常发送使用 64 KB 首分片，足以立即验证 PNG/JPEG/BMP 和 WAV 文件头。
     if (slot.receivedSize == 0 && slot.kind != Kind::Text) {
         try {
             validateSignatureOrThrow(bytes, slot.kind);
@@ -620,4 +616,4 @@ Message makeTransferCancel(const std::string& from, const std::string& transferI
     return cancel;
 }
 
-} // namespace chat::attachment
+} // 命名空间 chat::attachment

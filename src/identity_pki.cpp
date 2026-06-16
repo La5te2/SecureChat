@@ -1,5 +1,5 @@
-// Application-layer PKI implementation. It loads certificates and private keys,
-// verifies certificate chains and signs/verifies GKA identity bindings.
+// 应用层 PKI 实现。它加载证书和私钥，
+// 验证证书链，并签名/验签 GKA 身份绑定。
 #include "identity_pki.hpp"
 
 #include <openssl/asn1.h>
@@ -93,8 +93,7 @@ std::string hexEncode(const unsigned char* data, std::size_t size) {
 }
 
 void appendCanonicalField(std::string& out, const std::string& name, const std::string& value) {
-    // Length-prefixing avoids ambiguous signed strings when values contain
-    // separators or newline characters.
+    // 长度前缀避免字段值包含分隔符或换行符时产生有歧义的签名字节串。
     out += name;
     out += ":";
     out += std::to_string(value.size());
@@ -108,8 +107,8 @@ std::string canonicalJoinMessage(
     const std::string& username,
     const std::string& publicKey,
     const std::string& nonce) {
-    // Length-prefixed fields make the signed byte string unambiguous even if a
-    // room id or username contains separators such as ':' or newlines.
+    // 字段长度前缀让签名字节串保持唯一，即使 room id 或用户名包含 ':'、
+    // 换行等分隔字符也不会产生歧义。
     std::string out = "securechat-pki-v1\njoin_room\n";
     appendCanonicalField(out, "roomId", roomId);
     appendCanonicalField(out, "username", username);
@@ -126,8 +125,8 @@ std::string canonicalGkaContributionMessage(
     const std::string& publicKey,
     const std::string& contribution,
     const std::string& nonce) {
-    // A contribution is meaningful only for one room epoch and one member key.
-    // Length prefixes prevent ambiguous signed strings.
+    // contribution 只对某个房间 epoch 和某个成员密钥有意义。
+    // 长度前缀用于避免签名字节串歧义。
     std::string out = "securechat-pki-v1\ngka_contribution\n";
     appendCanonicalField(out, "roomId", roomId);
     appendCanonicalField(out, "epoch", std::to_string(epoch));
@@ -140,9 +139,8 @@ std::string canonicalGkaContributionMessage(
 }
 
 std::string canonicalGroupKeyMessage(const json& envelope, const std::string& identityNonce) {
-    // Bind the Host identity to the exact group_key envelope the Client will
-    // unwrap. If a Server changes routing or ciphertext fields, verification
-    // fails before the X25519/AES-GCM unwrapping step.
+    // 把 Host 身份绑定到 Client 将要解封装的精确 group_key envelope。
+    // 如果 Server 修改路由或密文字段，验签会在 X25519/AES-GCM 解封装前失败。
     std::string out = "securechat-pki-v1\ngroup_key\n";
     appendCanonicalField(out, "version", std::to_string(envelope.value("version", 0)));
     appendCanonicalField(out, "roomId", envelope.value("roomId", ""));
@@ -160,12 +158,12 @@ std::string canonicalGroupKeyMessage(const json& envelope, const std::string& id
 }
 
 BioPtr bioFromString(const std::string& value) {
-    // OpenSSL PEM readers operate on BIO streams; this wraps an in-memory string.
+    // OpenSSL PEM 读取器基于 BIO 流工作；这里把内存字符串包装成 BIO。
     return BioPtr(BIO_new_mem_buf(value.data(), static_cast<int>(value.size())), BIO_free);
 }
 
 int pemPasswordCallback(char* buffer, int size, int, void* userData) {
-    // OpenSSL calls this when an encrypted private key needs its password.
+    // 加密私钥需要密码时，OpenSSL 会调用该回调。
     if (!userData) return 0;
     const auto* password = static_cast<const std::string*>(userData);
     if (password->empty()) return 0;
@@ -175,8 +173,7 @@ int pemPasswordCallback(char* buffer, int size, int, void* userData) {
 }
 
 std::vector<X509Ptr> parseCertificateChain(const std::string& pem) {
-    // The first certificate is treated as the member leaf certificate; following
-    // certificates are untrusted intermediates for X509_verify_cert.
+    // 第一张证书视为成员叶子证书；后续证书作为 X509_verify_cert 使用的非信任中间证书。
     auto bio = bioFromString(pem);
     if (!bio) throw std::runtime_error("certificate chain allocation failed");
 
@@ -228,7 +225,7 @@ std::string certificateFingerprint(X509* cert) {
 }
 
 void requireDigitalSignatureUsage(X509* cert) {
-    // Identity certificates must be allowed to sign protocol bindings.
+    // 身份证书必须允许签名协议绑定数据。
     ASN1_BIT_STRING* usage = static_cast<ASN1_BIT_STRING*>(
         X509_get_ext_d2i(cert, NID_key_usage, nullptr, nullptr));
     if (!usage) return;
@@ -278,8 +275,7 @@ void verifyCertificateChain(
 }
 
 void requireKeyMatchesCertificate(EVP_PKEY* privateKey, X509* cert) {
-    // Local startup check: the configured private key must correspond to the
-    // configured identity certificate.
+    // 本地启动检查：配置的私钥必须与配置的身份证书对应。
     EvpPkeyPtr publicKey(X509_get_pubkey(cert), EVP_PKEY_free);
     if (!publicKey) throw std::runtime_error("identity certificate public key missing");
     if (EVP_PKEY_eq(privateKey, publicKey.get()) != 1) {
@@ -288,8 +284,7 @@ void requireKeyMatchesCertificate(EVP_PKEY* privateKey, X509* cert) {
 }
 
 std::string signatureAlgorithm(EVP_PKEY* key) {
-    // Keep the advertised algorithm explicit so a mismatched or downgraded
-    // signature format is rejected during verification.
+    // 显式记录声明的算法，使不匹配或被降级的签名格式在验签阶段被拒绝。
     const int id = EVP_PKEY_base_id(key);
     if (id == EVP_PKEY_ED25519) return "Ed25519";
     if (id == EVP_PKEY_EC) return "ECDSA-SHA256";

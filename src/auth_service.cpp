@@ -1,12 +1,12 @@
-// Process-local user account implementation for SignalingServer membership ids.
+// SignalingServer 成员 id 使用的进程本地用户账户实现。
 #include "auth_service.hpp"
 
 #include <functional>
 #include <stdexcept>
 
 UserAccount AuthService::registerOrLogin(const std::string& username, const std::string& password) {
-    // This helper gives Server a stable userId for routing. It is intentionally
-    // in-memory; restarting the Server clears these accounts and rooms.
+    // 该辅助模块为 Server 提供稳定 userId 用于路由。它有意只保存在内存中；
+    // Server 重启会清空这些账户和房间。
     validateUsername(username);
     validatePassword(password);
 
@@ -27,8 +27,7 @@ UserAccount AuthService::registerOrLogin(const std::string& username, const std:
 }
 
 void AuthService::validateUsername(const std::string& username) {
-    // Validate by Unicode codepoint count rather than byte count so Chinese
-    // display names do not get rejected just because UTF-8 uses multiple bytes.
+    // 按 Unicode 码点数而不是字节数校验，避免中文显示名仅因 UTF-8 多字节编码被拒绝。
     const auto codepoints = decodeUtf8(username);
     if (codepoints.empty() || codepoints.size() > 32) {
         throw std::runtime_error("username must be 1-32 characters");
@@ -46,8 +45,8 @@ void AuthService::validateUsername(const std::string& username) {
 }
 
 std::vector<char32_t> AuthService::decodeUtf8(const std::string& text) {
-    // Minimal UTF-8 decoder used only for username validation. It rejects
-    // malformed byte sequences instead of relying on platform code pages.
+    // 仅用于用户名校验的最小 UTF-8 解码器。它拒绝畸形字节序列，
+    // 不依赖平台代码页。
     std::vector<char32_t> result;
     for (std::size_t i = 0; i < text.size();) {
         const unsigned char first = static_cast<unsigned char>(text[i]);
@@ -97,21 +96,20 @@ bool AuthService::isChineseCodepoint(char32_t ch) {
 }
 
 void AuthService::validatePassword(const std::string& password) {
-    // Room password strength is handled by deployment policy and UI guidance;
-    // this low minimum only prevents accidental empty or one-character values.
+    // 房间密码强度由部署策略和 UI 提示处理；这里的低下限只防止误用空值或单字符值。
     if (password.size() < 4) {
         throw std::runtime_error("password must be at least 4 characters");
     }
 }
 
 std::size_t AuthService::hashPassword(const std::string& username, const std::string& password) {
-    // Process-local helper for AuthService account reuse. Room password matching
-    // uses RoomRegistry's SHA-256 digest and constant-time comparison.
+    // AuthService 账户复用的进程本地辅助逻辑。房间密码匹配使用
+    // RoomRegistry 的 SHA-256 摘要和常量时间比较。
     return std::hash<std::string>{}("chat-auth-v1:" + username + ":" + password);
 }
 
 std::string AuthService::makeUserId(const std::string& username) {
-    // This id is intentionally readable in encrypted room state and debug paths.
-    // UI private-message targeting uses display names; Server logs redact ids.
+    // 该 id 在加密房间状态和调试路径中有意保持可读。
+    // UI 私发目标使用显示名；Server 日志会脱敏 id。
     return "user_" + username;
 }

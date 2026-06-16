@@ -1,5 +1,5 @@
-// Native C API implementation used by WinUI. It owns process-wide
-// Host/Client sessions and translates C++ callbacks into C ABI callbacks.
+// WinUI 使用的 native C API 实现。它持有进程级 Host/Client 会话，
+// 并把 C++ 回调转换为 C ABI 回调。
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -46,12 +46,12 @@ std::atomic_bool gShutdownCleanupQueued = false;
 bool gLoggerInitialized = false;
 std::once_flag gCrashHandlerOnce;
 
-// Converts nullable C API strings into safe std::string values.
+// 将可空 C API 字符串转换为安全的 std::string。
 std::string safeString(const char* value) {
     return value ? value : "";
 }
 
-// Emits one event to the managed callback registered by WinUI.
+// 向 WinUI 注册的托管回调发送一个事件。
 void emitEvent(const char* kind, const std::string& message) {
     chat_event_callback callback = nullptr;
     void* userData = nullptr;
@@ -64,7 +64,7 @@ void emitEvent(const char* kind, const std::string& message) {
     if (callback) callback(kind, message.c_str(), userData);
 }
 
-// Creates native session callbacks that map C++ events to C API event kinds.
+// 创建 native 会话回调，将 C++ 事件映射到 C API 事件类型。
 ChatCallbacks makeCallbacks() {
     ChatCallbacks callbacks;
     callbacks.onLog = [](const std::string& message) { emitEvent("log", message); };
@@ -77,7 +77,7 @@ ChatCallbacks makeCallbacks() {
     return callbacks;
 }
 
-// Initializes libdatachannel logging once for the native process.
+// 为 native 进程初始化一次 libdatachannel 日志。
 void initLoggerOnce() {
     if (!gLoggerInitialized) {
         rtc::InitLogger(rtc::LogLevel::Info);
@@ -85,7 +85,7 @@ void initLoggerOnce() {
     }
 }
 
-// Locates the directory containing native.dll for crash reports and logs.
+// 定位 native.dll 所在目录，用于写入崩溃报告和日志。
 std::filesystem::path moduleDirectory() {
 #ifdef _WIN32
     HMODULE module = nullptr;
@@ -104,7 +104,7 @@ std::filesystem::path moduleDirectory() {
 }
 
 #ifdef _WIN32
-// Resolves an exception address to the loaded module that contains it.
+// 将异常地址解析到包含该地址的已加载模块。
 std::string moduleNameForAddress(const void* address) {
     if (!address) return "";
 
@@ -128,7 +128,7 @@ std::string moduleNameForAddress(const void* address) {
 }
 #endif
 
-// Formats a timestamp suitable for crash-report file names.
+// 格式化适合崩溃报告文件名使用的时间戳。
 std::string timestampForFile() {
     const auto now = std::chrono::system_clock::now();
     const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()) % 1000;
@@ -144,7 +144,7 @@ std::string timestampForFile() {
     return stream.str();
 }
 
-// Writes a best-effort native crash report without throwing outward.
+// 尽力写入 native 崩溃报告，并避免继续向外抛出异常。
 void writeNativeCrashReport(const std::string& source, const std::string& detail) {
     static std::atomic_flag writing = ATOMIC_FLAG_INIT;
     if (writing.test_and_set()) return;
@@ -164,9 +164,9 @@ void writeNativeCrashReport(const std::string& source, const std::string& detail
 }
 
 #ifdef _WIN32
-// Managed handlers cannot catch fatal faults below the P/Invoke boundary.
-// Record native crash details before Windows tears the process down.
-// Captures fatal Windows exceptions before normal unhandled-exception dispatch.
+// 托管处理器无法捕获 P/Invoke 边界以下的致命故障。
+// 在 Windows 终止进程前记录 native 崩溃细节。
+// 在普通未处理异常分发前捕获致命 Windows 异常。
 LONG CALLBACK nativeVectoredExceptionHandler(EXCEPTION_POINTERS* exceptionInfo) {
     const auto code = exceptionInfo && exceptionInfo->ExceptionRecord
         ? exceptionInfo->ExceptionRecord->ExceptionCode
@@ -190,7 +190,7 @@ LONG CALLBACK nativeVectoredExceptionHandler(EXCEPTION_POINTERS* exceptionInfo) 
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
-// Captures fatal Windows exceptions that reach the process unhandled filter.
+// 捕获到达进程未处理异常过滤器的致命 Windows 异常。
 LONG WINAPI nativeUnhandledExceptionFilter(EXCEPTION_POINTERS* exceptionInfo) {
     std::ostringstream detail;
     const auto code = exceptionInfo && exceptionInfo->ExceptionRecord
@@ -207,7 +207,7 @@ LONG WINAPI nativeUnhandledExceptionFilter(EXCEPTION_POINTERS* exceptionInfo) {
 }
 #endif
 
-// Records uncaught C++ exceptions before delegating to process abort.
+// 在交给进程 abort 前记录未捕获的 C++ 异常。
 void nativeTerminateHandler() {
     std::string detail = "std::terminate was called.";
     if (auto exception = std::current_exception()) {
@@ -225,12 +225,12 @@ void nativeTerminateHandler() {
     std::abort();
 }
 
-// Installs native crash-report hooks once per process.
+// 每个进程只安装一次 native 崩溃报告 hook。
 void installNativeCrashHandlersOnce() {
     std::call_once(gCrashHandlerOnce, []() {
 #ifdef _WIN32
-        // Vectored handlers run before the unhandled filter, which gives heap
-        // corruption and access violations a better chance to leave a report.
+        // vectored handler 会先于未处理异常过滤器运行，
+        // 因而堆损坏和访问违规更有机会留下报告。
         AddVectoredExceptionHandler(1, nativeVectoredExceptionHandler);
         SetUnhandledExceptionFilter(nativeUnhandledExceptionFilter);
 #endif
@@ -238,7 +238,7 @@ void installNativeCrashHandlersOnce() {
     });
 }
 
-// Keeps a bounded tail of retired sessions alive for in-flight callbacks.
+// 保留有限数量的已退役会话，使飞行中的回调仍有有效对象可用。
 void trimRetiredObjects() {
     constexpr std::size_t maxRetiredObjects = 8;
     if (gRetiredHostSessions.size() > maxRetiredObjects) {
@@ -249,13 +249,13 @@ void trimRetiredObjects() {
     }
 }
 
-// Destroys retired native objects once no managed UI callback should run again.
+// 确认不会再运行托管 UI 回调后，销毁已退役的 native 对象。
 void clearRetiredObjectsForShutdown() {
     gRetiredPlSessions.clear();
     gRetiredHostSessions.clear();
 }
 
-// Stops current sessions and moves them aside until callbacks drain.
+// 停止当前会话，并把对象移到旁路队列中等待回调排空。
 void retireActiveObjects() {
     if (gHostSession) {
         gHostSession->stop();
@@ -269,7 +269,7 @@ void retireActiveObjects() {
 }
 }
 
-// Registers the managed event callback used by WinUI.
+// 注册 WinUI 使用的托管事件回调。
 void CHAT_CALL chat_set_event_callback(chat_event_callback callback, void* user_data) {
     installNativeCrashHandlersOnce();
     std::lock_guard<std::recursive_mutex> lock(gMutex);
@@ -277,9 +277,9 @@ void CHAT_CALL chat_set_event_callback(chat_event_callback callback, void* user_
     gUserData = user_data;
 }
 
-// Updates the environment table used by the native CRT. C# Environment APIs do
-// not reliably update std::getenv's copy on Windows, so WinUI calls this for
-// member PKI settings before creating HostSessionCore/ClientSessionCore.
+// 更新 native CRT 使用的环境变量表。Windows 上 C# Environment API
+// 不一定可靠更新 std::getenv 看到的副本，因此 WinUI 会在创建
+// HostSessionCore/ClientSessionCore 前用它写入成员 PKI 设置。
 int CHAT_CALL chat_set_environment_variable(const char* name, const char* value) {
     installNativeCrashHandlersOnce();
     const auto key = safeString(name);
@@ -296,9 +296,8 @@ int CHAT_CALL chat_set_environment_variable(const char* name, const char* value)
 #endif
 }
 
-// Starts a Host participant against an already-running Server.
-// Server is the only long-lived listener; Host remains a room member and should
-// not open its own signaling listen port.
+// 针对已经运行的 Server 启动一个 Host 参与者。
+// Server 是唯一长期监听者；Host 仍是房间成员，不打开自己的信令监听端口。
 int CHAT_CALL chat_host_start(const char* server_url, const char* room_id, const char* username, const char* password) {
     installNativeCrashHandlersOnce();
 
@@ -345,7 +344,7 @@ int CHAT_CALL chat_host_start(const char* server_url, const char* room_id, const
     }
 }
 
-// Starts a client session by connecting to an existing signaling server.
+// 连接已有信令服务器并启动一个 Client 会话。
 int CHAT_CALL chat_join_start(const char* url, const char* room_id, const char* username, const char* password) {
     installNativeCrashHandlersOnce();
     try {
@@ -382,7 +381,7 @@ int CHAT_CALL chat_join_start(const char* url, const char* room_id, const char* 
     }
 }
 
-// Sends one text or slash-command line through the active Host/Client session.
+// 通过活动 Host/Client 会话发送一行文本或斜杠命令。
 int CHAT_CALL chat_send_line(const char* line) {
     installNativeCrashHandlersOnce();
     try {
@@ -411,7 +410,7 @@ int CHAT_CALL chat_send_line(const char* line) {
     }
 }
 
-// Sends one text or slash-command line to a selected member. Empty target keeps room broadcast.
+// 向选定成员发送一行文本或斜杠命令；目标为空时保持房间广播。
 int CHAT_CALL chat_send_line_to(const char* target, const char* line) {
     installNativeCrashHandlersOnce();
     try {
@@ -441,7 +440,7 @@ int CHAT_CALL chat_send_line_to(const char* target, const char* line) {
     }
 }
 
-// Sends an image file through the active Host/Client session.
+// 通过活动 Host/Client 会话发送一个图片文件。
 int CHAT_CALL chat_send_image(const char* file_path) {
     installNativeCrashHandlersOnce();
     try {
@@ -468,7 +467,7 @@ int CHAT_CALL chat_send_image(const char* file_path) {
     }
 }
 
-// Sends one image file to a selected member display name through the active session.
+// 通过活动会话向选定成员显示名发送一个图片文件。
 int CHAT_CALL chat_send_image_to(const char* target, const char* file_path) {
     installNativeCrashHandlersOnce();
     try {
@@ -496,7 +495,7 @@ int CHAT_CALL chat_send_image_to(const char* target, const char* file_path) {
     }
 }
 
-// Sends a text handout file through the active Host/Client session.
+// 通过活动 Host/Client 会话发送一个文本资料文件。
 int CHAT_CALL chat_send_file(const char* file_path) {
     installNativeCrashHandlersOnce();
     try {
@@ -523,7 +522,7 @@ int CHAT_CALL chat_send_file(const char* file_path) {
     }
 }
 
-// Sends one generic text-file attachment to a selected member display name.
+// 向选定成员显示名发送一个普通文本文件附件。
 int CHAT_CALL chat_send_file_to(const char* target, const char* file_path) {
     installNativeCrashHandlersOnce();
     try {
@@ -551,7 +550,7 @@ int CHAT_CALL chat_send_file_to(const char* target, const char* file_path) {
     }
 }
 
-// Sends a short voice clip through the active Host/Client session.
+// 通过活动 Host/Client 会话发送一段短语音。
 int CHAT_CALL chat_send_voice(const char* file_path) {
     installNativeCrashHandlersOnce();
     try {
@@ -578,7 +577,7 @@ int CHAT_CALL chat_send_voice(const char* file_path) {
     }
 }
 
-// Sends one voice attachment to a selected member display name.
+// 向选定成员显示名发送一个语音附件。
 int CHAT_CALL chat_send_voice_to(const char* target, const char* file_path) {
     installNativeCrashHandlersOnce();
     try {
@@ -606,7 +605,7 @@ int CHAT_CALL chat_send_voice_to(const char* target, const char* file_path) {
     }
 }
 
-// Stops all active native session objects.
+// 停止所有活动 native 会话对象。
 void CHAT_CALL chat_stop() {
     installNativeCrashHandlersOnce();
     std::lock_guard<std::recursive_mutex> lock(gMutex);
@@ -614,7 +613,7 @@ void CHAT_CALL chat_stop() {
     emitEvent("status", "Session stopped");
 }
 
-// Performs final cleanup when the GUI process is closing.
+// GUI 进程关闭时执行最终清理。
 void CHAT_CALL chat_shutdown() {
     installNativeCrashHandlersOnce();
     {
@@ -624,9 +623,9 @@ void CHAT_CALL chat_shutdown() {
         retireActiveObjects();
     }
 
-    // WebSocket close callbacks can arrive after stop(). Retired objects stay
-    // alive briefly, but cleanup runs off the WinUI close path so clicking the
-    // window close button does not freeze the desktop shell.
+    // WebSocket close 回调可能在 stop() 之后到达。
+    // 已退役对象会短暂保活，但清理工作离开 WinUI 关闭路径执行，
+    // 避免点击窗口关闭按钮时卡住桌面 shell。
     if (!gShutdownCleanupQueued.exchange(true)) {
         std::thread([]() {
             std::this_thread::sleep_for(std::chrono::milliseconds(1200));

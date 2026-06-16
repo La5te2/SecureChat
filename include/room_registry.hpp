@@ -1,5 +1,5 @@
-// In-memory room registry for SignalingServer. It records room passwords and
-// Host/Client membership for the current process.
+// SignalingServer 使用的内存房间注册表。它记录当前进程内的房间密码和
+// Host/Client 成员关系。
 #pragma once
 
 #include "auth_service.hpp"
@@ -10,32 +10,32 @@
 #include <unordered_map>
 
 enum class RoomRole {
-    // Stored role is used for membership bookkeeping only. Chat authority is
-    // enforced by Host/Client protocol logic and Server connection state.
+    // 存储的 role 仅用于成员关系记账。聊天权限由 Host/Client 协议逻辑
+    // 和 Server 连接状态共同执行。
     Host,
     Client
 };
 
 struct RoomMember {
-    // Account id is stable inside this process and exists only while room is active.
+    // account id 在当前进程内稳定存在，并且只在房间活动期间有效。
     UserAccount account;
     RoomRole role = RoomRole::Client;
 };
 
 class RoomRegistry {
 public:
-    // Creates a room with the given host and room password.
+    // 使用给定 Host 和房间密码创建房间。
     void createRoom(const std::string& roomId, const UserAccount& host, const std::string& password);
-    // Checks whether the supplied room password matches the stored room password.
+    // 检查传入房间密码是否匹配已保存的房间密码。
     bool passwordMatches(const std::string& roomId, const std::string& password) const;
-    // Adds or refreshes a client membership in an existing room.
+    // 在已有房间中添加或刷新 Client 成员关系。
     RoomMember joinClient(const std::string& roomId, const UserAccount& client);
-    // Removes a room and all in-memory memberships.
+    // 移除房间及其所有内存成员关系。
     void closeRoom(const std::string& roomId);
 
 private:
     struct RoomState {
-        // RoomState never stores the room password itself, only its digest.
+        // RoomState 从不保存房间密码本身，只保存其摘要。
         std::string roomId;
         std::array<unsigned char, 32> passwordHash{};
         std::optional<RoomMember> host;

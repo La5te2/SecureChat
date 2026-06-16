@@ -1,4 +1,4 @@
-// Console utility implementation for UTF-8 terminal IO and hidden password input.
+// 控制台工具实现：UTF-8 终端 IO 和隐藏密码输入。
 #include "console_utils.hpp"
 
 #include <iostream>
@@ -102,8 +102,7 @@ bool readPasswordLineUtf8(const std::string& prompt, std::string& line) {
     DWORD originalMode = 0;
     if (!GetConsoleMode(input, &originalMode)) return false;
 
-    // Disable terminal echo so room passwords do not land in screenshots,
-    // terminal scrollback, command history, or process listings.
+    // 禁用终端回显，避免房间密码进入截图、终端滚屏、命令历史或进程列表。
     const DWORD hiddenMode = originalMode & ~ENABLE_ECHO_INPUT;
     if (!SetConsoleMode(input, hiddenMode)) return false;
 

@@ -1,5 +1,5 @@
-// Client session implementation. It signs join_room, receives Host group keys,
-// decrypts relay envelopes, and sends encrypted chat/attachment messages.
+// Client 会话实现。它签名 join_room，接收 Host 分发的群密钥，
+// 解密中继 envelope，并发送加密聊天/附件消息。
 #include "client_session_core.hpp"
 
 #include "attachment_transfer.hpp"
@@ -15,7 +15,7 @@
 namespace {
 namespace attachment = chat::attachment;
 
-// Returns a copy without surrounding ASCII whitespace.
+// 返回去除首尾 ASCII 空白后的副本。
 std::string trimCopy(std::string value) {
     const auto first = value.find_first_not_of(" \t\r\n");
     if (first == std::string::npos) return "";
@@ -24,8 +24,8 @@ std::string trimCopy(std::string value) {
 }
 
 bool parseDirectPrefix(const std::string& line, std::string& target, std::string& body) {
-    // Splits "/to alice hello" into a routing token and the remaining command
-    // body. The body may itself be an attachment command such as "/image p.png".
+    // 将 "/to alice hello" 拆成路由 token 和剩余命令正文。
+    // 正文本身也可以是 "/image p.png" 这类附件命令。
     if (line.rfind("/to ", 0) != 0) return false;
     const auto rest = trimCopy(line.substr(4));
     const auto split = rest.find_first_of(" \t\r\n");
@@ -41,16 +41,16 @@ bool parseDirectPrefix(const std::string& line, std::string& target, std::string
 
 void markPrivateTarget(Message& msg, const std::string& targetId, const std::string& targetName) {
     if (targetId.empty()) return;
-    // The clear envelope exposes only the routing id. The encrypted payload
-    // keeps the UI label and marks this item as private.
+    // 明文 envelope 只暴露路由 id。
+    // 加密载荷保留 UI 标签，并把该项标记为私发。
     msg.payload["private"] = true;
     msg.payload["targetId"] = targetId;
     msg.payload["targetName"] = targetName.empty() ? targetId : targetName;
 }
 
 bool attachmentKindForMeta(const std::string& type, attachment::Kind& kind) {
-    // Maps decrypted attachment metadata messages back to the receive-store
-    // kind so text, image, and voice share the same encrypted relay path.
+    // 将已解密附件元数据消息映射回 receive-store 类型，
+    // 使文本、图片和语音共用同一条加密中继路径。
     if (type == "image_meta") {
         kind = attachment::Kind::Image;
         return true;
@@ -67,14 +67,14 @@ bool attachmentKindForMeta(const std::string& type, attachment::Kind& kind) {
 }
 
 bool isAttachmentBinaryType(const std::string& type) {
-    // Binary chunks are encrypted JSON messages carrying base64 payloads; this
-    // distinguishes chunk messages from ordinary text or metadata messages.
+    // 二进制分片是携带 base64 载荷的加密 JSON 消息；
+    // 该判断用于把分片消息同普通文本或元数据消息区分开。
     return type == "image_binary" || type == "file_binary" || type == "voice_binary";
 }
 
 std::string actorIdFromMessage(const Message& msg) {
-    // Attachment reassembly is keyed by stable actor id, not display name,
-    // because usernames can collide across reconnects or future UI changes.
+    // 附件重组以稳定 actor id 为键，而不使用显示名；
+    // 用户名在重连或未来 UI 变化时可能出现冲突。
     if (msg.payload.is_object() && msg.payload.contains("actorId") && msg.payload["actorId"].is_string()) {
         const auto id = msg.payload["actorId"].get<std::string>();
         if (!id.empty()) return id;
@@ -83,8 +83,8 @@ std::string actorIdFromMessage(const Message& msg) {
 }
 }
 
-// Stores the signaling target and client credentials.
-// Client input maps directly to plain SecureChat protocol messages.
+// 保存信令目标和 Client 凭据。
+// Client 输入会直接映射为普通 SecureChat 协议消息。
 ClientSessionCore::ClientSessionCore(
     std::string url,
     std::string room,
@@ -96,15 +96,15 @@ ClientSessionCore::ClientSessionCore(
       mUsername(std::move(username)),
       mPassword(std::move(password)),
       mWsConfig(std::move(wsConfig)) {
-    // Server registers and routes with this opaque token. The typed room id
-    // remains local and is what PKI signatures bind to.
+    // Server 使用该不透明 token 注册和路由。
+    // 用户输入的 room id 保留在本地，并作为 PKI 签名绑定对象。
     mRoomToken = chat::secure_relay::deriveRoomToken(mRoomId, mPassword);
-    // The X25519 pair is per session. Its public key is signed in join_room;
-    // its private key stays local and unwraps the Host-distributed group key.
+    // X25519 密钥对按会话生成。公钥会在 join_room 中被签名；
+    // 私钥留在本地，用于解封装 Host 分发的群密钥。
     mMemberKeys = chat::secure_relay::generateMemberKeyPair();
     chat::websocket_config::applyClientTlsFromEnvironment(mWsConfig);
-    // PKI is mandatory for Host/Client startup. Missing environment variables
-    // fail here before any room join message is sent.
+    // Host/Client 启动必须具备 PKI 配置。
+    // 环境变量缺失会在这里失败，且不会发送任何入房消息。
     mIdentity = chat::identity_pki::loadFromEnvironment();
 }
 
@@ -112,12 +112,12 @@ ClientSessionCore::~ClientSessionCore() {
     stopSignalingWorker();
 }
 
-// Replaces UI/CLI event callbacks used by the session.
+// 替换该会话使用的 UI/CLI 事件回调。
 void ClientSessionCore::setCallbacks(ChatCallbacks callbacks) {
     mCallbacks = std::move(callbacks);
 }
 
-// Opens the signaling WebSocket and requests to join the configured room.
+// 打开信令 WebSocket，并请求加入已配置房间。
 void ClientSessionCore::start() {
     mSignalingWorkerStopping.store(false);
     if (!mSignalingThread.joinable()) {
@@ -138,11 +138,11 @@ void ClientSessionCore::start() {
             {"publicKey", mMemberKeys.publicKey}
         };
         chatEmit(mCallbacks.onStatus, "PKI identity ready: " + mIdentity.fingerprint());
-        // Sign roomId, username, and temporary X25519 public key so Host can
-        // detect replacement before sending this Client a room group key.
+        // 对 roomId、username 和临时 X25519 公钥签名，
+        // 使 Host 在给该 Client 发送房间群密钥前能检测替换攻击。
         msg["identity"] = mIdentity.signJoinRoom(mRoomId, mUsername, mMemberKeys.publicKey);
         mWs->send(msg.dump());
-        // Keep the room password only long enough to authenticate the join.
+        // 房间密码只保留到完成入房认证为止。
         std::fill(mPassword.begin(), mPassword.end(), '\0');
         mPassword.clear();
     });
@@ -154,9 +154,8 @@ void ClientSessionCore::start() {
     mWs->onClosed([this]() {
         chatEmit(mCallbacks.onStatus, "Signaling closed");
         if (!mSawErrorFrame.load() && !mStopped.load() && !mShutdownRequested.load()) {
-            // WebSocket close can arrive without the error JSON frame that the
-            // peer tried to send. Report the current admission stage so WinUI
-            // does not misleadingly treat every silent close as a build mismatch.
+            // WebSocket close 可能先于对端试图发送的 error JSON 帧到达。
+            // 报告当前准入阶段，避免 WinUI 把所有静默关闭都误判为构建版本不匹配。
             const auto message = mJoinedRoom.load()
                 ? "Signaling connection ended unexpectedly; the Server or Host may have stopped, or the network closed the socket"
                 : "Signaling closed before room join completed; check Server URL, room/password, Host status, PKI files, and rebuild all components if one executable was updated";
@@ -173,7 +172,7 @@ void ClientSessionCore::start() {
     mWs->open(mWsUrl);
 }
 
-// Closes the signaling WebSocket and local transfer state.
+// 关闭信令 WebSocket 和本地传输状态。
 void ClientSessionCore::stop() {
     mStopped.store(true);
     if (mWs && !mWs->isClosed()) {
@@ -183,14 +182,14 @@ void ClientSessionCore::stop() {
     requestShutdown("Stopped");
 }
 
-// Reports whether the outer CLI/API loop should stop polling this session.
+// 返回外层 CLI/API 循环是否应停止轮询该会话。
 bool ClientSessionCore::shouldStop() const {
     if (mStopped.load()) return true;
     if (mShutdownRequested.load()) return true;
     return mWs && mWs->isClosed();
 }
 
-// Parses one Client input line and sends the corresponding chat/command/attachment.
+// 解析一行 Client 输入，并发送对应的聊天、命令或附件。
 void ClientSessionCore::sendLine(const std::string& line) {
     std::string directTarget;
     std::string directBody;
@@ -301,14 +300,14 @@ void ClientSessionCore::sendLineTo(const std::string& target, const std::string&
 }
 
 Message ClientSessionCore::parseInput(const std::string& line) {
-    // Client text messages use the server-assigned client id as the protocol
-    // sender and keep the human display name in payload metadata.
+    // Client 文本消息使用 Server 分配的 client id 作为协议发送者，
+    // 并把人类可读显示名保存在载荷元数据中。
     return makeTextMessage(mClientId, line);
 }
 
 std::string ClientSessionCore::resolveMemberId(const std::string& token) {
-    // Private relay needs a concrete member id, but UI/CLI targets are display
-    // names only. This avoids collisions with fixed protocol ids such as "host".
+    // 私发中继需要具体成员 id，但 UI/CLI 目标只使用显示名。
+    // 这样可以避免与 "host" 等固定协议 id 冲突。
     if (token.empty()) return "";
 
     std::lock_guard<std::mutex> lock(mMembersMutex);
@@ -325,9 +324,9 @@ bool ClientSessionCore::rememberVerifiedMemberIdentity(
     const json& identity,
     const std::string& advertisedFingerprint,
     const std::string& source) {
-    // Server/Host may report member lists, but neither statement is trusted as a
-    // key authority. The member's certificate signature must bind roomId,
-    // displayName, and X25519 publicKey before pairwise sends can use it.
+    // Server/Host 可以报告成员列表，但二者都不被视为密钥权威。
+    // 成员证书签名必须绑定 roomId、displayName 和 X25519 公钥后，
+    // 双方私发才能使用该成员信息。
     if (memberId.empty() || publicKey.empty() || !identity.is_object()) return false;
     try {
         const auto verified = mIdentity.verifyJoinRoom(mRoomId, displayName, publicKey, identity);
@@ -511,8 +510,8 @@ bool ClientSessionCore::installGroupState(const json& groupState, std::uint64_t 
 }
 
 void ClientSessionCore::handleRelayMessage(const Message& msg) {
-    // All application data arrives after AES-GCM decryption. Text is rendered
-    // directly; attachment metadata stages a receive slot; chunks append bytes.
+    // 所有应用数据都在 AES-GCM 解密后到达。
+    // 文本直接渲染；附件元数据创建接收槽位；分片追加字节。
     if (msg.type == "member_identity") {
         const auto relaySenderId = msg.payload.value("relaySenderId", "");
         const auto relaySenderKind = msg.payload.value("relaySenderKind", "");
@@ -524,9 +523,8 @@ void ClientSessionCore::handleRelayMessage(const Message& msg) {
             const auto publicKey = msg.payload.value("publicKey", "");
             const auto identity = msg.payload.find("identity");
             if (!memberId.empty() && !publicKey.empty() && identity != msg.payload.end() && identity->is_object()) {
-                // Host announcements are encrypted control messages, but Clients
-                // still re-verify the embedded member signature and reject any
-                // conflict with a previously verified Server member listing.
+                // Host 公告是加密控制消息，但 Client 仍会重新验证其中的成员签名，
+                // 并拒绝与此前已验证 Server 成员列表冲突的内容。
                 rememberVerifiedMemberIdentity(memberId, displayName, publicKey, *identity, fingerprint, "member_identity");
             }
         }
@@ -541,8 +539,8 @@ void ClientSessionCore::handleRelayMessage(const Message& msg) {
     attachment::Kind kind = attachment::Kind::Text;
     const auto senderKey = actorIdFromMessage(msg);
     if (attachmentKindForMeta(msg.type, kind)) {
-        // Metadata opens a receive slot. The following binary chunks must carry
-        // the same transferId or they are rejected.
+        // 元数据会打开接收槽位。后续二进制分片必须携带相同 transferId，
+        // 否则会被拒绝。
         const auto transferId = attachment::transferIdFromMessage(msg);
         const auto pending = mPendingTransfers.stage(
             senderKey,
@@ -574,8 +572,8 @@ void ClientSessionCore::handleRelayMessage(const Message& msg) {
 }
 
 void ClientSessionCore::handleRelayBinaryChunk(const std::string& senderKey, const Message& msg) {
-    // Binary chunks are still inside encrypted relay envelopes when received by
-    // this function. This function only reassembles already-decrypted chunks.
+    // 二进制分片到达该函数前仍位于加密中继 envelope 内。
+    // 该函数只重组已经解密的分片。
     std::string transferId;
     try {
         transferId = attachment::transferIdFromMessage(msg);
@@ -606,7 +604,7 @@ void ClientSessionCore::handleRelayBinaryChunk(const std::string& senderKey, con
     }
 }
 
-// Sends an image as encrypted metadata followed by encrypted relay chunks.
+// 以加密元数据加后续加密中继分片的形式发送图片。
 bool ClientSessionCore::sendImage(const std::string& filePath) {
     return sendImageTo("", filePath);
 }
@@ -627,7 +625,7 @@ bool ClientSessionCore::sendImageTo(const std::string& target, const std::string
         targetId);
 }
 
-// Sends a text handout as encrypted metadata followed by encrypted relay chunks.
+// 以加密元数据加后续加密中继分片的形式发送文本资料。
 bool ClientSessionCore::sendTextFile(const std::string& filePath) {
     return sendTextFileTo("", filePath);
 }
@@ -648,7 +646,7 @@ bool ClientSessionCore::sendTextFileTo(const std::string& target, const std::str
         targetId);
 }
 
-// Sends a short WAV voice clip as encrypted metadata followed by encrypted relay chunks.
+// 以加密元数据加后续加密中继分片的形式发送短 WAV 语音。
 bool ClientSessionCore::sendVoice(const std::string& filePath) {
     return sendVoiceTo("", filePath);
 }
@@ -675,8 +673,8 @@ bool ClientSessionCore::sendRelayMessage(
     const std::string& senderName,
     const std::string& senderKind,
     const std::string& targetId) {
-    // All text and attachment messages take this path after the room group key
-    // is installed. targetId stays inside ciphertext; Server only broadcasts.
+    // 房间群密钥安装后，所有文本和附件消息都走该路径。
+    // targetId 保留在密文中；Server 只负责广播。
     if (!chat::secure_relay::hasUsableGroupKey(mGroupKey)) {
         chatEmit(mCallbacks.onStatus, "Waiting for room group key");
         return false;
@@ -710,9 +708,8 @@ bool ClientSessionCore::sendRelayMessage(
 }
 
 Message ClientSessionCore::wrapPairwiseForTarget(const Message& msg, const std::string& targetId) {
-    // Private messages fail closed: if the target's PKI-bound X25519 public key
-    // has not arrived through verified member_identity, do not fall back to room
-    // group-key-only private delivery.
+    // 私发消息采用失败即关闭策略：如果尚未通过已验证 member_identity
+    // 获得目标的 PKI 绑定 X25519 公钥，就不回退到仅依赖房间群密钥的私发。
     if (targetId == mClientId) throw std::runtime_error("cannot send a private message to yourself");
 
     std::string targetPublicKey;
@@ -739,9 +736,9 @@ Message ClientSessionCore::wrapPairwiseForTarget(const Message& msg, const std::
 }
 
 Message ClientSessionCore::decryptPairwiseFromMember(const Message& msg) {
-    // The outer encrypted_relay proves room membership and delivery target. This
-    // inner pairwise layer proves only the intended target can read the private
-    // payload, even if another member also has the room group key.
+    // 外层 encrypted_relay 证明房间成员资格和投递目标。
+    // 内层双方私发加密保证只有预期目标能读取私发载荷，
+    // 即使其他成员也拥有房间群密钥。
     const auto senderId = msg.payload.value("relaySenderId", "");
     if (senderId.empty() || senderId == mClientId) {
         throw std::runtime_error("invalid pairwise sender");
@@ -773,9 +770,8 @@ Message ClientSessionCore::decryptPairwiseFromMember(const Message& msg) {
 }
 
 bool ClientSessionCore::rememberRelayEnvelope(const json& envelope) {
-    // A malicious Server can replay an old outer envelope. AES-GCM authenticates
-    // the ciphertext, but freshness is a receiver responsibility, so keep a
-    // bounded nonce/tag cache per session.
+    // 恶意 Server 可以重放旧的外层 envelope。
+    // AES-GCM 能认证密文，但新鲜性由接收端负责，因此每个会话维护有限 nonce/tag 缓存。
     constexpr std::size_t maxRememberedRelayIds = 4096;
     const auto replayId = chat::secure_relay::replayIdForEnvelope(envelope);
     if (replayId.empty()) return true;
@@ -799,9 +795,8 @@ bool ClientSessionCore::sendAttachmentRelay(
     const std::string& binaryType,
     const std::string& mime,
     const std::string& targetId) {
-    // Attachments are sent as one encrypted metadata message followed by
-    // encrypted chunks. targetId is empty for room broadcast and set for private
-    // delivery through the same Server relay.
+    // 附件以一条加密元数据消息加后续加密分片发送。
+    // 房间广播时 targetId 为空；私发时通过同一 Server 中继设置目标。
     if (mClientId.empty()) {
         chatEmit(mCallbacks.onStatus, "Client identity is not ready yet");
         return false;
@@ -819,8 +814,8 @@ bool ClientSessionCore::sendAttachmentRelay(
         if (it != mMemberNamesById.end()) targetName = it->second;
     }
     Message meta = attachment::makeBinaryMeta(metaType, mUsername, filePath, mime, bytes.size());
-    // Actor metadata lets UI distinguish sender identity after decrypting, while
-    // relay metadata is still bound to Server-side connection state.
+    // actor 元数据让 UI 在解密后区分发送者身份，
+    // 同时中继元数据仍绑定到 Server 侧连接状态。
     meta.payload["actorId"] = mClientId;
     meta.payload["actorKind"] = chat::protocol::ClientActorKind;
     meta.payload["displayName"] = mUsername;
@@ -833,8 +828,8 @@ bool ClientSessionCore::sendAttachmentRelay(
     for (std::size_t offset = 0; offset < bytes.size(); offset += attachment::RelayChunkBytes) {
         const auto chunkSize = (std::min)(attachment::RelayChunkBytes, bytes.size() - offset);
         Message chunk;
-        // Each chunk is its own application Message and is encrypted separately
-        // by sendRelayMessage, so large attachments never travel as plaintext.
+        // 每个分片都是独立的应用 Message，并由 sendRelayMessage 分别加密，
+        // 因此大附件不会以明文传输。
         chunk.type = binaryType;
         chunk.from = mUsername;
         chunk.name = meta.name;
@@ -871,7 +866,7 @@ bool ClientSessionCore::sendAttachmentRelay(
     return true;
 }
 
-// Idempotently marks the Client session closed and releases transport objects.
+// 幂等地标记 Client 会话已关闭，并释放传输对象。
 void ClientSessionCore::requestShutdown(const std::string& reason) {
     if (!mShutdownRequested.exchange(true)) {
         if (mWs && !mWs->isClosed()) {
@@ -907,10 +902,9 @@ void ClientSessionCore::signalingWorkerLoop() {
             mSignalingQueue.pop_front();
         }
 
-        // JSON parsing, PKI certificate verification, and GKA contribution
-        // generation can be relatively heavy. Keeping them off the WSS callback
-        // thread prevents libdatachannel from closing a TLS socket while the
-        // application is still authenticating the previous frame.
+        // JSON 解析、PKI 证书验证和 GKA contribution 生成可能相对耗时。
+        // 将这些工作移出 WSS 回调线程，可避免应用仍在认证上一帧时
+        // libdatachannel 关闭 TLS socket。
         handleSignalingMessage(payload);
     }
 }
@@ -924,13 +918,13 @@ void ClientSessionCore::stopSignalingWorker() {
     }
 }
 
-// Handles room control and encrypted relay messages from the Server WebSocket.
+// 处理来自 Server WebSocket 的房间控制消息和加密中继消息。
 void ClientSessionCore::handleSignalingMessage(const std::string& s) {
     if (mStopped.load() || mShutdownRequested.load()) return;
 
     try {
-        // Signaling and relay messages are untrusted network input. Parse with
-        // an explicit budget and object requirement before reading fields.
+        // 信令和中继消息都是不可信网络输入。
+        // 读取字段前，先按显式预算和对象要求解析。
         auto j = chat::protocol::parseJsonObjectWithBudget(
             s,
             chat::protocol::MaxSignalingMessageBytes,
@@ -938,13 +932,11 @@ void ClientSessionCore::handleSignalingMessage(const std::string& s) {
         std::string type = j.value("type", "");
 
         if (type == "joined") {
-            // Server-assigned clientId becomes the routing id for future private
-            // relay and group-key envelopes.
+            // Server 分配的 clientId 会成为后续私发中继和 group-key envelope 的路由 id。
             mClientId = j.value("clientId", "");
             mJoinedRoom.store(true);
-            // Use the Server-accepted display name for all later signed GKA
-            // contributions. Host verifies this field against its member table,
-            // so keeping the local copy in sync prevents avoidable GKA rejection.
+            // 后续签名 GKA contribution 使用 Server 接受的显示名。
+            // Host 会用成员表验证该字段，本地副本保持同步可避免不必要的 GKA 拒绝。
             const auto acceptedUsername = j.value("username", mUsername);
             if (!acceptedUsername.empty()) {
                 mUsername = acceptedUsername;
@@ -953,9 +945,8 @@ void ClientSessionCore::handleSignalingMessage(const std::string& s) {
             const auto hostUsername = j.value("hostUsername", chat::protocol::HostActorId);
             const auto hostIdentity = j.find("hostIdentity");
             if (hostPublicKey.empty() || hostIdentity == j.end() || !hostIdentity->is_object()) {
-                // A Client cannot participate in GKA until it has authenticated
-                // Host's signed identity/publicKey binding. Missing fields here
-                // usually mean an old Server build is still running.
+                // Client 只有认证 Host 签名的 identity/publicKey 绑定后才能参与 GKA。
+                // 此处字段缺失通常表示仍在运行旧 Server 构建。
                 chatEmit(
                     mCallbacks.onError,
                     "Host identity is missing from join response; check that Server, Host, and Client are the same build");
@@ -969,8 +960,8 @@ void ClientSessionCore::handleSignalingMessage(const std::string& s) {
                     *hostIdentity,
                     "",
                     "joined")) {
-                // Verification failure is terminal. Staying connected would only
-                // lead to a GKA timeout, which hides the real PKI/root-cause.
+                // 验证失败是终止性错误。继续保持连接只会导致 GKA 超时，
+                // 并掩盖真正的 PKI 根因。
                 chatEmit(
                     mCallbacks.onError,
                     "Host identity verification failed; check Client trust store, Host certificate chain, room name, and rebuild all components if one executable was updated");
@@ -984,9 +975,9 @@ void ClientSessionCore::handleSignalingMessage(const std::string& s) {
             chatEmit(mCallbacks.onStatus, "Waiting for room group key");
         }
         else if (type == "room_members") {
-            // Keep latest member name/id map for resolving To: name input. If
-            // Server includes signed member identities, verify them after leaving
-            // the mutex so OpenSSL work does not block UI/member map reads.
+            // 保存最新成员 name/id 映射，用于解析 To: name 输入。
+            // 如果 Server 包含已签名成员 identity，离开 mutex 后再验证，
+            // 避免 OpenSSL 工作阻塞 UI/成员表读取。
             std::ostringstream members;
             bool first = true;
             std::vector<json> identityCandidates;
@@ -1005,8 +996,8 @@ void ClientSessionCore::handleSignalingMessage(const std::string& s) {
                             identityCandidates.push_back(member);
                         }
                     }
-                    // Emit name/id so UI clients can keep internal PKI mapping
-                    // without parsing the raw signaling JSON.
+                    // 发出 name/id，使 UI Client 不解析原始信令 JSON
+                    // 也能保留内部 PKI 映射。
                     if (!first) members << "; ";
                     members << username << " / " << id;
                     first = false;
@@ -1031,11 +1022,10 @@ void ClientSessionCore::handleSignalingMessage(const std::string& s) {
             for (const auto& member : identityCandidates) {
                 const auto id = member.value("id", "");
                 if (id != chat::protocol::HostActorId) {
-                    // Non-Host member identities are announced again through
-                    // encrypted member_identity control messages after the GKA
-                    // epoch commits. Deferring them keeps room_members light so
-                    // a freshly joined Client can answer gka_request before the
-                    // Host-side contribution deadline.
+                    // 非 Host 成员身份会在 GKA epoch 提交后，
+                    // 通过加密 member_identity 控制消息再次公告。
+                    // 延后处理可让 room_members 保持轻量，
+                    // 使新加入 Client 能在 Host 侧 contribution 截止前响应 gka_request。
                     continue;
                 }
                 {
@@ -1069,9 +1059,8 @@ void ClientSessionCore::handleSignalingMessage(const std::string& s) {
                 if (host != mMemberNamesById.end() && !host->second.empty()) {
                     hostName = host->second;
                 }
-                // The Host signature on group_key authenticates the Host identity
-                // before member_identity broadcasts arrive. Store the fingerprint
-                // immediately so pairwise private messages from Host can be opened.
+                // group_key 上的 Host 签名会在 member_identity 广播到达前认证 Host 身份。
+                // 立即保存指纹，使来自 Host 的 pairwise 私发消息可以被打开。
                 mMemberFingerprintsById[chat::protocol::HostActorId] = verified.fingerprint;
                 if (host == mMemberNamesById.end()) {
                     mMemberNamesById[chat::protocol::HostActorId] = hostName;
@@ -1086,9 +1075,8 @@ void ClientSessionCore::handleSignalingMessage(const std::string& s) {
                 chatEmit(mCallbacks.onError, "Dropped replayed or stale room group key");
                 return;
             }
-            // Epoch is checked before installing the key, so a replayed old
-            // group_key cannot roll the Client back to a previous K_G. The
-            // decrypted group state is verified before K_G is derived locally.
+            // 安装密钥前会检查 epoch，因此重放旧 group_key 无法让 Client 回滚到旧 K_G。
+            // 解密后的 group state 会先被验证，再在本地派生 K_G。
             const auto groupState = chat::secure_relay::decryptGroupStateForMember(
                 j,
                 mRoomToken,
@@ -1124,9 +1112,8 @@ void ClientSessionCore::handleSignalingMessage(const std::string& s) {
             auto msg = chat::secure_relay::decryptMessageWithGroupKey(j, mRoomToken, mGroupKey);
             const auto relayTargetId = msg.payload.value("relayTargetId", "");
             if (!relayTargetId.empty() && relayTargetId != mClientId) {
-                // Wrong-delivered private relay is ignored before the inner
-                // pairwise layer is opened. Keep this silent so non-target
-                // members do not learn that a private message just happened.
+                // 投递错误的私发中继会在打开内层双方私发加密前被忽略。
+                // 该路径保持静默，使非目标成员无法得知刚刚发生过私发消息。
                 return;
             }
             if (msg.type == chat::secure_relay::PairwisePrivateType) {
@@ -1141,8 +1128,8 @@ void ClientSessionCore::handleSignalingMessage(const std::string& s) {
             handleRelayMessage(msg);
         }
         else if (type == "moderation") {
-            // Server-originated moderation notice. It is not a terminal error;
-            // Host remains the authority that requested the state change.
+            // Server 转发的管理通知。它不是终止性错误；
+            // Host 仍是请求状态变化的权威。
             chatEmit(mCallbacks.onStatus, j.value("message", "moderation state changed"));
         }
         else if (type == "error") {
@@ -1173,16 +1160,15 @@ void ClientSessionCore::handleSignalingMessage(const std::string& s) {
                      message == "member certificate is banned" ||
                      message == "GKA contribution timeout" ||
                      message == "member evicted by host") {
-                // These errors are Host decisions that the Server forwards before
-                // closing this Client's socket. Treat them as terminal so the UI
-                // shows the real reason instead of only "Signaling connection ended".
+                // 这些错误是 Host 决策，由 Server 在关闭该 Client socket 前转发。
+                // 将其视为终止性错误，使 UI 显示真实原因，
+                // 而不是只显示 "Signaling connection ended"。
                 chatEmit(mCallbacks.onError, "Host rejected client: " + message);
                 requestShutdown("Host rejected client: " + message);
             }
             else {
-                // Non-admission relay errors are not trusted as terminal. A malicious
-                // Server can still close the WebSocket, but a forged ordinary error
-                // should not make the Client voluntarily leave the room.
+                // 非准入阶段的中继错误不被信任为终止性错误。
+                // 恶意 Server 仍可关闭 WebSocket，但伪造的普通错误不应让 Client 主动离开房间。
                 chatEmit(mCallbacks.onError, "Signaling server error: " + message);
             }
         }

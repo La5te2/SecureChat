@@ -14,14 +14,6 @@ SecureChat 是一个双向通信实验项目，包含共享 C++ 核心、Windows
 
 ## 安全说明
 
-SecureChat 当前定位为课程/论文实验系统；公网运行时应按本节安全边界和部署约束使用。
-
-公网 Server 常开时，主要暴露面是：
-
-- TCP `25566`：WebSocket 信令和不透明加密中继端口，用于创建/加入房间、维护成员状态，以及转发密文 envelope。
-
-需要明确：
-
 - 信令支持 `ws://` insecure mode 和 `wss://` secure mode。`ws://` 配置简单、便于本地或无证书场景使用，但传输不加密；真实公网部署应使用 `wss://`。
 - 文本消息和附件 metadata/chunk 已走应用层 AES-256-GCM 加密中继：Server 只转发 opaque envelope，不能解密应用内容。
 - 普通 Client 的 `clientId` 在协议内部仍保持 `user_<name>` 形式，方便路由和排障；WinUI/CLI 私发目标只按成员显示名匹配，Server 日志会把成员 id 打成短哈希，避免日志直接出现 `user_bob` 这类可读成员标识。
@@ -35,19 +27,7 @@ SecureChat 当前定位为课程/论文实验系统；公网运行时应按本�
 - 能限制安全组来源 IP 时，不建议长期使用 `0.0.0.0/0`。
 - 长期运行时应使用普通用户，不要用 `root`；`start_server.sh` 默认拒绝 root 运行，临时诊断才可设置 `SECURECHAT_ALLOW_ROOT=1`。部署步骤见 `docs/deployment-hardening.md`，环境变量参考见 `docs/environment-variables.md`，成员身份 PKI 见 `docs/pki-identity.md`，敌手挑战设计见 `docs/adversary-challenges.md`。
 - `start_server.sh` 默认把 Server 作为 daemon 常驻，且默认不保存 `server.log`。日志可能包含 room id、用户名和连接状态，只在临时排障时显式启用。
-- `start_host.sh` 和 `start_client.sh` 默认前台运行；只有显式 `--daemon` 时才后台运行，并通过短生命周期本地管道传递房间密码。
 - 接收附件会写入 `logs/`，需要定期清理并避免直接信任未知文件。
-
-信令和加密中继数据通路安全细节见：
-
-```text
-docs/signaling-security.md
-docs/relay-attachment-security.md
-docs/pki-identity.md
-docs/security-tests.md
-docs/acceptance-guide.md
-docs/cpp-csharp-guide.md
-```
 
 ## 完整测试流程
 
@@ -544,11 +524,7 @@ Host 创建 roomId 后成为第一个群成员和房间生命周期管理者。C
 
 Linux 脚本规则：
 
-- `start_server.sh` 默认后台运行；
-- `start_host.sh` 默认前台运行；
-- `start_client.sh` 默认前台运行；
-- Host/Client 只有显式加 `--daemon` 才后台运行；
-- Host/Client 前台模式会隐藏提示输入房间密码。
+- `start_server.sh` 默认后台运行。
 
 Windows 没有对应的 start/stop 脚本，直接运行 `server.exe`、`host.exe`、`client.exe`，或者启动 WinUI。详细命令见 `docs/startup-guide.md`。
 
@@ -706,7 +682,7 @@ export HTTP_PROXY=http://127.0.0.1:7897
 export HTTPS_PROXY=http://127.0.0.1:7897
 export http_proxy=http://127.0.0.1:7897
 export https_proxy=http://127.0.0.1:7897
-
+# -------------------------------------- #
 export HTTP_PROXY=http://127.0.0.1:10090
 export HTTPS_PROXY=http://127.0.0.1:10090
 export http_proxy=http://127.0.0.1:10090
