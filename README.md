@@ -22,10 +22,10 @@ SecureChat 是一个双向通信实验项目，包含共享 C++ 核心、Windows
 - 私发文本和私发附件使用双层加密：外层仍走 room group key 保护中继 envelope，但 Server 广播外层密文；内层使用发送者临时 X25519 和目标成员已验证 public key 派生 pairwise key。没有目标成员私钥的 Server、Host 或其他 Client 不能解内层私发内容。
 - PKI 身份认证是 Host/Client 必需配置：成员身份私钥会签名 `join_room` 绑定、GKA 贡献和 Host 的 `group_key`/group-state envelope；接收端验证证书链、有效期、Key Usage 和签名后才接受成员公钥、贡献集合和新 group key。
 - Host 可使用 `/silence`、`/unsilence`、`/evict` 或 `/ban` 管理当前房间成员。禁言只阻止目标 Client 发送加密中继消息；驱逐会踢出成员，并在当前房间生命周期内封禁其已验证成员证书指纹。
-- 可选 Nginx TLS 反向代理模板已提供：Nginx 对公网提供 `wss://`，SecureChat Server 作为本机 WebSocket backend 运行。模板见 `deploy/securechat-nginx-tls.conf` 和 `deploy/securechat-server-backend.service`。
+- 可选 Nginx TLS 反向代理：Nginx 对公网提供 `wss://`，SecureChat Server 作为本机 WebSocket backend 运行。
 - 房间密码能阻止普通误入，但不能替代 TLS、限速、防火墙和强认证。
 - 能限制安全组来源 IP 时，不建议长期使用 `0.0.0.0/0`。
-- 长期运行时应使用普通用户，不要用 `root`；`start_server.sh` 默认拒绝 root 运行，临时诊断才可设置 `SECURECHAT_ALLOW_ROOT=1`。部署步骤见 `docs/deployment-hardening.md`，环境变量参考见 `docs/environment-variables.md`，成员身份 PKI 见 `docs/pki-identity.md`，敌手挑战设计见 `docs/adversary-challenges.md`。
+- 长期运行时应使用普通用户，不要用 `root`；`start_server.sh` 默认拒绝 root 运行，临时诊断才可设置 `SECURECHAT_ALLOW_ROOT=1`。环境变量参考见 `docs/environment-variables.md`，成员身份 PKI 见 `docs/pki-identity.md`，敌手挑战设计见 `docs/adversary-challenges.md`。
 - `start_server.sh` 默认把 Server 作为 daemon 常驻，且默认不保存 `server.log`。日志可能包含 room id、用户名和连接状态，只在临时排障时显式启用。
 - 接收附件会写入 `logs/`，需要定期清理并避免直接信任未知文件。
 
@@ -355,7 +355,7 @@ Nginx 需要安装在服务器上，不随本仓库自动携带。Ubuntu/Debian 
 ```bash
 sudo apt update
 sudo apt install -y nginx openssl
-sudo systemctl enable --now nginx
+sudo nginx -v
 ```
 
 这种部署只需要两类证书：
@@ -365,19 +365,30 @@ sudo systemctl enable --now nginx
 
 如果 Nginx 入口服务器证书是系统已信任 CA 签发，例如 Let's Encrypt，Host/Client 和 WinUI 直接使用 `wss://` URL 即可。自签名或私有 CA 场景下，CLI 进程可通过 `SECURECHAT_TLS_CA_FILE` 指定服务器 CA；WinUI 不提供这个高级项，建议把 CA 导入操作系统信任存储或使用公网受信任证书。
 
-Nginx 模板：
+Nginx 配置写入 `/etc/nginx/conf.d/securechat-tls.conf`，示例：
 
-```text
-deploy/securechat-nginx-tls.conf
+```nginx
+server {
+    listen 25566 ssl;
+    server_name chat.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/chat.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/chat.example.com/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:25567;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+}
 ```
 
-systemd backend 模板：
-
-```text
-deploy/securechat-server-backend.service
-```
-
-`deploy/` 文件是 Linux 部署模板，不是双击运行程序。直接 systemd 部署时，把 `deploy/securechat-server.service` 复制到 `/etc/systemd/system/securechat-server.service`，检查 `User`、`WorkingDirectory`、`ExecStart` 和证书路径后执行 `sudo systemctl daemon-reload` 与 `sudo systemctl enable --now securechat-server.service`。Nginx TLS 反代部署时，把 Nginx 模板复制到 `/etc/nginx/conf.d/securechat-tls.conf`，把 backend service 模板复制到 `/etc/systemd/system/securechat-server-backend.service`，检查证书路径和后端端口后启动 Nginx 与 backend。完整步骤见 `docs/deployment-hardening.md`。
+修改配置后执行 `sudo nginx -t` 检查配置，并用 `sudo nginx -s reload` 重新加载。
 
 Nginx TLS 反代只保护传输通道并隐藏本机 backend；本地或局域网测试可以继续使用 `ws://`。应用层消息机密性仍由 GKA v3 和 AES-256-GCM 提供，成员身份、GKA 贡献和临时 X25519 key 的绑定仍由强制 PKI 身份认证提供。
 
@@ -485,7 +496,7 @@ Linux 本机 WS 示例：
 
 ## 公网云服务器部署
 
-华为云安全组至少需要放行；来源 IP 能固定时，应按 `docs/deployment-hardening.md` 收敛来源 CIDR：
+华为云安全组至少需要放行；来源 IP 能固定时，应收敛来源 CIDR：
 
 ```text
 TCP 25566

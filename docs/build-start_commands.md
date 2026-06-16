@@ -133,46 +133,51 @@ Nginx 需要安装在服务器系统上，不是仓库里的可执行文件。Ub
 ```bash
 sudo apt update
 sudo apt install -y nginx openssl
-sudo systemctl enable --now nginx
+sudo nginx -v
 ```
 
 Nginx TLS 入口至少需要：
 
-- Nginx 服务器 TLS 证书：`/opt/SecureChat/certs/fullchain.pem`、`/opt/SecureChat/certs/privkey.pem`；
+- Nginx 服务器 TLS 证书：例如 `/etc/letsencrypt/live/chat.la5te2.online/fullchain.pem`、`/etc/letsencrypt/live/chat.la5te2.online/privkey.pem`；
 - Host/Client 使用的应用层成员 PKI：`SECURECHAT_PKI_TRUST_STORE`、`SECURECHAT_IDENTITY_CERT_FILE`、`SECURECHAT_IDENTITY_KEY_FILE`。
 
-不使用 systemd 时，用脚本启动 backend。`start_server.sh` 默认后台运行：
+手动启动 backend。这里是 `ws`，因为公网 TLS 已由 Nginx 处理，SecureChat Server 只监听本机：
 
 ```bash
-sudo -u securechat -H bash -lc 'cd /opt/SecureChat && \
-  SECURECHAT_BIND_ADDRESS=127.0.0.1 \
-  SECURECHAT_PORT=25567 \
-  SECURECHAT_SERVER_PID_FILE=server-backend.pid \
-  ./start_server.sh --mode ws'
+cd /opt/SecureChat
+export SECURECHAT_BIND_ADDRESS=127.0.0.1
+./out/build/x64-linux-release/server 25567
 ```
 
-安装 Nginx 配置：
+创建 Nginx 配置 `/etc/nginx/conf.d/securechat-tls.conf`：
 
-```bash
-sudo cp /opt/SecureChat/deploy/securechat-nginx-tls.conf /etc/nginx/conf.d/securechat-tls.conf
-sudo nginx -t
-sudo systemctl reload nginx
+```nginx
+server {
+    listen 25566 ssl;
+    server_name chat.la5te2.online;
+
+    ssl_certificate     /etc/letsencrypt/live/chat.la5te2.online/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/chat.la5te2.online/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:25567;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+}
 ```
 
-如果系统不用 systemd 管理 Nginx，也可以：
+检查并加载 Nginx 配置：
 
 ```bash
 sudo nginx -t
 sudo nginx
 sudo nginx -s reload
-```
-
-使用 systemd backend 模板：
-
-```bash
-sudo cp /opt/SecureChat/deploy/securechat-server-backend.service /etc/systemd/system/securechat-server-backend.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now securechat-server-backend.service
 ```
 
 如果入口服务器证书不是系统信任 CA 签发，再设置：
@@ -324,6 +329,6 @@ WSS Client：
 - 文本和附件 E2EE 使用 GKA v3 自动协商 room group key；Host/Client/WinUI 不再需要设置共享 E2EE 口令。
 - 接收附件会写入 `logs/images`、`logs/voice`、`logs/files`。默认缓存总量上限为 512 MB，可用 `SECURECHAT_LOGS_MAX_BYTES` 覆盖，例如 `export SECURECHAT_LOGS_MAX_BYTES=1073741824`。
 - `./stop_server.sh`、`./stop_host.sh`、`./stop_client.sh` 会清理各自脚本进程内的 SecureChat 运行时环境变量。普通 stop 脚本不能修改父 shell 中已经 `export` 的变量；如果确实要清理当前 SSH 窗口，可执行对应的 `source ./stop_*.sh` 或手动 `unset`。
-- 公网 Server 部署加固、非 root 用户、可选 systemd 模板、SIGTERM 验证、日志清理和安全组来源 IP 收敛步骤见 `docs/deployment-hardening.md`。
+- 公网运行时建议使用普通用户、收敛安全组来源 IP、使用 WSS 或 Nginx TLS 入口，并定期清理临时日志和附件缓存。
 
 - 所有 `SECURECHAT_*` 环境变量的完整说明见 `docs/environment-variables.md`。

@@ -24,7 +24,7 @@
 - 密钥协商：GKA v3 使用临时 X25519 public key、成员签名 contribution、Host 发起 epoch、成员加入/离开后 key rotation。
 - 认证与访问控制：房间密码限制加入；WSS 提供 Server 证书校验；PKI 成员身份认证强制把成员证书签名绑定到 `join_room` public key 和 `group_key` envelope。
 - 附件安全：大小限制、扩展名白名单、图片/语音文件头校验、文件名净化、固定缓存目录、缓存总量限制、不自动执行，WinUI 未知成员附件默认不自动预览。
-- 可用性：连接数和坏消息限制、连接超时、维护线程清理、GKA contribution 超时自动驱逐、daemon 脚本、可选 systemd 模板。
+- 可用性：连接数和坏消息限制、连接超时、维护线程清理、GKA contribution 超时自动驱逐。
 - 部署卫生：默认不落盘日志、非 root guard、必要端口说明、安全组来源 IP 收敛步骤。
 - 隐私：GUI/Web 不显示底层 endpoint/log 噪声；Server 仍可见元数据。
 

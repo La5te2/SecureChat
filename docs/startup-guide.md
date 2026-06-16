@@ -320,7 +320,7 @@ Host/Client 连接：
 export SECURECHAT_TLS_CA_FILE=certs/pki/root-ca.pem
 ```
 
-## Linux：Nginx TLS 反向代理，不使用 systemd
+## Linux：Nginx TLS 反向代理
 
 Nginx 对外提供普通 `wss://` TLS 入口，SecureChat Server 只做本机 backend。
 
@@ -338,11 +338,32 @@ sudo apt install -y nginx openssl
 sudo nginx -v
 ```
 
-复制 Nginx 配置：
+创建 Nginx 配置 `/etc/nginx/conf.d/securechat-tls.conf`：
+
+```nginx
+server {
+    listen 25566 ssl;
+    server_name chat.la5te2.online;
+
+    ssl_certificate     /etc/letsencrypt/live/chat.la5te2.online/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/chat.la5te2.online/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:25567;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+}
+```
+
+检查并加载 Nginx 配置：
 
 ```bash
-sudo cp /opt/SecureChat/deploy/securechat-nginx-tls.conf /etc/nginx/conf.d/securechat-tls.conf
-sudo editor /etc/nginx/conf.d/securechat-tls.conf
 sudo nginx -t
 sudo nginx -s reload
 ```

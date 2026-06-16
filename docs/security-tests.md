@@ -40,15 +40,12 @@ rg -n "PeerConnection|DataChannel|offer|answer|ice|ICE|STUN|TURN|legacy|compat|S
 已检查 libdatachannel 头文件：
 
 - `rtc::WebSocketServer::Configuration` 支持 `enableTls`、`certificatePemFile`、`keyPemFile`、`keyPemPass`；
-- SecureChat Server 可以直接启用 WSS，也可以只监听 `127.0.0.1` 作为 Nginx backend；
-- Nginx TLS 反向代理由 `deploy/securechat-nginx-tls.conf` 和 `deploy/securechat-server-backend.service` 提供模板。
+- SecureChat Server 可以直接启用 WSS，也可以只监听 `127.0.0.1` 作为 Nginx backend。
 
 仓库已提供：
 
 - `SECURECHAT_BIND_ADDRESS`；
-- `SECURECHAT_TLS_CA_FILE`；
-- `deploy/securechat-nginx-tls.conf`；
-- `deploy/securechat-server-backend.service`。
+- `SECURECHAT_TLS_CA_FILE`。
 
 ## 手动实验 1：WS 明文信令抓包
 
@@ -168,15 +165,38 @@ SECURECHAT_BIND_ADDRESS=127.0.0.1 SECURECHAT_PORT=25567 ./start_server.sh --mode
 ```bash
 sudo apt update
 sudo apt install -y nginx openssl
-sudo systemctl enable --now nginx
+sudo nginx -v
 ```
 
-安装 Nginx TLS 配置：
+创建 Nginx TLS 配置 `/etc/nginx/conf.d/securechat-tls.conf`：
+
+```nginx
+server {
+    listen 25566 ssl;
+    server_name chat.la5te2.online;
+
+    ssl_certificate     /etc/letsencrypt/live/chat.la5te2.online/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/chat.la5te2.online/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:25567;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+}
+```
+
+检查并加载 Nginx 配置：
 
 ```bash
-sudo cp /opt/SecureChat/deploy/securechat-nginx-tls.conf /etc/nginx/conf.d/securechat-tls.conf
 sudo nginx -t
-sudo systemctl reload nginx
+sudo nginx
+sudo nginx -s reload
 ```
 
 确认监听：
