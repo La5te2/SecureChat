@@ -65,7 +65,7 @@ GKA 是 Group Key Agreement 的缩写，即群组密钥协商。当前实现采�
 每个成员为当前 epoch 生成 32 字节随机贡献 `r_i`，并用自己的成员身份私钥签名：
 
 $$
-\sigma_i = \operatorname{Sign}(sk_i,\ roomId \parallel epoch \parallel memberId_i \parallel username_i \parallel X25519Pub_i \parallel r_i \parallel nonce_i)
+\sigma_i = \mathrm{Sign}(sk_i,\ roomId \parallel epoch \parallel memberId_i \parallel username_i \parallel X25519Pub_i \parallel r_i \parallel nonce_i)
 $$
 
 Host 收集当前成员贡献集合 `C = {c_1, c_2, ..., c_n}`，把完整集合放入 group state，再用每个目标成员的临时 X25519 public key 单独封装。Client 解开 group state 后逐个验证贡献签名，并在本地导出群聊密钥：
@@ -73,9 +73,9 @@ Host 收集当前成员贡献集合 `C = {c_1, c_2, ..., c_n}`，把完整集合
 $$
 \begin{aligned}
 K_G = \mathrm{HKDF}_{SHA256}(
-&\operatorname{Canonical}(C),\\
+&\mathrm{Canonical}(C),\\
 &salt = D_G \parallel roomToken \parallel epoch,\\
-&info = D_R \parallel \operatorname{sort}(memberId_1,\ldots,memberId_n),\\
+&info = D_R \parallel \mathrm{sort}(memberId_1,\ldots,memberId_n),\\
 &length = 32
 )
 \end{aligned}
@@ -118,7 +118,7 @@ X25519 只解决共享秘密计算问题，不负责身份认证。SecureChat �
 pairwise key 的派生形式为：
 
 $$
-S_{AB} = \operatorname{X25519}(ePriv_A,\ XPub_B)
+S_{AB} = \mathrm{X25519}(ePriv_A,\ XPub_B)
 $$
 
 $$
