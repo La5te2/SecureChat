@@ -39,7 +39,7 @@ fi
 echo "[3/3] Building C++ targets..."
 cmake --build "${BUILD_DIR}" --config "${CONFIG}"
 
-for output in host client server libnative.so; do
+for output in host client server cert libnative.so; do
   if [[ ! -f "${BUILD_DIR}/${output}" ]]; then
     echo "ERROR: Required native output is missing: ${BUILD_DIR}/${output}"
     exit 1
@@ -51,4 +51,5 @@ echo "Outputs:"
 echo "  ${BUILD_DIR}/host"
 echo "  ${BUILD_DIR}/client"
 echo "  ${BUILD_DIR}/server"
+echo "  ${BUILD_DIR}/cert"
 echo "  ${BUILD_DIR}/libnative.so"

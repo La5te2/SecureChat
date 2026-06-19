@@ -5,7 +5,7 @@
 #include "attachment_transfer.hpp"
 #include "common.hpp"
 #include "events.hpp"
-#include "identity_pki.hpp"
+#include "pki_application.hpp"
 #include "secure_relay.hpp"
 #include "websocket_config.hpp"
 
@@ -29,12 +29,14 @@
 // 然后执行 PKI 签名/验签并管理房间群密钥。
 class HostSessionCore {
 public:
-    // 创建绑定到一个信令 URL 和房间身份的 Host 会话。
+    // 创建绑定到一个信令 URL、房间显示名和 opaque room instance token 的 Host 会话。
     HostSessionCore(
         std::string wsUrl,
         std::string roomId,
         std::string username,
-        std::string password,
+        chat::pki_application::IdentityContext identity,
+        std::string roomToken,
+        std::string roomDir = {},
         rtc::WebSocket::Configuration wsConfig = {});
     ~HostSessionCore();
 
@@ -44,6 +46,8 @@ public:
     void start();
     // 停止信令连接和活动房间状态。
     void stop();
+    // 显式关闭当前 room instance。普通 stop 只表示 Host 本地离线。
+    void closeRoom();
     // 返回该 Host 会话是否已经被请求停止。
     bool shouldStop() const;
     // 从 Host 向房间发送文本或附件命令。
@@ -63,6 +67,10 @@ public:
 private:
     // 处理普通输入框中输入的 Host 专用房间管理命令。
     bool handleHostCommand(const std::string& line);
+    // 批准一个已验证的 pending join，使 Server 将其提升为 active Client。
+    void approvePendingJoin(const std::string& token);
+    // 拒绝一个 pending join，并把签名原因返回给申请者。
+    void rejectPendingJoin(const std::string& token, const std::string& reason);
     // 将原始 WebSocket 帧移出 libdatachannel 回调线程。
     void enqueueSignalingMessage(std::string payload);
     // 串行协议 worker，负责 JSON 解析、PKI 验证和 GKA 工作。
@@ -71,7 +79,9 @@ private:
     void stopSignalingWorker();
     // 分发房间创建、成员关系、加密中继和错误事件。
     void handleSignalingMessage(const std::string& s);
-    // 移除一个 Client 成员并更新本地房间状态。
+    // 将一个 Client 标记为当前连接离线，但保留它的房间成员资格。
+    void markClientDisconnected(const std::string& id);
+    // 永久移除一个 Client 成员并更新本地房间状态。
     void removeClient(const std::string& id);
     // 切换当前某个 Client 在房间内的发送权限。
     void setClientSilenced(const std::string& target, bool silenced);
@@ -126,6 +136,8 @@ private:
     std::string displayNameForClient(const std::string& id);
     // 将可见 Client 名解析为 client id。
     std::string resolveClientId(const std::string& token);
+    // 将 requestId 或成员名解析为 pending join requestId。
+    std::string resolvePendingJoinId(const std::string& token);
     // 请求 Server 移除未通过 Host 侧身份检查的 Client。
     void rejectClient(const std::string& clientId, const std::string& reason);
     // 通过加密中继广播 Host 已验证的成员证书指纹。
@@ -141,11 +153,10 @@ private:
 private:
     std::string mWsUrl;
     std::string mRoomId;
-    // 由 roomId + 房间密码派生的不透明路由 token。Server 把该 token 当作 roomId；
-    // 人类可读 room id 只留在本地 UI 和 PKI 语义中。
+    // Server 把该 token 当作 roomId；人类可读 room id 只留在本地 UI 和 PKI 语义中。
     std::string mRoomToken;
+    std::string mRoomDir;
     std::string mUsername;
-    std::string mPassword;
     rtc::WebSocket::Configuration mWsConfig;
     ChatCallbacks mCallbacks;
     std::shared_ptr<rtc::WebSocket> mWs;
@@ -159,6 +170,10 @@ private:
     std::unordered_map<std::string, std::string> mClientIdentityFingerprints;
     std::unordered_map<std::string, std::string> mClientIdentitySubjects;
     std::unordered_map<std::string, json> mClientIdentityObjects;
+    // 当前仍连接到 Server 的 Client。成员资格保存在上面的证书/公钥表中；
+    // 断网或关闭进程只会从这个集合移除，不会自动吊销成员证书。
+    std::unordered_set<std::string> mConnectedClientIds;
+    std::unordered_map<std::string, json> mPendingJoinRequests;
     std::unordered_set<std::string> mSilencedClientIds;
     std::unordered_set<std::string> mBannedIdentityFingerprints;
     std::unordered_set<std::string> mRecentRelayIds;
@@ -169,7 +184,7 @@ private:
     std::thread mSignalingThread;
     std::atomic_bool mSignalingWorkerStopping = false;
     chat::secure_relay::MemberKeyPair mMemberKeys;
-    chat::identity_pki::IdentityContext mIdentity;
+    chat::pki_application::IdentityContext mIdentity;
     std::vector<unsigned char> mGroupKey;
     // 待处理 GKA 状态会被 WebSocket 回调和 watchdog 线程共同访问。
     // 该 mutex 保证 epoch 变更、contribution 存储和超时决策一致。

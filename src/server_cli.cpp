@@ -52,8 +52,8 @@ int main(int argc, char** argv) {
             std::this_thread::sleep_for(std::chrono::milliseconds(300));
         }
 
-        // 停止 WebSocket 监听器前先通知已连接成员。
-        signaling.closeAllRooms("server stopped");
+        // Server 进程停止只表示中继暂时不可用，不能替 Host 关闭持久房间。
+        // 房间进入 closed 状态只能来自 Host 签名的 close_room 控制消息。
         signaling.stop();
         std::cout << "Server stopped." << std::endl;
         return 0;

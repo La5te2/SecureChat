@@ -26,10 +26,43 @@ CHAT_API void CHAT_CALL chat_set_event_callback(chat_event_callback callback, vo
 // WinUI 在启动会话前调用它，使基于 std::getenv 的 C++ 代码能看到
 // GUI 中输入的设置，而不要求从 PowerShell 启动进程。
 CHAT_API int CHAT_CALL chat_set_environment_variable(const char* name, const char* value);
-// 启动 Host 成员，并在已经运行的 Server 上创建 room_id。
-CHAT_API int CHAT_CALL chat_host_start(const char* server_url, const char* room_id, const char* username, const char* password);
-// 启动 Client 成员，并通过已经运行的 Server 加入 room_id。
-CHAT_API int CHAT_CALL chat_join_start(const char* url, const char* room_id, const char* username, const char* password);
+// 从 room-dir 加载 room token 和房间级 PKI 后启动 Host。
+CHAT_API int CHAT_CALL chat_host_start(
+    const char* server_url,
+    const char* room_dir,
+    const char* username,
+    const char* key_pass);
+// WinUI 自动生成 logs/certs/<digest>/entrance.scp，并隐藏 room-dir 细节。
+CHAT_API int CHAT_CALL chat_host_start_auto(
+    const char* server_url,
+    const char* room_name,
+    const char* username,
+    const char* key_pass);
+// WinUI 按房间名/用户名查找本机已有 Host room-dir，并重新接管房间。
+CHAT_API int CHAT_CALL chat_host_join_existing(
+    const char* server_url,
+    const char* room_name,
+    const char* username,
+    const char* key_pass);
+// 从 room-dir 加载 room token 和房间级 PKI 后启动 Client。
+CHAT_API int CHAT_CALL chat_join_start(
+    const char* url,
+    const char* room_dir,
+    const char* username,
+    const char* key_pass);
+// WinUI 选择 Host 分发的 entrance.scp 后自动导入并发起 pending join。
+CHAT_API int CHAT_CALL chat_join_start_auto(
+    const char* url,
+    const char* room_name,
+    const char* username,
+    const char* entrance_file,
+    const char* key_pass);
+// WinUI 按房间名/用户名查找本机已有 Client room-dir，并加入或重连房间。
+CHAT_API int CHAT_CALL chat_join_existing(
+    const char* url,
+    const char* room_name,
+    const char* username,
+    const char* key_pass);
 // 通过活动 native 会话发送房间文本行或斜杠命令。
 CHAT_API int CHAT_CALL chat_send_line(const char* line);
 // 向某个成员显示名发送文本行或斜杠附件命令。
@@ -46,6 +79,8 @@ CHAT_API int CHAT_CALL chat_send_voice(const char* file_path);
 CHAT_API int CHAT_CALL chat_send_voice_to(const char* target, const char* file_path);
 // 停止活动 Host 或 Client 会话，但不卸载 native 模块。
 CHAT_API void CHAT_CALL chat_stop();
+// Host 显式关闭当前 room instance。Client 调用时退化为本地停止。
+CHAT_API void CHAT_CALL chat_close_room();
 // GUI 宿主进程退出时的最终清理。它清除回调状态，并释放普通 stop 后
 // 有意保留的已退役 native 对象。
 CHAT_API void CHAT_CALL chat_shutdown();

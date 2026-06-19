@@ -3,12 +3,15 @@
 #include "host_session_core.hpp"
 
 #include "attachment_transfer.hpp"
+#include "cert_generation.hpp"
+#include "cert_utils.hpp"
 #include "secure_relay.hpp"
 
 #include <algorithm>
 #include <cctype>
 #include <chrono>
 #include <cstddef>
+#include <fstream>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -48,6 +51,14 @@ std::string trimCopy(std::string value) {
     return value.substr(first, last - first + 1);
 }
 
+std::string readTextFile(const std::string& path) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) throw std::runtime_error("failed to open file: " + path);
+    std::ostringstream buffer;
+    buffer << file.rdbuf();
+    return buffer.str();
+}
+
 bool parseDirectPrefix(const std::string& line, std::string& target, std::string& body) {
     // 在普通命令解析前拆分 "/to bob ..."，
     // 使私发文本和私发附件复用与房间广播相同的发送函数。
@@ -71,6 +82,23 @@ void markPrivateTarget(Message& msg, const std::string& targetId, const std::str
     msg.payload["private"] = true;
     msg.payload["targetId"] = targetId;
     msg.payload["targetName"] = targetName.empty() ? targetId : targetName;
+}
+
+std::string pendingJoinDigest(
+    const std::string& requestId,
+    const std::string& username,
+    const std::string& publicKey) {
+    // approve_join 签名只绑定固定长度 digest，避免把可变长申请 JSON 直接塞进控制签名。
+    return chat::cert_utils::sha256Hex(
+        "approve_join\nrequestId=" + requestId +
+        "\nusername=" + username +
+        "\npublicKey=" + publicKey);
+}
+
+std::string pendingRejectDigest(const std::string& requestId, const std::string& reason) {
+    return chat::cert_utils::sha256Hex(
+        "reject_pending_join\nrequestId=" + requestId +
+        "\nreason=" + reason);
 }
 
 bool attachmentKindForMeta(const std::string& type, attachment::Kind& kind) {
@@ -108,27 +136,28 @@ std::string actorIdFromMessage(const Message& msg) {
 
 }
 
-// 保存普通 SecureChat Host 会话的信令端点。
 HostSessionCore::HostSessionCore(
     std::string wsUrl,
     std::string roomId,
     std::string username,
-    std::string password,
+    chat::pki_application::IdentityContext identity,
+    std::string roomToken,
+    std::string roomDir,
     rtc::WebSocket::Configuration wsConfig)
     : mWsUrl(std::move(wsUrl)),
       mRoomId(std::move(roomId)),
       mUsername(std::move(username)),
-      mPassword(std::move(password)),
+      mRoomToken(std::move(roomToken)),
+      mRoomDir(std::move(roomDir)),
       mWsConfig(std::move(wsConfig)) {
     requireWssServerUrl(mWsUrl);
-    // Server 只注册该不透明 token。没有房间密码时无法恢复房间名，
-    // 同时本地 PKI 签名仍绑定 mRoomId。
-    mRoomToken = chat::secure_relay::deriveRoomToken(mRoomId, mPassword);
+    // Server 只注册该不透明 token。房间显示名留在本地 PKI 签名语义里。
+    if (mRoomToken.empty()) throw std::runtime_error("room instance token is required");
     // K_G 不再由 Host 直接生成。
     // 第一把可用房间密钥在 room_created 后由 epoch-1 contribution 集合派生。
     chat::websocket_config::applyClientTlsFromEnvironment(mWsConfig);
     // Host 身份用于签名 group_key envelope，并验证 Client 入房身份。
-    mIdentity = chat::identity_pki::loadFromEnvironment();
+    mIdentity = std::move(identity);
     // Host 同样拥有成员 X25519 密钥对，使 Client 能向 Host 发送真正的 pairwise 私信，
     // 而不把房间群密钥作为唯一密钥。
     mMemberKeys = chat::secure_relay::generateMemberKeyPair();
@@ -169,14 +198,10 @@ void HostSessionCore::start() {
             {"type", "create_room"},
             {"roomId", mRoomToken},
             {"username", mUsername},
-            {"password", mRoomToken},
             {"publicKey", mMemberKeys.publicKey}
         };
         msg["identity"] = mIdentity.signJoinRoom(mRoomId, mUsername, mMemberKeys.publicKey);
         mWs->send(msg.dump());
-        // 房间密码只保留到完成房间创建为止。
-        std::fill(mPassword.begin(), mPassword.end(), '\0');
-        mPassword.clear();
     });
 
     mWs->onMessage([this](rtc::message_variant data) {
@@ -191,7 +216,7 @@ void HostSessionCore::start() {
             if (!mRoomCreated.load()) {
                 chatEmit(
                     mCallbacks.onError,
-                    "Signaling closed before room creation completed; check Server URL, room name/password, PKI files, and rebuild all components if one executable was updated");
+                    "Signaling closed before room creation completed; check Server URL, room certificate directory, PKI files, and rebuild all components if one executable was updated");
             }
             chatEmit(mCallbacks.onStatus, "Signaling connection ended");
         }
@@ -217,6 +242,31 @@ void HostSessionCore::stop() {
     }
 
     chatEmit(mCallbacks.onStatus, "Session stopped");
+}
+
+void HostSessionCore::closeRoom() {
+    // 普通 stop 只表示 Host 本地离线。显式 closeRoom 才请求 Server
+    // 销毁当前 room instance，并让所有成员收到 room_closed。
+    if (!mWs || mWs->isClosed()) {
+        chatEmit(mCallbacks.onStatus, "Signaling channel is not open yet");
+        return;
+    }
+    json msg = {
+        {"type", "close_room"},
+        {"roomId", mRoomToken},
+        {"reason", "host closed room"},
+        {"epoch", mGroupKeyEpoch}
+    };
+    const auto payloadDigest = chat::cert_utils::sha256Hex(msg.value("reason", ""));
+    msg["payloadDigest"] = payloadDigest;
+    msg["control"] = mIdentity.signRoomControl(
+        mRoomId,
+        mRoomToken,
+        "close_room",
+        mGroupKeyEpoch,
+        payloadDigest);
+    mWs->send(msg.dump());
+    chatEmit(mCallbacks.onStatus, "Close room requested");
 }
 
 // 返回外层 CLI/API 循环是否应停止轮询该会话。
@@ -358,6 +408,32 @@ bool HostSessionCore::handleHostCommand(const std::string& line) {
     std::istringstream input(trimCopy(line));
     std::string command;
     input >> command;
+    if (command == "/stop_session" || command == "/close_room") {
+        closeRoom();
+        return true;
+    }
+    if (command == "/approve") {
+        std::string target;
+        input >> target;
+        if (target.empty()) {
+            chatEmit(mCallbacks.onError, "Usage: /approve <member-name-or-request-id>");
+            return true;
+        }
+        approvePendingJoin(target);
+        return true;
+    }
+    if (command == "/reject") {
+        std::string target;
+        input >> target;
+        auto reason = trimCopy(line.substr(line.find(target) + target.size()));
+        if (reason.empty()) reason = "join request rejected by host";
+        if (target.empty()) {
+            chatEmit(mCallbacks.onError, "Usage: /reject <member-name-or-request-id> [reason]");
+            return true;
+        }
+        rejectPendingJoin(target, reason);
+        return true;
+    }
     if (command != "/silence" && command != "/unsilence" && command != "/evict" && command != "/ban") {
         return false;
     }
@@ -379,6 +455,123 @@ bool HostSessionCore::handleHostCommand(const std::string& line) {
         evictClient(target);
     }
     return true;
+}
+
+void HostSessionCore::approvePendingJoin(const std::string& token) {
+    if (!mWs || mWs->isClosed()) {
+        chatEmit(mCallbacks.onStatus, "Signaling channel is not open yet");
+        return;
+    }
+
+    const auto requestId = resolvePendingJoinId(trimCopy(token));
+    if (requestId.empty()) {
+        chatEmit(mCallbacks.onError, "Pending join not found: " + token);
+        return;
+    }
+
+    json pending;
+    {
+        std::lock_guard<std::mutex> lock(mClientsMutex);
+        auto it = mPendingJoinRequests.find(requestId);
+        if (it == mPendingJoinRequests.end()) {
+            chatEmit(mCallbacks.onError, "Pending join not found: " + token);
+            return;
+        }
+        pending = it->second;
+    }
+
+    const auto username = pending.value("username", requestId);
+    const auto publicKey = pending.value("publicKey", "");
+    if (!pending.contains("fingerprint") || publicKey.empty()) {
+        chatEmit(mCallbacks.onError, "Pending join is not verified and cannot be approved: " + username);
+        return;
+    }
+    json signResponse;
+    if (pending.contains("csrBundle") && pending.contains("joinProof")) {
+        try {
+            const auto result = chat::certs::signPendingRoomMemberCertificate(
+                mRoomDir,
+                pending["csrBundle"],
+                pending["joinProof"],
+                username,
+                publicKey);
+            signResponse = json::parse(readTextFile(result.signResponseFile));
+        }
+        catch (const std::exception& e) {
+            chatEmit(mCallbacks.onError, "Pending certificate signing failed: " + username + ": " + e.what());
+            rejectPendingJoin(requestId, "client certificate signing failed");
+            return;
+        }
+    }
+    const auto payloadDigest = pendingJoinDigest(requestId, username, publicKey);
+    json msg = {
+        {"type", "approve_join"},
+        {"roomId", mRoomToken},
+        {"requestId", requestId},
+        {"epoch", mGroupKeyEpoch},
+        {"payloadDigest", payloadDigest}
+    };
+    msg["control"] = mIdentity.signRoomControl(
+        mRoomId,
+        mRoomToken,
+        "approve_join",
+        mGroupKeyEpoch,
+        payloadDigest);
+    if (!signResponse.is_null()) {
+        msg["admissionSignResponse"] = chat::certs::encryptAdmissionPayload(
+            mRoomDir,
+            "sign_response",
+            {{"signResponse", signResponse}});
+    }
+    mWs->send(msg.dump());
+    chatEmit(mCallbacks.onStatus, "Pending join approved: " + username);
+}
+
+void HostSessionCore::rejectPendingJoin(const std::string& token, const std::string& reason) {
+    if (!mWs || mWs->isClosed()) {
+        chatEmit(mCallbacks.onStatus, "Signaling channel is not open yet");
+        return;
+    }
+
+    const auto requestId = resolvePendingJoinId(trimCopy(token));
+    if (requestId.empty()) {
+        chatEmit(mCallbacks.onError, "Pending join not found: " + token);
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(mClientsMutex);
+        auto it = mPendingJoinRequests.find(requestId);
+        if (it != mPendingJoinRequests.end()) {
+            const auto fingerprint = it->second.value("fingerprint", "");
+            if (!fingerprint.empty()) {
+                // Host 显式拒绝 pending join 才写入当前房间的临时封禁集。
+                // 申请者断线只会触发 pending_join_cancelled，不会走这条封禁路径。
+                mBannedIdentityFingerprints.insert(fingerprint);
+            }
+        }
+    }
+    const auto finalReason = reason.empty() ? std::string("join request rejected by host") : reason;
+    const auto payloadDigest = pendingRejectDigest(requestId, finalReason);
+    json msg = {
+        {"type", "reject_pending_join"},
+        {"roomId", mRoomToken},
+        {"requestId", requestId},
+        {"reason", finalReason},
+        {"epoch", mGroupKeyEpoch},
+        {"payloadDigest", payloadDigest}
+    };
+    msg["control"] = mIdentity.signRoomControl(
+        mRoomId,
+        mRoomToken,
+        "reject_pending_join",
+        mGroupKeyEpoch,
+        payloadDigest);
+    mWs->send(msg.dump());
+    {
+        std::lock_guard<std::mutex> lock(mClientsMutex);
+        mPendingJoinRequests.erase(requestId);
+    }
+    chatEmit(mCallbacks.onStatus, "Pending join rejected: " + requestId.substr(0, 12));
 }
 
 // 通过加密 Server 中继向所有房间成员发送图片。
@@ -593,8 +786,11 @@ void HostSessionCore::rotateGroupKey(const std::string& reason) {
     std::unordered_set<std::string> currentMembers;
     {
         std::lock_guard<std::mutex> lock(mClientsMutex);
-        for (const auto& [clientId, publicKey] : mClientPublicKeys) {
-            if (!publicKey.empty()) currentMembers.insert(clientId);
+        for (const auto& clientId : mConnectedClientIds) {
+            auto publicKey = mClientPublicKeys.find(clientId);
+            if (publicKey != mClientPublicKeys.end() && !publicKey->second.empty()) {
+                currentMembers.insert(clientId);
+            }
         }
     }
 
@@ -730,6 +926,7 @@ void HostSessionCore::evictGkaTimeoutMembers(std::uint64_t epoch) {
             mClientIdentityFingerprints.erase(clientId);
             mClientIdentitySubjects.erase(clientId);
             mClientIdentityObjects.erase(clientId);
+            mConnectedClientIds.erase(clientId);
             mSilencedClientIds.erase(clientId);
             removedNames.push_back(displayName.empty() ? clientId : displayName);
             removedIds.push_back(clientId);
@@ -822,6 +1019,14 @@ bool HostSessionCore::rememberGkaContribution(const json& contribution, const st
         if (!knownFingerprint.empty() && verified.fingerprint != knownFingerprint) {
             throw std::runtime_error("contribution fingerprint does not match joined identity");
         }
+        {
+            std::lock_guard<std::mutex> lock(mClientsMutex);
+            mClientIdentityFingerprints[memberId] = verified.fingerprint;
+            mClientIdentitySubjects[memberId] = verified.subject;
+            // GKA contribution 的 identity 签名绑定 epoch 和 contribution，
+            // 不能复用为 member_identity 中的 join_room 公钥公告签名。
+            // 其他成员会在 group state 中重新验证该 GKA identity。
+        }
         json stored = contribution;
         stored["fingerprint"] = verified.fingerprint;
         {
@@ -875,9 +1080,12 @@ void HostSessionCore::tryCommitGkaEpoch() {
     std::vector<std::pair<std::string, std::string>> clients;
     {
         std::lock_guard<std::mutex> lock(mClientsMutex);
-        clients.reserve(mClientPublicKeys.size());
-        for (const auto& [clientId, publicKey] : mClientPublicKeys) {
-            clients.push_back({clientId, publicKey});
+        clients.reserve(mConnectedClientIds.size());
+        for (const auto& clientId : mConnectedClientIds) {
+            auto publicKey = mClientPublicKeys.find(clientId);
+            if (publicKey != mClientPublicKeys.end() && !publicKey->second.empty()) {
+                clients.push_back({clientId, publicKey->second});
+            }
         }
     }
 
@@ -977,6 +1185,8 @@ void HostSessionCore::handleSignalingMessage(const std::string& s) {
         else if (type == "room_members") {
             std::ostringstream members;
             bool first = true;
+            std::vector<json> clientIdentityCandidates;
+            std::unordered_set<std::string> onlineClientIds;
             for (const auto& member : j.value("memberInfos", json::array())) {
                 if (!member.is_object()) continue;
                 if (!first) members << "; ";
@@ -984,6 +1194,10 @@ void HostSessionCore::handleSignalingMessage(const std::string& s) {
                 // 发出 name/id，使 UI Client 不暴露原始信令 JSON
                 // 也能保留内部 PKI 映射。
                 members << member.value("username", id) << " / " << id;
+                if (member.value("role", "") == "client") {
+                    if (!id.empty()) onlineClientIds.insert(id);
+                    clientIdentityCandidates.push_back(member);
+                }
                 first = false;
             }
             if (first) {
@@ -994,6 +1208,157 @@ void HostSessionCore::handleSignalingMessage(const std::string& s) {
                 }
             }
             chatEmit(mCallbacks.onStatus, "Room members: " + members.str());
+            {
+                std::lock_guard<std::mutex> lock(mClientsMutex);
+                for (auto it = mConnectedClientIds.begin(); it != mConnectedClientIds.end();) {
+                    if (onlineClientIds.find(*it) == onlineClientIds.end()) {
+                        it = mConnectedClientIds.erase(it);
+                    }
+                    else {
+                        ++it;
+                    }
+                }
+            }
+            bool addedClient = false;
+            bool onlineChanged = false;
+            for (const auto& member : clientIdentityCandidates) {
+                const auto id = member.value("id", "");
+                const auto username = member.value("username", id);
+                const auto publicKey = member.value("publicKey", "");
+                const auto identity = member.find("identity");
+                if (id.empty() || publicKey.empty() || identity == member.end() || !identity->is_object()) continue;
+
+                bool alreadyKnown = false;
+                {
+                    std::lock_guard<std::mutex> lock(mClientsMutex);
+                    alreadyKnown = mClientNames.find(id) != mClientNames.end();
+                    if (alreadyKnown && mConnectedClientIds.insert(id).second) {
+                        onlineChanged = true;
+                    }
+                }
+                if (alreadyKnown) continue;
+
+                try {
+                    // Host 重新接管持久房间时，Server 会通过 room_members
+                    // 提供现有 Client 的候选 identity。Host 必须重新验签，
+                    // 不能信任 Server 的成员列表。
+                    const auto verified = mIdentity.verifyJoinRoom(mRoomId, username, publicKey, *identity);
+                    {
+                        std::lock_guard<std::mutex> lock(mClientsMutex);
+                        mClientNames[id] = username;
+                        mClientPublicKeys[id] = publicKey;
+                        mClientIdentityFingerprints[id] = verified.fingerprint;
+                        mClientIdentitySubjects[id] = verified.subject;
+                        mClientIdentityObjects[id] = *identity;
+                        mConnectedClientIds.insert(id);
+                    }
+                    chatEmit(mCallbacks.onStatus, "PKI member verified: " + username + " / " + id + " / " + verified.fingerprint);
+                    addedClient = true;
+                }
+                catch (const std::exception& e) {
+                    chatEmit(mCallbacks.onError, "Existing client identity rejected: " + username + ": " + e.what());
+                    rejectClient(id, "client identity verification failed");
+                }
+            }
+            if (addedClient || onlineChanged) {
+                rotateGroupKey(addedClient ? "room members synchronized" : "member reconnected");
+            }
+        }
+        else if (type == "pending_join") {
+            const auto requestId = j.value("requestId", "");
+            const auto username = j.value("username", requestId);
+            const auto publicKey = j.value("publicKey", "");
+            const auto identity = j.find("identity");
+            const auto admissionPayload = j.find("admissionPayload");
+            if (requestId.empty() || publicKey.empty()) {
+                chatEmit(mCallbacks.onError, "Malformed pending join request");
+                return;
+            }
+
+            std::string identityFingerprint;
+            std::string identitySubject;
+            bool bannedCertificate = false;
+            bool knownMemberRejoin = false;
+            try {
+                if (identity != j.end() && identity->is_object()) {
+                    const auto verified = mIdentity.verifyJoinRoom(mRoomId, username, publicKey, *identity);
+                    identityFingerprint = verified.fingerprint;
+                    identitySubject = verified.subject;
+                }
+                else if (admissionPayload != j.end() && admissionPayload->is_object()) {
+                    const auto decryptedAdmission = chat::certs::decryptAdmissionPayload(
+                        mRoomDir,
+                        "pending_join",
+                        *admissionPayload);
+                    const auto csrBundle = decryptedAdmission.find("csrBundle");
+                    const auto joinProof = decryptedAdmission.find("joinProof");
+                    if (csrBundle == decryptedAdmission.end() || !csrBundle->is_object() ||
+                        joinProof == decryptedAdmission.end() || !joinProof->is_object()) {
+                        throw std::runtime_error("admission payload is missing CSR proof");
+                    }
+                    identityFingerprint = chat::certs::verifyPendingJoinRequest(
+                        mRoomDir,
+                        *csrBundle,
+                        *joinProof,
+                        username,
+                        publicKey);
+                    identitySubject = "pending CSR";
+                    j["csrBundle"] = *csrBundle;
+                    j["joinProof"] = *joinProof;
+                }
+                else {
+                    throw std::runtime_error("pending join has no identity or CSR proof");
+                }
+                {
+                    std::lock_guard<std::mutex> lock(mClientsMutex);
+                    bannedCertificate = mBannedIdentityFingerprints.find(identityFingerprint) != mBannedIdentityFingerprints.end();
+                    for (const auto& [knownId, knownFingerprint] : mClientIdentityFingerprints) {
+                        if (knownFingerprint == identityFingerprint &&
+                            mConnectedClientIds.find(knownId) == mConnectedClientIds.end()) {
+                            knownMemberRejoin = true;
+                            break;
+                        }
+                    }
+                }
+                if (bannedCertificate) {
+                    throw std::runtime_error("member certificate is banned in this room");
+                }
+            }
+            catch (const std::exception& e) {
+                {
+                    std::lock_guard<std::mutex> lock(mClientsMutex);
+                    mPendingJoinRequests[requestId] = j;
+                }
+                chatEmit(mCallbacks.onError, "Pending join rejected: " + username + ": " + e.what());
+                rejectPendingJoin(requestId, "client identity verification failed");
+                return;
+            }
+
+            json pending = j;
+            pending["fingerprint"] = identityFingerprint;
+            pending["subject"] = identitySubject;
+            {
+                std::lock_guard<std::mutex> lock(mClientsMutex);
+                mPendingJoinRequests[requestId] = pending;
+            }
+            chatEmit(
+                mCallbacks.onStatus,
+                "Pending join verified: " + username +
+                    " / " + requestId.substr(0, 12) +
+                    " / " + identityFingerprint +
+                    " (use /approve " + username + ")");
+            if (knownMemberRejoin) {
+                chatEmit(mCallbacks.onStatus, "Known member rejoin approved automatically: " + username);
+                approvePendingJoin(requestId);
+            }
+        }
+        else if (type == "pending_join_cancelled") {
+            const auto requestId = j.value("requestId", "");
+            if (!requestId.empty()) {
+                std::lock_guard<std::mutex> lock(mClientsMutex);
+                mPendingJoinRequests.erase(requestId);
+            }
+            chatEmit(mCallbacks.onStatus, "Pending join cancelled: " + requestId.substr(0, 12));
         }
         else if (type == "new_client") {
             std::string clientId = j.value("clientId", "");
@@ -1012,11 +1377,30 @@ void HostSessionCore::handleSignalingMessage(const std::string& s) {
                     // Host 是 Client 入房的信任决策点。
                     // Server 只转发该 identity 对象，并未验证它。
                     auto identity = j.find("identity");
-                    if (identity == j.end()) throw std::runtime_error("client identity is missing");
-                    identityObject = *identity;
-                    const auto verified = mIdentity.verifyJoinRoom(mRoomId, username, publicKey, *identity);
-                    identityFingerprint = verified.fingerprint;
-                    identitySubject = verified.subject;
+                    auto admissionSignResponse = j.find("admissionSignResponse");
+                    if (identity != j.end() && identity->is_object()) {
+                        identityObject = *identity;
+                        const auto verified = mIdentity.verifyJoinRoom(mRoomId, username, publicKey, *identity);
+                        identityFingerprint = verified.fingerprint;
+                        identitySubject = verified.subject;
+                    }
+                    else if (admissionSignResponse != j.end() && admissionSignResponse->is_object()) {
+                        // 首次 entrance 入房时，Client 在收到 joined 后才安装成员证书。
+                        // Server 回送的是 admission-encrypted sign response；Host 解开后
+                        // 只取证书指纹建立成员映射，后续 GKA contribution 会补齐正式 identity。
+                        json signResponseObject = chat::certs::decryptAdmissionPayload(
+                            mRoomDir,
+                            "sign_response",
+                            *admissionSignResponse).value("signResponse", json::object());
+                        identityFingerprint = signResponseObject.value("memberFingerprint", "");
+                        identitySubject = "pending signed member certificate";
+                        if (identityFingerprint.empty()) {
+                            throw std::runtime_error("signed member certificate response is missing fingerprint");
+                        }
+                    }
+                    else {
+                        throw std::runtime_error("client identity is missing");
+                    }
                     chatEmit(mCallbacks.onStatus, "PKI member verified: " + username + " / " + clientId + " / " + identityFingerprint);
                 }
                 catch (const std::exception& e) {
@@ -1040,10 +1424,22 @@ void HostSessionCore::handleSignalingMessage(const std::string& s) {
                 std::lock_guard<std::mutex> lock(mClientsMutex);
                 mClientNames[clientId] = username;
                 if (!publicKey.empty()) mClientPublicKeys[clientId] = publicKey;
+                if (!clientId.empty()) mConnectedClientIds.insert(clientId);
                 if (!identityFingerprint.empty()) {
                     mClientIdentityFingerprints[clientId] = identityFingerprint;
                     mClientIdentitySubjects[clientId] = identitySubject;
-                    mClientIdentityObjects[clientId] = identityObject;
+                    if (identityObject.is_object()) {
+                        mClientIdentityObjects[clientId] = identityObject;
+                    }
+                }
+                for (auto it = mPendingJoinRequests.begin(); it != mPendingJoinRequests.end();) {
+                    if (it->second.value("username", "") == username &&
+                        it->second.value("publicKey", "") == publicKey) {
+                        it = mPendingJoinRequests.erase(it);
+                    }
+                    else {
+                        ++it;
+                    }
                 }
             }
             if (!clientId.empty()) {
@@ -1055,7 +1451,7 @@ void HostSessionCore::handleSignalingMessage(const std::string& s) {
         }
         else if (type == "client_left") {
             const std::string clientId = j.value("clientId", "");
-            removeClient(clientId);
+            markClientDisconnected(clientId);
         }
         else if (type == chat::secure_relay::GkaContributionType) {
             const auto epoch = j.value("epoch", 0ULL);
@@ -1103,6 +1499,13 @@ void HostSessionCore::handleSignalingMessage(const std::string& s) {
             }
             handleRelayMessage(msg);
         }
+        else if (type == "room_closed") {
+            const auto reason = j.value("reason", "room closed");
+            chatEmit(mCallbacks.onStatus, "Room is no longer available: " + reason);
+            mStopped.store(true);
+            stopGkaTimeoutWorker();
+            if (mWs && !mWs->isClosed()) mWs->close();
+        }
         else if (type == "error") {
             const std::string message = j.value("message", "unknown");
             chatEmit(mCallbacks.onError, "Signaling server error: " + message);
@@ -1118,7 +1521,49 @@ void HostSessionCore::handleSignalingMessage(const std::string& s) {
     }
 }
 
-// 移除一个 Client 成员，并清除来自它的所有暂存附件传输。
+// 将 Client 标记为当前连接离线，但保留它的房间成员资格。
+void HostSessionCore::markClientDisconnected(const std::string& id) {
+    if (id.empty()) return;
+    if (mStopped.load()) return;
+
+    std::string displayName = id;
+    bool knownClient = false;
+    bool wasConnected = false;
+    bool removedFromPendingGka = false;
+    {
+        std::lock_guard<std::mutex> lock(mClientsMutex);
+        auto name = mClientNames.find(id);
+        if (name != mClientNames.end()) {
+            displayName = name->second;
+            knownClient = true;
+        }
+        wasConnected = mConnectedClientIds.erase(id) > 0;
+        mSilencedClientIds.erase(id);
+    }
+    if (!knownClient) {
+        // 恶意或混乱的 Server 可能报告过期/未知 client_left。
+        // 忽略它可避免不必要的群密钥轮换和 UI 抖动。
+        chatEmit(mCallbacks.onStatus, "Ignored unknown client_left: " + id);
+        return;
+    }
+    mPendingTransfers.clear(id);
+    {
+        std::lock_guard<std::mutex> lock(mGkaMutex);
+        removedFromPendingGka = mPendingGkaMembers.erase(id) > 0;
+        mPendingGkaContributions.erase(id);
+    }
+    if (wasConnected) {
+        chatEmit(mCallbacks.onStatus, "Client disconnected: " + displayName);
+    }
+    // 断线不是成员资格撤销。若断线发生在 GKA 进行中，
+    // 当前 epoch 只等待仍在线成员，避免网络波动拖住房间。
+    if (removedFromPendingGka) {
+        mGkaCv.notify_all();
+        tryCommitGkaEpoch();
+    }
+}
+
+// 永久移除一个 Client 成员，并清除来自它的所有暂存附件传输。
 void HostSessionCore::removeClient(const std::string& id) {
     if (id.empty()) return;
     if (mStopped.load()) return;
@@ -1137,18 +1582,18 @@ void HostSessionCore::removeClient(const std::string& id) {
         knownClient = mClientIdentityFingerprints.erase(id) > 0 || knownClient;
         knownClient = mClientIdentitySubjects.erase(id) > 0 || knownClient;
         knownClient = mClientIdentityObjects.erase(id) > 0 || knownClient;
+        mConnectedClientIds.erase(id);
         mSilencedClientIds.erase(id);
     }
     if (!knownClient) {
-        // 恶意或混乱的 Server 可能报告过期/未知 client_left。
-        // 忽略它可避免不必要的群密钥轮换和 UI 抖动。
-        chatEmit(mCallbacks.onStatus, "Ignored unknown client_left: " + id);
+        chatEmit(mCallbacks.onStatus, "Ignored unknown member removal: " + id);
         return;
     }
     mPendingTransfers.clear(id);
-    chatEmit(mCallbacks.onStatus, "Client left: " + displayName);
-    // 离开成员不应读取未来消息，因此 Host 会轮换 K_G。
-    rotateGroupKey("member left");
+    chatEmit(mCallbacks.onStatus, "Client removed: " + displayName);
+    // Host 显式驱逐或 GKA 超时驱逐才改变成员资格；
+    // 这类事件会轮换 K_G，防止被移除成员继续读取后续消息。
+    rotateGroupKey("member removed");
 }
 
 void HostSessionCore::setClientSilenced(const std::string& target, bool silenced) {
@@ -1362,6 +1807,20 @@ std::string HostSessionCore::resolveClientId(const std::string& token) {
     std::lock_guard<std::mutex> lock(mClientsMutex);
     for (const auto& [id, name] : mClientNames) {
         if (name == token) return id;
+    }
+    return "";
+}
+
+std::string HostSessionCore::resolvePendingJoinId(const std::string& token) {
+    if (token.empty()) return "";
+    std::lock_guard<std::mutex> lock(mClientsMutex);
+    if (mPendingJoinRequests.find(token) != mPendingJoinRequests.end()) {
+        return token;
+    }
+    for (const auto& [requestId, pending] : mPendingJoinRequests) {
+        if (pending.value("username", "") == token) {
+            return requestId;
+        }
     }
     return "";
 }

@@ -37,10 +37,6 @@ std::string generateGroupContribution();
 // 返回群密钥大小是否符合中继加密要求。
 bool hasUsableGroupKey(const std::vector<unsigned char>& key);
 
-// 派生发送给 Server 的不透明 room token。人类可读 room id 保留在本地；
-// Server 只用该 token 做注册和路由。
-std::string deriveRoomToken(const std::string& roomId, const std::string& roomPassword);
-
 // 从已验证贡献值数组派生 \(K_G\)。每个 contribution 对象必须包含
 // memberId、publicKey、fingerprint 和 contribution。
 std::vector<unsigned char> deriveGroupKeyFromContributions(

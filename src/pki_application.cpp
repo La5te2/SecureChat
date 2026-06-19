@@ -1,19 +1,18 @@
 // 应用层 PKI 实现。它加载证书和私钥，
 // 验证证书链，并签名/验签 GKA 身份绑定。
-#include "identity_pki.hpp"
+#include "pki_application.hpp"
+#include "cert_utils.hpp"
 
 #include <openssl/asn1.h>
 #include <openssl/bio.h>
 #include <openssl/evp.h>
 #include <openssl/pem.h>
-#include <openssl/rand.h>
 #include <openssl/sha.h>
 #include <openssl/x509.h>
 #include <openssl/x509_vfy.h>
 #include <openssl/x509v3.h>
 
 #include <algorithm>
-#include <cstdlib>
 #include <fstream>
 #include <memory>
 #include <sstream>
@@ -21,21 +20,22 @@
 #include <string>
 #include <vector>
 
-namespace chat::identity_pki {
+namespace chat::pki_application {
 namespace {
 constexpr int identityNonceBytes = 16;
+using chat::cert_utils::appendCanonicalField;
+using chat::cert_utils::base64Decode;
+using chat::cert_utils::base64Encode;
+using chat::cert_utils::hexEncode;
+using chat::cert_utils::randomBytes;
+using chat::cert_utils::signBytes;
+using chat::cert_utils::verifyBytes;
 
 using BioPtr = std::unique_ptr<BIO, decltype(&BIO_free)>;
-using EvpMdCtxPtr = std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)>;
 using EvpPkeyPtr = std::unique_ptr<EVP_PKEY, decltype(&EVP_PKEY_free)>;
 using X509Ptr = std::unique_ptr<X509, decltype(&X509_free)>;
 using X509StorePtr = std::unique_ptr<X509_STORE, decltype(&X509_STORE_free)>;
 using X509StoreCtxPtr = std::unique_ptr<X509_STORE_CTX, decltype(&X509_STORE_CTX_free)>;
-
-std::string envValue(const char* name) {
-    const char* value = std::getenv(name);
-    return value == nullptr ? std::string() : std::string(value);
-}
 
 std::string readTextFile(const std::string& path) {
     std::ifstream file(path, std::ios::binary);
@@ -45,61 +45,8 @@ std::string readTextFile(const std::string& path) {
     return buffer.str();
 }
 
-std::string base64Encode(const unsigned char* data, std::size_t size) {
-    if (size == 0) return "";
-    std::string out(static_cast<std::size_t>(4 * ((size + 2) / 3)), '\0');
-    const int written = EVP_EncodeBlock(
-        reinterpret_cast<unsigned char*>(out.data()),
-        data,
-        static_cast<int>(size));
-    if (written < 0) throw std::runtime_error("base64 encode failed");
-    out.resize(static_cast<std::size_t>(written));
-    return out;
-}
-
-std::vector<unsigned char> base64Decode(const std::string& value) {
-    if (value.empty()) return {};
-    std::vector<unsigned char> out(static_cast<std::size_t>(3 * value.size() / 4 + 3));
-    const int written = EVP_DecodeBlock(
-        out.data(),
-        reinterpret_cast<const unsigned char*>(value.data()),
-        static_cast<int>(value.size()));
-    if (written < 0) throw std::runtime_error("base64 decode failed");
-
-    std::size_t padding = 0;
-    if (!value.empty() && value[value.size() - 1] == '=') ++padding;
-    if (value.size() > 1 && value[value.size() - 2] == '=') ++padding;
-    out.resize(static_cast<std::size_t>(written) - padding);
-    return out;
-}
-
 std::string randomNonce() {
-    std::vector<unsigned char> bytes(identityNonceBytes);
-    if (RAND_bytes(bytes.data(), static_cast<int>(bytes.size())) != 1) {
-        throw std::runtime_error("identity nonce generation failed");
-    }
-    return base64Encode(bytes.data(), bytes.size());
-}
-
-std::string hexEncode(const unsigned char* data, std::size_t size) {
-    static constexpr char digits[] = "0123456789ABCDEF";
-    std::string out;
-    out.reserve(size * 2);
-    for (std::size_t i = 0; i < size; ++i) {
-        out.push_back(digits[(data[i] >> 4) & 0x0f]);
-        out.push_back(digits[data[i] & 0x0f]);
-    }
-    return out;
-}
-
-void appendCanonicalField(std::string& out, const std::string& name, const std::string& value) {
-    // 长度前缀避免字段值包含分隔符或换行符时产生有歧义的签名字节串。
-    out += name;
-    out += ":";
-    out += std::to_string(value.size());
-    out += ":";
-    out += value;
-    out += "\n";
+    return base64Encode(randomBytes(identityNonceBytes));
 }
 
 std::string canonicalJoinMessage(
@@ -154,6 +101,25 @@ std::string canonicalGroupKeyMessage(const json& envelope, const std::string& id
     appendCanonicalField(out, "ciphertext", envelope.value("ciphertext", ""));
     appendCanonicalField(out, "tag", envelope.value("tag", ""));
     appendCanonicalField(out, "identityNonce", identityNonce);
+    return out;
+}
+
+std::string canonicalRoomControlMessage(
+    const std::string& roomId,
+    const std::string& roomToken,
+    const std::string& action,
+    std::uint64_t epoch,
+    const std::string& payloadDigest,
+    const std::string& nonce) {
+    // 房间控制动作必须绑定具体 room instance 和 payload 摘要。
+    // Server 修改 action、epoch、reason、target 或 roomToken 后，成员验签会失败。
+    std::string out = "securechat-pki-v1\nroom_control\n";
+    appendCanonicalField(out, "roomId", roomId);
+    appendCanonicalField(out, "roomToken", roomToken);
+    appendCanonicalField(out, "action", action);
+    appendCanonicalField(out, "epoch", std::to_string(epoch));
+    appendCanonicalField(out, "payloadDigest", payloadDigest);
+    appendCanonicalField(out, "nonce", nonce);
     return out;
 }
 
@@ -290,76 +256,6 @@ std::string signatureAlgorithm(EVP_PKEY* key) {
     if (id == EVP_PKEY_EC) return "ECDSA-SHA256";
     if (id == EVP_PKEY_RSA || id == EVP_PKEY_RSA_PSS) return "RSA-SHA256";
     throw std::runtime_error("unsupported identity signing key type");
-}
-
-std::vector<unsigned char> signBytes(EVP_PKEY* key, const std::string& message) {
-    EvpMdCtxPtr ctx(EVP_MD_CTX_new(), EVP_MD_CTX_free);
-    if (!ctx) throw std::runtime_error("signature context allocation failed");
-
-    const int id = EVP_PKEY_base_id(key);
-    const EVP_MD* digest = id == EVP_PKEY_ED25519 ? nullptr : EVP_sha256();
-    if (EVP_DigestSignInit(ctx.get(), nullptr, digest, nullptr, key) != 1) {
-        throw std::runtime_error("signature init failed");
-    }
-
-    std::size_t signatureSize = 0;
-    if (id == EVP_PKEY_ED25519) {
-        if (EVP_DigestSign(
-                ctx.get(),
-                nullptr,
-                &signatureSize,
-                reinterpret_cast<const unsigned char*>(message.data()),
-                message.size()) != 1) {
-            throw std::runtime_error("signature size failed");
-        }
-        std::vector<unsigned char> signature(signatureSize);
-        if (EVP_DigestSign(
-                ctx.get(),
-                signature.data(),
-                &signatureSize,
-                reinterpret_cast<const unsigned char*>(message.data()),
-                message.size()) != 1) {
-            throw std::runtime_error("signature failed");
-        }
-        signature.resize(signatureSize);
-        return signature;
-    }
-
-    if (EVP_DigestSignUpdate(ctx.get(), message.data(), message.size()) != 1 ||
-        EVP_DigestSignFinal(ctx.get(), nullptr, &signatureSize) != 1) {
-        throw std::runtime_error("signature size failed");
-    }
-    std::vector<unsigned char> signature(signatureSize);
-    if (EVP_DigestSignFinal(ctx.get(), signature.data(), &signatureSize) != 1) {
-        throw std::runtime_error("signature failed");
-    }
-    signature.resize(signatureSize);
-    return signature;
-}
-
-bool verifyBytes(EVP_PKEY* key, const std::string& message, const std::vector<unsigned char>& signature) {
-    EvpMdCtxPtr ctx(EVP_MD_CTX_new(), EVP_MD_CTX_free);
-    if (!ctx) throw std::runtime_error("signature verify context allocation failed");
-
-    const int id = EVP_PKEY_base_id(key);
-    const EVP_MD* digest = id == EVP_PKEY_ED25519 ? nullptr : EVP_sha256();
-    if (EVP_DigestVerifyInit(ctx.get(), nullptr, digest, nullptr, key) != 1) {
-        throw std::runtime_error("signature verify init failed");
-    }
-
-    if (id == EVP_PKEY_ED25519) {
-        return EVP_DigestVerify(
-            ctx.get(),
-            signature.data(),
-            signature.size(),
-            reinterpret_cast<const unsigned char*>(message.data()),
-            message.size()) == 1;
-    }
-
-    if (EVP_DigestVerifyUpdate(ctx.get(), message.data(), message.size()) != 1) {
-        throw std::runtime_error("signature verify update failed");
-    }
-    return EVP_DigestVerifyFinal(ctx.get(), signature.data(), signature.size()) == 1;
 }
 
 json makeIdentityObject(
@@ -543,15 +439,55 @@ VerifiedIdentity IdentityContext::verifyGroupKeyEnvelope(const json& envelope) c
     };
 }
 
-IdentityContext loadFromEnvironment() {
-    const auto trustStorePath = envValue("SECURECHAT_PKI_TRUST_STORE");
-    const auto certPath = envValue("SECURECHAT_IDENTITY_CERT_FILE");
-    const auto keyPath = envValue("SECURECHAT_IDENTITY_KEY_FILE");
-    const auto keyPassword = envValue("SECURECHAT_IDENTITY_KEY_PASS");
+json IdentityContext::signRoomControl(
+    const std::string& roomId,
+    const std::string& roomToken,
+    const std::string& action,
+    std::uint64_t epoch,
+    const std::string& payloadDigest) const {
+    if (!mData) throw std::runtime_error("PKI identity is not configured");
+    const auto nonce = randomNonce();
+    return makeIdentityObject(
+        mData->privateKey.get(),
+        mData->certChainPem,
+        canonicalRoomControlMessage(roomId, roomToken, action, epoch, payloadDigest, nonce),
+        nonce);
+}
 
+VerifiedIdentity IdentityContext::verifyRoomControl(
+    const std::string& roomId,
+    const std::string& roomToken,
+    const std::string& action,
+    std::uint64_t epoch,
+    const std::string& payloadDigest,
+    const json& control) const {
+    if (!mData) throw std::runtime_error("PKI identity is not configured");
+    const auto nonce = requiredIdentityString(control, "nonce");
+    const auto signature = base64Decode(requiredIdentityString(control, "signature"));
+    const auto certs = verifiedIdentityCerts(mData->trustStore.get(), control);
+    EvpPkeyPtr publicSigningKey(X509_get_pubkey(certs.front().get()), EVP_PKEY_free);
+    if (!publicSigningKey) throw std::runtime_error("control identity certificate public key missing");
+    requireSignatureAlgorithmMatches(publicSigningKey.get(), control);
+
+    if (!verifyBytes(
+            publicSigningKey.get(),
+            canonicalRoomControlMessage(roomId, roomToken, action, epoch, payloadDigest, nonce),
+            signature)) {
+        throw std::runtime_error("room control signature verification failed");
+    }
+    return {
+        certificateSubject(certs.front().get()),
+        certificateFingerprint(certs.front().get())
+    };
+}
+
+IdentityContext loadFromFiles(
+    const std::string& trustStorePath,
+    const std::string& certPath,
+    const std::string& keyPath,
+    const std::string& keyPassword) {
     if (trustStorePath.empty() || certPath.empty() || keyPath.empty()) {
-        throw std::runtime_error(
-            "SecureChat requires PKI: set SECURECHAT_PKI_TRUST_STORE, SECURECHAT_IDENTITY_CERT_FILE, and SECURECHAT_IDENTITY_KEY_FILE");
+        throw std::runtime_error("PKI file paths must not be empty");
     }
 
     auto data = std::make_shared<IdentityContext::Data>();

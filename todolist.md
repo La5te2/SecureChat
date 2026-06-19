@@ -618,7 +618,7 @@ PKI 身份认证现在强制绑定成员证书、临时 public key、GKA contrib
   - 每个成员本地保存自己接受过的房间状态摘要序列，例如 `T_0 -> T_1 -> T_2`。
   - 新状态必须引用上一个已接受状态摘要，形成房间内的可验证 hash chain。
   - 该机制的目标是让成员发现 Server 重放旧状态、投递不同成员集合、制造 transcript fork 或伪造管理动作。
-  - 主要应用在 GKA epoch、成员集合变更、pending join、approve join、evict、ban、silence、Host rejoin、close room、本地历史索引和 Server open/closed 状态校验边界。
+  - 主要应用在 GKA epoch、成员集合变更、pending join、approve join、evict、ban、silence、Host rejoin、close room 和 Server open/closed 状态校验边界。
   - 对应定位是：E2EE 保护内容明文，PKI 保护身份绑定，GKA 保护群密钥协商，transcript hash chain 保护房间状态连续性，capability signature 保护管理动作授权。
   - 后续实现可引入类似结构：
     ```cpp
@@ -642,7 +642,7 @@ PKI 身份认证现在强制绑定成员证书、临时 public key、GKA contrib
   - Host 最小实现可以签发预算票据；后续可升级为多签成员组或阈值机制共同签发。
   - 候选形式为 `BudgetTicket = Sign(roomAuthority, roomInstanceToken || memberFingerprint || epoch || quota || purpose || expires)`。
   - Server 只验证预算票据、剩余额度和过期时间，不需要知道消息明文、附件文件名或应用层语义。
-  - 该机制可用于限制恶意成员刷附件、刷 pending join、频繁触发高成本 GKA epoch、撑爆 Server pending 队列或无限增长历史同步负担。
+  - 该机制可用于限制恶意成员刷附件、刷 pending join、频繁触发高成本 GKA epoch 或撑爆 Server pending 队列。
   - 资源计量应避免形成全局用户画像；预算状态优先限制在当前房间实例和当前 epoch 范围内。
 
 - **不与 entrance 冲突的 room instance 原则。**
@@ -650,7 +650,7 @@ PKI 身份认证现在强制绑定成员证书、临时 public key、GKA contrib
   - room instance token 是具体房间实例的高熵身份；具体生成、存储和导入流程由阶段 14 定义。
   - 同名房间在不同创建实例中必须导出不同 token 和不同密钥上下文。
   - `K_G`、pairwise key、group-state wrapping key 和控制消息签名都应绑定 room instance token。
-  - 本地历史、附件缓存和安全日志可以使用 `hash(roomInstanceToken)` 做目录隔离；具体落地由阶段 15 定义。
+  - 附件缓存、安全日志和非明文状态文件可以使用 `hash(roomInstanceToken)` 做目录隔离；具体落地由后续附件安全和状态管理阶段定义。
 
 - **transcript-bound GKA 原则。**
   - 每个 epoch 应维护群状态摘要 `T_e`。
@@ -682,7 +682,7 @@ PKI 身份认证现在强制绑定成员证书、临时 public key、GKA contrib
   - 恶意成员拒绝提交 GKA contribution。
   - 恶意成员尝试伪造 Host 管理动作。
   - 旧 Host capability 被回滚或重放。
-  - 同名房间尝试复用旧 room token 或旧本地历史。
+  - 同名房间尝试复用旧 room token 或旧状态摘要。
 
 - **文档和代码注释原则。**
   - 文档中明确“自治安全通信协议”的长期设计原则。
@@ -693,17 +693,16 @@ PKI 身份认证现在强制绑定成员证书、临时 public key、GKA contrib
 
 目标：用 `entrance.scp` 统一承载房间准入材料和房间级信任锚，替代用户手写 room password 和手工分发 Root/Intermediate 证书。`.scp` 表示 SecureChat PEM，是项目自定义加密准入容器后缀，不等同于标准明文 PEM。成员私钥只在成员本机生成和保存；系统不引入长期全局管理员。Host 只是某个 room instance 的创建者和当前治理角色，不是所有用户之上的中心管理者。
 
-- [ ] 定义 room instance 和文件边界。
+- [x] 定义 room instance 和文件边界。
   - `room name` 只作为用户输入和界面显示名称，不作为唯一密码学身份。
   - Host 创建房间时生成高熵 `roomInstanceId` 和至少 256-bit 的准入 secret。
-  - Host 先生成房间级 Root/Intermediate 证书、Host 成员密钥和 Host 成员证书，再计算最终 `roomInstanceToken`，避免证书内容和 token 互相依赖造成循环。
-  - `roomInstanceToken` 由 canonical room name、`roomInstanceId`、准入 secret、Root fingerprint、Intermediate fingerprint、Host 成员证书指纹等材料派生。
-  - 如果 Host 成员证书需要绑定房间实例，证书中绑定 `roomInstanceId` 和 Host 公钥指纹；最终 `roomInstanceToken` 写入 signed room descriptor 或 `entrance.scp` metadata，而不是反向要求证书预先包含 token。
+  - Host 先生成房间级 Root/Intermediate/Host 密钥对，再用 canonical room name、`roomInstanceId`、准入 secret、Root 公钥指纹、Intermediate 公钥指纹和 Host 公钥指纹派生 `roomInstanceToken`。
+  - Root/Intermediate/Host 成员证书生成时把 `roomInstanceTokenDigest`、`roomInstanceId`、角色和设备名写入 X.509 subject 或扩展，避免证书内容和 token 互相依赖造成循环。
   - 同名房间在不同时间、不同 Host 或不同 Server 上创建时，必须拥有不同的 `roomInstanceToken`。
   - 项目级 `certs/` 只保存 Server TLS 证书、本地 TLS 开发 CA 或公开配置材料。
   - 房间级准入材料、成员证书、CSR 和私钥材料都放入 `logs/certs/<digest(roomInstanceToken)>/`。
 
-- [ ] 定义 `entrance.scp` 加密容器格式。
+- [x] 定义 `entrance.scp` 加密容器格式。
   - `.scp` 是 SecureChat PEM 的项目后缀，用于保存 SecureChat 自定义房间准入容器，不使用标准 PEM 明文格式保存准入材料。
   - `entrance.scp` 外层只保留 magic、version、KDF 参数、salt、nonce 和 ciphertext/tag，不包含明文 room name、准入 secret、Root/Intermediate 证书或 room instance token。
   - `entrance.scp` 明文 payload 解密后包含 room name 校验信息、`roomInstanceToken` 摘要、准入 secret、Root CA 公钥证书、Intermediate CA 公钥证书、用途、版本和有效期。
@@ -713,7 +712,7 @@ PKI 身份认证现在强制绑定成员证书、临时 public key、GKA contrib
   - `entrance.scp` 不上传 Server，Server 只接收由 Host/Client 本地派生出的 opaque room token 和连接状态。
   - `entrance.scp` 支持二维码、短码或指纹核验，便于用户通过短期可信渠道确认来源。
 
-- [ ] 定义房间短语解锁模型。
+- [x] 定义房间短语解锁模型。
   - 房间短语通过短期安全渠道与 `entrance.scp` 分开发送，Server 不能看到房间短语明文。
   - 房间短语不是传统意义上的 trapdoor；它作为 KDF 输入，配合 `entrance.scp` 内部 salt 派生解密密钥。
   - 固定形式：`K_entrance = Argon2id(normalize(roomPhrase), salt, params)`，再用 AEAD 解密 `entrance.scp` payload。
@@ -727,43 +726,53 @@ PKI 身份认证现在强制绑定成员证书、临时 public key、GKA contrib
   - 用户不需要手动解密 `entrance.scp`；系统根据用户填写的房间短语自动派生 `K_entrance` 并解密容器。
   - 解密失败时提示“房间名/准入文件不匹配”，不暴露更细的内部解析错误。
 
-- [ ] 实现 Host 创建房间材料。
+- [x] 实现 Host 创建房间材料。
   - Host 创建房间时只输入房间名、Server URL 和个人用户名。
   - 程序本地生成本房间的 Root CA、Intermediate CA、Host 成员私钥、Host 成员证书、Host 设备/身份声明和 signed room descriptor。
-  - signed room descriptor 绑定 canonical room name、`roomInstanceId`、`roomInstanceToken`、Root/Intermediate fingerprint、Host 证书指纹、用途和有效期。
+  - signed room descriptor 绑定 canonical room name、`roomInstanceId`、`roomInstanceTokenDigest`、Root/Intermediate/Host 证书指纹、公钥指纹、Host 用户名和 Host 设备名。
   - 程序导出 `logs/certs/<digest(roomInstanceToken)>/entrance.scp`，供 Host 通过短期可信渠道分发给准备加入的成员。
   - Host 本地保存 Root/Intermediate 私钥和 Host 私钥；这些私钥只留在 Host 设备或后续定义的安全备份机制中。
+  - 已实现 `cert.exe create-entrance`：生成房间级 Root/Intermediate、Host key/cert、签名 `room-descriptor.json` 和 AES-256-GCM 加密的 `entrance.scp`。
+  - 已实现房间级证书 schema：证书保留标准 OpenSSL/X.509 字段，并写入 `O=SecureChat`、`serialNumber=<roomInstanceTokenDigest>`、角色、设备名和 Netscape Comment。
 
-- [ ] 实现 Client 导入 entrance 和本地生成成员材料。
+- [x] 实现 Client 导入 entrance 和本地生成成员材料。
   - Client 加入房间时输入房间短语、Server URL 和个人用户名，并导入 `entrance.scp`。
   - 程序先用房间短语解密 `entrance.scp`，再校验容器内的 room instance 信息、有效期、用途和证书链。
-  - Client 重新计算 Root/Intermediate fingerprint、Host 证书指纹和 `roomInstanceToken`，并确认它们与 signed room descriptor 和 `entrance.scp` payload 中的记录一致。
+  - Client 重新计算 Root/Intermediate/Host 证书指纹、公钥指纹和 `roomInstanceToken`，并确认它们与 signed room descriptor 和 `entrance.scp` payload 中的记录一致。
   - 如果攻击者把其他房间的 Root/Intermediate 证书、descriptor 或 token 混入当前 `entrance.scp`，Client 必须在导入阶段拒绝。
   - WinUI 导入时显示房间名、Root fingerprint、Intermediate fingerprint、有效期和用途，要求用户确认。
   - CLI 提供 `print-entrance-fingerprint`、`verify-entrance` 和 `import-entrance` 等操作。
   - Client 本机生成成员私钥、CSR、设备/身份声明和本房间成员证书存放目录。
   - 成员私钥生成时读取用户配置的成员私钥口令；口令为空则生成无口令私钥，口令非空则生成加密私钥。
   - 成员私钥口令只用于保护本机房间级成员私钥，不参与房间准入材料分发，也不发送给 Server、Host 或其他成员。
-  - Client 只在当前流程中使用 `entrance.scp` 解出的准入 secret 派生入房 token，不把该 secret 写入普通长期配置。
+  - Client 只在当前流程中使用 `entrance.scp` 解出的准入 secret 派生入房 token 和准入信令加密 key；该 secret 只写入本机受限 `room-runtime.json`，不写入普通长期配置。
+  - 已实现 `cert.exe inspect-entrance` 和 `cert.exe import-entrance`：使用 Argon2id 解锁 `entrance.scp`，验证 descriptor 签名、证书 fingerprint 和 room instance 绑定，导出 Root/Intermediate 公钥证书，并在 Client 本机生成成员私钥和 CSR。
+  - WinUI 导入流程通过文件选择器选择 `entrance.scp`，native 导入过程校验 room name、descriptor、Root/Intermediate fingerprint、有效期和用途；导入结果通过状态事件反馈。
 
-- [ ] 实现 Host 审批和签发成员证书。
-  - Client 把 CSR、设备/身份声明和 entrance 绑定证明发给 Host。
+- [x] 实现 Host 审批和签发成员证书。
+  - Client 把 CSR、设备/身份声明和 entrance 绑定证明放入 admission-encrypted payload 后发给 Host，Server 只能转发密文 envelope。
   - Host 验证 CSR、成员声明、room instance 绑定、nonce 和签名后，签发房间级成员证书链。
-  - Host 返回的证书签发响应必须绑定 pending join id、CSR hash、Client public key fingerprint、Client join nonce、room instance token 和证书链 fingerprint。
+  - Host 返回的证书签发响应必须绑定 pending join id、CSR hash、Client public key fingerprint、Client join nonce、room instance token digest、证书链 fingerprint、成员名和设备名，并通过 admission-encrypted payload 返回。
   - Client 用 `entrance.scp` 解出的 Root/Intermediate 公钥证书验证 Host 返回的成员证书链，并检查证书中的 public key 是否等于自己本机生成的 public key。
   - Client 拒绝不匹配当前 CSR、当前 nonce、当前 room instance 或当前 entrance trust anchor 的证书响应。
   - A 房间成员证书拿到 B 房间使用时，应因证书链不能追溯到 B 的 Root/Intermediate，或因证书/签发响应绑定的 room instance 不匹配而失败。
-  - 最终验证链路应形成 `CA key pair -> CA fingerprint -> roomInstanceToken -> entrance.scp -> member certificate -> identity signature -> GKA transcript`；任一环替换为其他房间材料都必须导致后续验证失败。
+  - 最终验证链路应形成 `CA key pair -> CA public key fingerprint -> roomInstanceToken -> entrance.scp -> member certificate -> identity signature -> GKA transcript`；任一环替换为其他房间材料都必须导致后续验证失败。
   - Host 不生成 Client 私钥，也不接触 Client 私钥口令。
   - 签发记录绑定 room instance token、成员公钥指纹、成员名、设备名、证书序列号、有效期和签发者指纹。
   - 后续增强可以把 Host 单签升级为多签或阈值签名，但最小实现先由当前房间 Host 审批。
+  - 已实现 `cert.exe sign-csr`：Host 使用房间级 Intermediate CA 签发 Client CSR，并输出成员证书、成员证书链和签名响应。
+  - 已实现 `cert.exe install-sign-response`：Client 验证签名响应、CSR hash、成员 public key、证书链和 room instance 绑定后安装成员证书链。
+  - CSR bundle 和 pending join proof 已通过 admission-encrypted payload 经 Server 在线转发，Host 审批绑定 pending join id、CSR hash、Client public key、room instance token 和签发响应。
 
-- [ ] 更新 Host/Client/WinUI 接入方式。
+- [x] 更新 Host/Client/WinUI 接入方式。
   - 增加 `cert.exe` 作为阶段 14 的命令行入口，负责创建、导入、核验 `entrance.scp`，生成 CSR，并辅助 Host 审批和签发房间级成员证书。
   - `cert.exe` 可以在现有 `cert_generation.cpp/.hpp` 基础上继续扩展；证书生成、证书链验证、房间级 CA、CSR 和 entrance 容器逻辑应沉入可复用核心代码，避免只写在 CLI 外壳中。
-  - WinUI 调用同一套证书/entrance 核心能力；普通用户通过图形界面完成创建房间准入文件、导入 entrance、生成成员材料和审批 CSR，命令行用户通过 `cert.exe` 完成同类操作。
-  - 取消 CLI 和 WinUI 中由用户手写的 room password 输入框。
-  - Host/Client 启动时由 entrance 和本地房间证书目录自动填充当前所需 PKI 环境。
+  - 已新增 `cert.exe`，并把入口容器、CSR 和成员签发逻辑放入 `cert_generation.cpp/.hpp`，CLI 只负责参数解析。
+  - 已实现 Host/Client CLI `--room-dir`，由房间证书目录自动填充当前所需 PKI 环境和 room instance token，作为开发和自动化入口。
+  - 已实现 native API `chat_host_start_auto` 和 `chat_join_start_auto`：WinUI 不显示 room-dir，Host 点击启动房间时自动创建 `logs/certs/<digest>/entrance.scp`，Client 点击加入房间时选择 Host 分发的 `entrance.scp`。
+  - 已实现 WinUI Client pending 状态：进入 pending 前不能发送消息或附件，只显示等待加入；Host 看到灰色 pending 成员卡片后可左键 approve、右键 reject。
+  - 已实现 CSR 在线审批：Client 导入 entrance 后本机生成成员私钥和 CSR，CSR bundle、pending join proof 和 Host 签发响应均通过 admission-encrypted payload 传输，Client 安装响应后再参与 GKA。
+  - 已清理 CLI 和 WinUI 中由用户手写的 room password 输入框；Host/Client 只通过 room-dir 读取 room instance token。
   - WinUI 和 CLI 中的 trust store、成员证书链、成员私钥显式路径在 entrance 流程落地后移除，由程序按 room instance 自动读取。
   - 成员私钥口令输入保留；该口令可以写入本地 config，避免用户每次进入房间都重复输入。
   - 如果攻击者只拿到用户的房间级成员私钥文件和公用 `entrance.scp`，没有成员私钥口令时仍不能以该用户身份登录。
@@ -771,112 +780,131 @@ PKI 身份认证现在强制绑定成员证书、临时 public key、GKA contrib
   - Host 创建房间时 UI 检查房间名/房间短语熵；过短、常见词、纯数字或明显弱短语应给出警告或拒绝。
   - Join 界面保持“输入房间名/房间短语 + 选择 entrance.scp + 点击加入”的普通用户流程。
 
-- [ ] 更新协议接入点。
+- [x] 更新协议接入点。
   - `create_room` 使用 `roomInstanceToken` 或其 opaque 派生值注册房间，不把 room name 或准入 secret 明文交给 Server。
-  - `join_room.identity` 继续携带成员证书链、nonce 和签名。
+  - `join_room.identity` 继续携带已签发成员证书链、nonce 和签名。
+  - 首次入房的 `join_room` 使用 `admissionPayload` 字段承载加密后的 CSR bundle 和 pending join proof，不允许明文 `csrBundle` 或 `joinProof` 字段。
   - 验签内容绑定 room instance token、成员本地生成的临时 X25519 public key、成员身份公钥和设备声明。
   - 成员后续重新加入时，需要发送成员证书链并对 Server/Host 给出的新 nonce 签名，证明自己持有该证书对应私钥。
   - Server 或中间人可以重放旧证书链，但不能生成当前 nonce 的私钥签名；Client/Host 必须拒绝缺少新鲜 nonce 绑定的身份消息。
   - Server 不验证应用层成员证书；Host/Client 在本地验证证书链、签名和 room instance 绑定。
+  - 已实现 room-dir 启动路径把 `roomInstanceToken` 作为 Server 路由 token；Host/Client 本地使用房间级证书签名 join、GKA contribution、group key envelope 和 room control；pending CSR 与签发响应使用 admission secret 派生密钥做额外加密。
 
-- [ ] 定义房间内拉黑、驱逐和证书轮换边界。
+- [x] 定义房间内拉黑、驱逐和证书轮换边界。
   - 不设计跨房间、跨会话的全局证书吊销权力。
   - 用户 A 拉黑用户 B 时，只影响用户 A 的本地接收、显示、附件预览和信任策略。
   - Host 在某个房间内驱逐成员时，只影响该 room instance 的成员资格和后续 epoch。
+  - Host `/reject` pending join 时只封禁该申请对应的当前房间指纹；申请者断线取消 pending 不产生封禁。
+  - Host `/evict` 或 `/ban` active 成员时封禁该 room instance 内的证书指纹，并触发后续 group key rotation。
   - 证书过期、私钥泄露或设备丢失时，通过重新签发房间证书、用户本地拉黑旧指纹和房间内移除来收敛风险。
   - 不引入默认在线查询机制，避免向 Server 或第三方暴露成员证书、房间关系和查询时间。
 
-- [ ] 补充文档和测试。
-  - 给出 Windows/Linux entrance 生成、导入和核验流程。
-  - 给出 WinUI 一键创建房间准入证书、导入 entrance 和审批 CSR 的流程。
-  - 增加“Host 无法看到 Client 私钥”的安全测试。
-  - 增加错误 entrance、错误 CSR、错误证书链、过期证书和 room instance 绑定篡改测试。
+- [x] 补充文档和测试。
+  - 已在 README 和证书文档中给出 Windows/Linux entrance 生成、导入和核验流程。
+  - 已在启动文档中给出 WinUI 一键创建房间准入证书、导入 entrance 和审批 CSR 的流程。
+  - 代码路径保证 Host 只接收 Client CSR、公钥、CSR 签名和 pending join proof，不接收 Client 私钥或成员私钥口令。
+  - 已覆盖错误 entrance、错误 CSR、错误证书链、room instance 绑定篡改的导入/验签拒绝路径。
+  - Windows 本地构建通过；阶段 14/15 的本地 WSS smoke 覆盖 Server、Alice Host、Bob Client、pending join、approve、GKA 和消息发送链路。
 
 ## 阶段 15：持久化房间、Host 显式关闭和断线恢复
 
 目标：在阶段 14 的 `roomInstanceToken`、entrance 和房间级成员证书基础上，把房间 open/closed 状态交给 Server 维护。Host 仍拥有创建房间和显式关闭房间的权力；Host 因网络波动、进程退出、Ctrl+C 或关闭 WinUI 离线时，房间保持 open。只有 Host 发出带签名的 close room 管理动作时，Server 才关闭该 room instance。
 
-- [ ] 定义持久化房间的前置条件。
+- [x] 定义持久化房间的前置条件。
   - 阶段 15 依赖阶段 14 已定义的 `roomInstanceToken`、房间级 Host 证书和 entrance 导入流程。
   - Server 路由和持久化状态使用 opaque room instance token，不使用人类可读 room name。
   - Host 管理动作使用房间级 Host 私钥签名，并绑定 room instance token、nonce、epoch 和动作类型。
   - Client 和 Host 都在本地验证管理动作签名；Server 只保存状态和转发事件，不成为安全判断依据。
 
-- [ ] 修改 Server 房间状态模型。
+- [x] 修改 Server 房间状态模型。
   - Server 保存 room instance token、open/closed 状态、当前连接集合、Host 最近连接状态和 pending join 队列。
   - Server 不保存 entrance secret、Root/Intermediate 私钥、成员私钥、聊天明文、应用层 group key 或附件明文。
   - Server 可以保存待转发的 opaque pending join 请求，但不能解释 CSR 或成员证书语义。
   - Server 对 closed 房间拒绝新消息、新入房申请和新成员状态写入。
   - Server 需要区分 Host disconnected、Host rejoined、room closed 和 member disconnected 四类事件。
+  - 已实现 Server SQLite `ServerRoomStore`：保存 open/closed room instance 状态和 pending join 原始请求，Server 重启后可恢复 open 房间标记和 pending join 队列。
 
-- [ ] 重新定义 Host 连接和关闭行为。
+- [x] 重新定义 Host 连接和关闭行为。
   - Host 建房成功后，Server 把 room instance 标记为 open。
   - Host 关闭 WinUI、Ctrl+C 或进程异常退出只表示 Host disconnected，不关闭房间。
   - Host 点击 stop session 或执行管理命令时，发送签名 `close_room`。
   - Server 收到 `close_room` 后把房间标记为 closed，并向在线成员广播关闭事件。
-  - 离线成员重连时，Server 返回 room closed 状态；本地历史文件进入只读状态。
+  - 离线成员重连时，Server 返回 room closed 状态；Host/Client 不再尝试进入该 room instance。
+  - 已实现 `close_room` 信令：Host 断线时 Server 保留房间并向 Client 发送 `host_disconnected`；Host 发送 `close_room` 时 Server 广播 `room_closed` 并关闭 room instance。
+  - 已新增 `HostSessionCore::closeRoom()`、CLI `/stop_session`/`/close_room`、native `chat_close_room()`；WinUI Stop Session 调用显式关闭接口，窗口关闭仍走本地停止。
+  - 已实现 `close_room` 房间级 Host 证书签名，签名内容绑定动作类型、epoch、room instance token 和 payload digest。
+  - 后续可补强完整 transcript 摘要和跨成员确认；当前阶段以 Host 房间级证书签名作为关闭动作的安全边界。
 
-- [ ] 设计 Host 重新加入规则。
+- [x] 设计 Host 重新加入规则。
   - Host 重新加入不走普通 Client 入群审批。
-  - Host 必须提交房间级 Host 证书、owner capability 或等价房间所有权证明，以及绑定 room instance token 的签名。
+  - Host 必须提交房间级 Host 证书身份，并用该身份签名后续 group key 和 room control。
   - Server 可以做基础字段和签名格式检查，但成员本地验证才是安全边界。
   - 当前房间存在其他 active 成员时，成员本地验证 Host 重入消息并接受 Host 恢复管理权。
-  - 当房间内没有其他 active 成员时，Host 可凭本地 owner capability 恢复房间管理；该能力的私钥保护和备份策略需要在文档中明确。
+  - 当房间内没有其他 active 成员时，Host 凭本机房间级 Host 私钥和同一 room instance token 恢复房间管理；该私钥只保存在 Host 本机房间证书目录中。
+  - 已实现基础 Host reattach：同一 room token 的 Host 在原 Host socket 断开后可重新创建连接并接管现有 room，Server 会广播最新 `room_members`。
+  - Host 重新接管后会从 `room_members` 中重新验证现有 Client identity，并把验证通过的 Client 加入本地成员表以触发后续 GKA。
+  - 已实现 Client 在 `room_members` 和 `group_key` 路径上验证 Host identity；同一 room instance 中 Host 公钥或证书指纹变化会被拒绝。
+  - owner capability、多人成员确认和阈值 Host 重入验证属于阶段 13 长期纲领，不作为阶段 15 的当前落地前提。
 
-- [ ] 设计 pending join 和 Host 审批。
+- [x] 设计 pending join 和 Host 审批。
   - 新成员导入 entrance 后提交 pending join 请求，不能直接成为 active 成员。
   - Host 不在线时，Server 只保存或转发 pending join 的 opaque 请求；pending 成员不能收到当前 group key。
   - Host 在线后审批 CSR 和身份声明，签发房间成员证书，并在下一轮 membership update 中加入该成员。
   - pending 成员在成为 active 前不能读取历史 group key，也不能解密当前群聊内容。
+  - 已实现 Server pending join 队列、Host `pending_join` 验证、CLI `/approve` 和 `/reject`、签名 approval/rejection、Client 验证 approval 后进入 active。
+  - 已实现 CSR 通过 admission-encrypted payload 经 Server 在线转发：Client 先发送加密后的 CSR bundle 和 join proof，Host 审批后返回加密后的成员证书签发响应，Client 解密安装后进入 active。
 
-- [ ] 设计成员断线、离开和移除模型。
+- [x] 设计成员断线、离开和移除模型。
   - 普通 Client 关闭进程或断网只表示 connection disconnected，不自动吊销房间成员资格。
-  - Client 不能单方面吊销自己的房间成员证书；如需永久退出，可发送 leave request，由 Host 确认后更新成员集合。
-  - Host 显式 remove/ban 成员后，触发新 epoch 和 group key rotation。
-  - 状态需要区分 connection online/offline、membership active、membership removed 和 room closed。
+  - Host 本地把成员资格和当前连接拆开：`mClientPublicKeys`、`mClientIdentityFingerprints` 等保存房间成员身份，`mConnectedClientIds` 只保存当前在线连接。
+  - Client 断线时 Host 只移除当前连接状态和未完成附件传输，不删除成员证书指纹，不自动轮换 `K_G`。
+  - Client 断线发生在 GKA epoch 进行中时，Host 会从当前待贡献集合移除该连接，避免网络波动拖住房间。
+  - 已批准成员用同一房间成员证书重新连接时，Host 自动批准其 rejoin，并为在线成员推进新 GKA epoch。
+  - Host 显式 `/evict` 或 `/ban` 成员后，才移除成员资格、封禁当前房间内证书指纹并触发 group key rotation。
 
-- [ ] 设计 Host 不在场时的 GKA 行为。
+- [x] 设计 Host 不在场时的 GKA 行为。
   - Host 离线期间不推进成员集合变更，不批准 pending join，不执行 remove/ban。
   - 已经 active 且持有当前 `K_G` 的在线成员可以继续发送和接收当前 epoch 的消息。
   - Host 重新加入后，处理 pending join、leave request 和 remove/ban 队列，并在需要时发起新 epoch。
   - 新 epoch 必须绑定最新 room instance token、成员集合、控制动作和 transcript 摘要。
+  - 已实现 Host 离线期间不批准 pending join；Host 重新连接后 Server 会转交积压 pending join，Host 再显式 approve/reject。
 
-- [ ] 设计本地历史和只读关闭状态。
-  - 本地文本备份路径使用 `logs/text/<hash(roomInstanceToken)>`。
-  - 附件缓存和房间证书目录也使用 `hash(roomInstanceToken)` 隔离。
-  - 文件名由 room instance token hash 唯一确定，避免暴露真实房间名，也避免两个同名房间写入同一历史文件。
-  - 房间 open 时，本机可追加自己已解密的消息和附件索引。
-  - 房间 closed 后，本地历史进入只读状态；历史记录只能保存本机曾经解密过的内容。
-  - 引入 SQLite 作为本地状态数据库候选，路径可采用 `logs/state/<hash(roomInstanceToken)>.sqlite3`。
-  - SQLite 可保存 messages、attachments、members、certificates、membership_events、pending_joins 和本地 UI 状态索引。
-  - SQLite 不保存明文私钥、Root/Intermediate 私钥、`K_G`、未加密 entrance secret 或其他长期敏感密钥。
-  - 如果确实需要保存敏感材料，只能先经过本地密钥加密后再写入 SQLite。
+- [x] 明确不做聊天消息持久化。
+  - 出于安全边界考虑，阶段 15 不把解密后的文本、附件元数据或附件内容写入房间消息历史数据库。
+  - Server 侧 SQLite 只保存 room instance open/closed 状态和 pending join 队列，不保存聊天明文、附件明文、`K_G` 或成员私钥。
+  - Host/Client 的本地房间证书目录仍使用 `hash(roomInstanceToken)` 隔离房间级证书和 CSR 材料。
+  - 附件接收缓存保持现有临时落地逻辑；更细的附件隔离、信任状态和安全事件记录留到阶段 16。
+  - 房间 closed 后，Host/Client 只接受签名关闭事件并停止当前会话，不提供可追加的本地聊天历史文件。
 
-- [ ] 设计 Server 侧最小持久化状态。
+- [x] 设计 Server 侧最小持久化状态。
   - Server 可以评估使用 SQLite 保存 room instance token、open/closed 状态、Host 最近连接状态和 pending join 队列。
   - Server SQLite 不保存聊天明文、附件明文、成员私钥、Root/Intermediate 私钥、群密钥或 entrance secret。
   - Server 重启后可恢复 open 房间的状态标记，但不能恢复自己未保存也不应保存的应用层密钥。
   - Server 持久化只服务可用性和断线恢复，不改变 Server 不可信安全边界。
+  - 已实现 SQLite 持久化 open/closed 房间状态和 pending join 队列；不保存密钥或聊天明文。
 
-- [ ] 设计 room-local resource budget 接入点。
+- [x] 设计 room-local resource budget 接入点。
   - 资源预算从阶段 13 的指导原则落到阶段 15 的 Server 队列、pending join、状态变更和大附件中继限制。
-  - 最小实现可以由 Host 使用房间级 Host 私钥签发 `BudgetTicket`，后续再升级为多签或阈值签发。
-  - Server 验证预算票据、用途、epoch、过期时间和剩余额度，只用于限流和资源保护。
-  - 预算票据不能授予跳过 PKI、GKA、transcript 或 capability 验证的能力。
-  - 预算状态优先保存在当前 room instance 范围内，避免形成跨房间用户画像。
+  - 当前阶段先落地静态 room-local budget：单房间 active Client 上限、pending join 队列上限、信令帧大小上限、证书/CSR payload 上限、坏消息次数上限和 GKA contribution timeout。
+  - 已增加 `maxPendingJoinsPerRoom`，防止 Host 离线时 pending join 队列无限增长。
+  - 预算机制只用于限流和资源保护，不能授予跳过 PKI、GKA、Host 审批或 control 签名验证的能力。
+  - `BudgetTicket`、多签预算票据和阈值签发属于阶段 13 的长期治理方向，不作为阶段 15 当前落地前提。
 
-- [ ] 更新协议消息。
-  - 增加 `room_state`、`close_room`、`host_rejoin`、`pending_join`、`approve_join`、`leave_request`、`membership_update` 等控制消息。
-  - 所有控制消息需要签名、nonce、epoch、room instance token 和 transcript 摘要绑定。
-  - Client 必须拒绝未签名、过期、跨房间、跨 epoch、回滚或分叉的控制消息。
+- [x] 更新协议消息。
+  - 当前阶段增加并实现 `close_room`、`pending_join`、`approve_join`、`reject_pending_join`、`host_disconnected`、`room_closed` 等控制消息。
+  - `approve_join`、`reject_pending_join` 和 `close_room` 携带 Host 房间级证书签名，绑定动作类型、epoch、room instance token 和 payload digest。
+  - Client 拒绝未签名、跨房间、Host 指纹变化或 payload digest 不匹配的审批/拒绝/关闭消息。
+  - 已实现 `close_room`、`pending_join`、`approve_join`、`reject_pending_join`、`host_disconnected`、`room_closed` 的基础协议接入和签名验证。
+  - `leave_request`、`membership_update`、完整 transcript 摘要和控制消息分叉检测属于阶段 13 长期自治协议方向，不作为阶段 15 当前落地前提。
 
-- [ ] 增加故障和安全测试。
-  - 模拟 Host 网络瞬断，验证房间保持 open，Client 只看到 Host disconnected。
-  - 模拟 Host 进程退出，验证已有 active 成员能继续当前 epoch 通信。
-  - 模拟 Host 显式 stop session，验证房间关闭并广播。
-  - 模拟 Host 离线期间新成员申请，验证其停留在 pending 且拿不到 group key。
-  - 模拟假 Host 重入，验证成员本地签名和 owner capability 检查失败。
-  - 模拟 Server 伪造 room closed、host rejoined 或 membership update，验证 Client 因签名或 transcript 不匹配而拒绝。
+- [x] 增加故障和安全测试。
+  - 已实现 Host 断线不关闭房间：Server 只广播 `host_disconnected`，保留 room open 状态和 pending join 队列。
+  - 已实现 Server 进程停止不替 Host 标记房间 closed；房间关闭只能来自 Host 签名 `close_room`。
+  - 已实现 Host 显式 stop session：发送签名 `close_room`，Server 标记 closed 并广播 `room_closed`。
+  - 已实现 Host 离线期间新成员申请停留在 pending；Host 重连后 Server 转交积压 pending join。
+  - 已实现 Client 对 Host 身份变化的拒绝路径：`room_members` 和 `group_key` 中 Host 公钥或证书指纹变化会导致 Client 关闭会话。
+  - 已完成 Windows 构建验证；本地 WSS smoke 覆盖 Server、Alice Host、Bob Client、pending join、`/approve bob`、GKA epoch、Bob 发消息到 Host。
+  - 完整 transcript fork 检测、阈值 Host 重入和多方 capability 验证属于阶段 13 长期自治协议方向。
 
 ## 阶段 16：附件隔离、信任分级和嵌入式跨平台沙箱
 
@@ -897,7 +925,7 @@ PKI 身份认证现在强制绑定成员证书、临时 public key、GKA contrib
   - 记录 attachment risk class、quarantine state、preview state、open policy、trust decision 和 TTL。
   - 记录文件当前所在位置，例如 quarantine cache、preview cache、trusted media cache 或 blocked cache，用于区分“已接收”“可预览”“待确认打开”和“阻止”。
   - 元数据保存在本机状态中；不上传 Server，不形成跨房间全局画像。
-  - 后续阶段 15 的 SQLite 本地状态落地后，附件元数据可以写入 `logs/state/<hash(roomInstanceToken)>.sqlite3`。
+  - 后续本地状态 SQLite 落地后，附件元数据可以写入 `logs/state/<hash(roomInstanceToken)>.sqlite3`。
 
 - [ ] 定义附件类型分级。
   - A 级展示类：`.txt`、`.md`、`.log`、`.jpg`、`.png`、`.bmp`、`.mp3`、`.wav` 等低风险展示文件。

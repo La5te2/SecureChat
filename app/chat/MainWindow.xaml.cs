@@ -30,6 +30,7 @@ public sealed partial class MainWindow : Window
         None,
         ConnectingHost,
         ConnectingJoin,
+        PendingJoin,
         Host,
         Join
     }
@@ -42,6 +43,8 @@ public sealed partial class MainWindow : Window
     // WinUI 不直接维护真正的房间状态，真正状态在 C++ core 和 Server。
     // 这里保存的是界面需要显示和点击的成员快照。
     private readonly HashSet<string> participants = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> pendingParticipants = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, string> pendingJoinNamesByRequestId = new(StringComparer.OrdinalIgnoreCase);
     // Blocked 是当前房间内的本机 UI 策略：右键成员卡片切换。
     // PKI 验证仍在 native 层完成；这里的颜色/预览策略不参与密钥认证。
     private readonly HashSet<string> blockedAttachmentMembers = new(StringComparer.OrdinalIgnoreCase);
@@ -81,6 +84,7 @@ public sealed partial class MainWindow : Window
     private enum AttachmentMemberState
     {
         Allowed,
+        Pending,
         Blocked
     }
     private sealed record BubbleVisibilityState(bool IsMessageContent);
@@ -199,62 +203,145 @@ public sealed partial class MainWindow : Window
             uri.Scheme.Equals("wss", StringComparison.OrdinalIgnoreCase);
     }
 
-    private void Host_Click(object sender, RoutedEventArgs e)
+    private bool TryReadSessionInputs(
+        TextBox roomBox,
+        TextBox serverBox,
+        TextBox userBox,
+        out string room,
+        out string serverUrl,
+        out string user)
     {
-        var serverUrl = HostServerUrlBox.Text.Trim();
+        room = roomBox.Text.Trim();
+        serverUrl = serverBox.Text.Trim();
+        user = userBox.Text.Trim();
+        if (room.Length == 0)
+        {
+            AddLine("error", "Room is required.");
+            return false;
+        }
+        if (user.Length == 0)
+        {
+            AddLine("error", "User is required.");
+            return false;
+        }
         if (!IsWssServerUrl(serverUrl))
         {
             AddLine("error", "Server URL must start with wss://.");
+            return false;
+        }
+        return true;
+    }
+
+    private void HostJoin_Click(object sender, RoutedEventArgs e)
+    {
+        if (!TryReadSessionInputs(HostRoomBox, HostServerUrlBox, HostUserBox, out var room, out var serverUrl, out var user))
+        {
             return;
         }
-
-        if (!ApplySessionEnvironment())
+        if (!ApplyServerTlsEnvironment())
         {
             return;
         }
 
         ClearAttachmentMemberStates();
-        // Host 只是第一个聊天成员/房间管理者，不负责监听端口。
-        // 监听、TLS/WSS 和 relay 都由外部 Server 进程处理。
-        var ok = NativeMethods.chat_host_start(
+        // 加入已有房间只读取本机 logs/certs/<digest>/ 中的 Host 材料。
+        // 它不会重新生成 entrance.scp，也不会覆盖房间级 PKI。
+        var ok = NativeMethods.chat_host_join_existing(
             serverUrl,
-            HostRoomBox.Text.Trim(),
-            HostUserBox.Text.Trim(),
-            HostPasswordBox.Password);
+            room,
+            user,
+            MemberKeyPassBox.Password);
         if (ok != 0)
         {
-            roomName = HostRoomBox.Text.Trim();
+            roomName = room;
             ResetParticipants();
             SetSessionMode(SessionMode.ConnectingHost);
         }
     }
 
-    private void Join_Click(object sender, RoutedEventArgs e)
+    private void HostCreate_Click(object sender, RoutedEventArgs e)
     {
-        var serverUrl = JoinUrlBox.Text.Trim();
-        if (!IsWssServerUrl(serverUrl))
+        if (!TryReadSessionInputs(HostRoomBox, HostServerUrlBox, HostUserBox, out var room, out var serverUrl, out var user))
         {
-            AddLine("error", "Server URL must start with wss://.");
             return;
         }
-
-        if (!ApplySessionEnvironment())
+        if (!ApplyServerTlsEnvironment())
         {
             return;
         }
 
         ClearAttachmentMemberStates();
-        // Join 和 Host 都调用 native.dll。C# 只负责收集 UI 输入，
-        // PKI、GKA、WebSocket 和 encrypted relay 都在 C++ core 中执行。
-        var ok = NativeMethods.chat_join_start(
+        // 创建房间时生成新的房间级 Root/Intermediate、Host 成员证书和 entrance.scp。
+        // 监听、TLS/WSS 和 relay 都由外部 Server 进程处理。
+        var ok = NativeMethods.chat_host_start_auto(
             serverUrl,
-            JoinRoomBox.Text.Trim(),
-            JoinUserBox.Text.Trim(),
-            JoinPasswordBox.Password);
+            room,
+            user,
+            MemberKeyPassBox.Password);
         if (ok != 0)
         {
-            roomName = JoinRoomBox.Text.Trim();
+            roomName = room;
             ResetParticipants();
+            SetSessionMode(SessionMode.ConnectingHost);
+        }
+    }
+
+    private void JoinExisting_Click(object sender, RoutedEventArgs e)
+    {
+        if (!TryReadSessionInputs(JoinRoomBox, JoinUrlBox, JoinUserBox, out var room, out var serverUrl, out var user))
+        {
+            return;
+        }
+        if (!ApplyServerTlsEnvironment())
+        {
+            return;
+        }
+
+        ClearAttachmentMemberStates();
+        // 加入房间只使用本机已有 room-dir；首次拿到 entrance.scp 时应点“导入房间”。
+        var ok = NativeMethods.chat_join_existing(
+            serverUrl,
+            room,
+            user,
+            MemberKeyPassBox.Password);
+        if (ok != 0)
+        {
+            roomName = room;
+            ResetParticipants();
+            AddPendingParticipant(user);
+            SetSessionMode(SessionMode.ConnectingJoin);
+        }
+    }
+
+    private async void JoinImport_Click(object sender, RoutedEventArgs e)
+    {
+        if (!TryReadSessionInputs(JoinRoomBox, JoinUrlBox, JoinUserBox, out var room, out var serverUrl, out var user))
+        {
+            return;
+        }
+
+        var entranceFile = await PickEntranceFileAsync();
+        if (string.IsNullOrWhiteSpace(entranceFile)) return;
+        if (!ApplyServerTlsEnvironment())
+        {
+            return;
+        }
+
+        ClearAttachmentMemberStates();
+        // 导入房间才打开 entrance.scp 文件选择器。
+        // C# 只负责收集 UI 输入，
+        // PKI、GKA、WebSocket 和 encrypted relay 都在 C++ core 中执行。
+        var ok = NativeMethods.chat_join_start_auto(
+            serverUrl,
+            room,
+            user,
+            entranceFile,
+            MemberKeyPassBox.Password);
+        if (ok != 0)
+        {
+            roomName = room;
+            ResetParticipants();
+            AddPendingParticipant(user);
             SetSessionMode(SessionMode.ConnectingJoin);
         }
     }
@@ -745,6 +832,7 @@ public sealed partial class MainWindow : Window
 
     private AttachmentMemberState MemberStateForParticipant(string participant)
     {
+        if (IsPendingParticipant(participant)) return AttachmentMemberState.Pending;
         var keys = ParticipantTrustKeys(participant).ToList();
         if (keys.Any(key => blockedAttachmentMembers.Contains(key))) return AttachmentMemberState.Blocked;
         return AttachmentMemberState.Allowed;
@@ -761,6 +849,11 @@ public sealed partial class MainWindow : Window
 
     private void ToggleBlockedParticipant(string participant)
     {
+        if (IsPendingParticipant(participant))
+        {
+            RejectPendingParticipant(participant);
+            return;
+        }
         // Blocked 是当前房间内的临时 UI 状态：右键成员卡片切换红/绿。
         var key = PrimaryParticipantKey(participant);
         if (key.Length == 0) return;
@@ -788,6 +881,8 @@ public sealed partial class MainWindow : Window
 
         // Keep stable name plus id internally for PKI/fingerprint lookup, while
         // RefreshParticipants displays only the member name.
+        pendingParticipants.Remove(normalizedName);
+        pendingParticipants.Remove(normalizedId);
         RemoveParticipant(normalizedId);
         RemoveParticipant(normalizedName);
         var participant = ParticipantLabel(shownName, normalizedId);
@@ -882,6 +977,7 @@ public sealed partial class MainWindow : Window
         return state switch
         {
             AttachmentMemberState.Blocked => Color.FromArgb(54, 176, 32, 32),
+            AttachmentMemberState.Pending => Color.FromArgb(45, 120, 120, 120),
             AttachmentMemberState.Allowed => Color.FromArgb(54, 28, 135, 73),
             _ => Color.FromArgb(20, 0, 0, 0)
         };
@@ -892,9 +988,52 @@ public sealed partial class MainWindow : Window
         return state switch
         {
             AttachmentMemberState.Blocked => Color.FromArgb(190, 176, 32, 32),
+            AttachmentMemberState.Pending => Color.FromArgb(140, 120, 120, 120),
             AttachmentMemberState.Allowed => Color.FromArgb(190, 28, 135, 73),
             _ => Color.FromArgb(50, 0, 0, 0)
         };
+    }
+
+    private bool IsPendingParticipant(string participant)
+    {
+        return ParticipantTrustKeys(participant).Any(key => pendingParticipants.Contains(key));
+    }
+
+    private void AddPendingParticipant(string name, string requestId = "")
+    {
+        var displayName = name.Trim();
+        if (displayName.Length == 0) return;
+        pendingParticipants.Add(displayName);
+        participants.Add(displayName);
+        if (!string.IsNullOrWhiteSpace(requestId)) {
+            pendingJoinNamesByRequestId[requestId.Trim()] = displayName;
+        }
+        RefreshParticipants();
+    }
+
+    private void RemovePendingParticipant(string token)
+    {
+        if (string.IsNullOrWhiteSpace(token)) return;
+        var normalized = token.Trim();
+        if (pendingJoinNamesByRequestId.TryGetValue(normalized, out var name)) {
+            pendingJoinNamesByRequestId.Remove(normalized);
+            normalized = name;
+        }
+        pendingParticipants.RemoveWhere(key => string.Equals(key, normalized, StringComparison.OrdinalIgnoreCase));
+        RemoveParticipant(normalized);
+        RefreshParticipants();
+    }
+
+    private void ApprovePendingParticipant(string participant)
+    {
+        if (sessionMode != SessionMode.Host) return;
+        NativeMethods.chat_send_line("/approve " + ParticipantDisplayName(participant));
+    }
+
+    private void RejectPendingParticipant(string participant)
+    {
+        if (sessionMode != SessionMode.Host) return;
+        NativeMethods.chat_send_line("/reject " + ParticipantDisplayName(participant));
     }
 
     private void CopyParticipantFingerprint(string participant)
@@ -1300,6 +1439,7 @@ public sealed partial class MainWindow : Window
         var ownName = sessionMode switch
         {
             SessionMode.Host => HostUserBox.Text.Trim(),
+            SessionMode.PendingJoin => JoinUserBox.Text.Trim(),
             SessionMode.Join => JoinUserBox.Text.Trim(),
             _ => ""
         };
@@ -1310,8 +1450,10 @@ public sealed partial class MainWindow : Window
     {
         sessionMode = mode;
         var isConnected = mode is SessionMode.Host or SessionMode.Join;
-        HostButton.IsEnabled = mode == SessionMode.None;
-        JoinButton.IsEnabled = mode == SessionMode.None;
+        HostJoinButton.IsEnabled = mode == SessionMode.None;
+        HostCreateButton.IsEnabled = mode == SessionMode.None;
+        JoinExistingButton.IsEnabled = mode == SessionMode.None;
+        JoinImportButton.IsEnabled = mode == SessionMode.None;
         // Stop is intentionally always available. Native chat_stop() is
         // idempotent, and keeping the button clickable lets the user recover
         // from connection errors where the UI mode is already None but a native
@@ -1330,7 +1472,7 @@ public sealed partial class MainWindow : Window
 
     private void StopSession()
     {
-        NativeMethods.chat_stop();
+        NativeMethods.chat_close_room();
         SetSessionMode(SessionMode.None);
         ResetParticipants();
     }
@@ -1350,6 +1492,7 @@ public sealed partial class MainWindow : Window
         if (message == "Session stopped" ||
             message == "Stopped" ||
             message == "Room is no longer available" ||
+            message.StartsWith("Room is no longer available:", StringComparison.OrdinalIgnoreCase) ||
             message == "Signaling closed" ||
             message == "Signaling connection ended" ||
             message == "Signaling failed" ||
@@ -1368,6 +1511,14 @@ public sealed partial class MainWindow : Window
             AddParticipant(HostUserBox.Text.Trim());
             MarkLocalIdentityIfPossible();
             ShowInfo(message, InfoBarSeverity.Success);
+            return;
+        }
+
+        if (message.StartsWith("Join request is waiting for Host approval:", StringComparison.OrdinalIgnoreCase))
+        {
+            SetSessionMode(SessionMode.PendingJoin);
+            AddPendingParticipant(JoinUserBox.Text.Trim());
+            ShowInfo(UiText("Waiting for Host approval", "等待群主允许加入"), InfoBarSeverity.Informational);
             return;
         }
 
@@ -1435,9 +1586,39 @@ public sealed partial class MainWindow : Window
             {
                 participants.Add(name);
             }
+            foreach (var pending in pendingParticipants)
+            {
+                participants.Add(pending);
+            }
             MarkLocalIdentityIfPossible();
             PruneAttachmentMemberStates();
             RefreshParticipants();
+            return;
+        }
+
+        const string pendingPrefix = "Pending join verified: ";
+        if (message.StartsWith(pendingPrefix, StringComparison.Ordinal))
+        {
+            var parts = message[pendingPrefix.Length..]
+                .Split(" / ", 3, StringSplitOptions.TrimEntries);
+            if (parts.Length >= 2)
+            {
+                AddPendingParticipant(parts[0], parts[1]);
+            }
+            return;
+        }
+
+        const string pendingCancelledPrefix = "Pending join cancelled: ";
+        if (message.StartsWith(pendingCancelledPrefix, StringComparison.Ordinal))
+        {
+            RemovePendingParticipant(message[pendingCancelledPrefix.Length..].Trim());
+            return;
+        }
+
+        const string pendingRejectedPrefix = "Pending join rejected: ";
+        if (message.StartsWith(pendingRejectedPrefix, StringComparison.Ordinal))
+        {
+            RemovePendingParticipant(message[pendingRejectedPrefix.Length..].Trim());
             return;
         }
 
@@ -1480,6 +1661,8 @@ public sealed partial class MainWindow : Window
     private void ResetParticipants()
     {
         participants.Clear();
+        pendingParticipants.Clear();
+        pendingJoinNamesByRequestId.Clear();
         ClearAttachmentMemberStates();
         RefreshParticipants();
     }
@@ -1516,6 +1699,7 @@ public sealed partial class MainWindow : Window
         {
             var state = MemberStateForParticipant(name);
             var verifiedInfo = VerifiedInfoForParticipant(name);
+            var isPending = state == AttachmentMemberState.Pending;
             var row = new Grid { ColumnSpacing = 8 };
             row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
 
@@ -1531,10 +1715,17 @@ public sealed partial class MainWindow : Window
                     IsTextSelectionEnabled = false
                 }
             };
-            ToolTipService.SetToolTip(identityBox, verifiedInfo is null
+            ToolTipService.SetToolTip(identityBox, isPending
+                ? UiText("Click to approve; right-click to reject", "单击允许加入；右键拒绝加入")
+                : verifiedInfo is null
                 ? UiText("Right-click to block/unblock attachment preview", "右键阻止/解除阻止附件预览")
                 : UiText("Click copies fingerprint; right-click blocks/unblocks previews", "单击复制指纹；右键阻止/解除阻止预览"));
-            identityBox.Tapped += (_, _) => CopyParticipantFingerprint(name);
+            identityBox.Tapped += (_, args) =>
+            {
+                args.Handled = true;
+                if (isPending) ApprovePendingParticipant(name);
+                else CopyParticipantFingerprint(name);
+            };
             row.Children.Add(identityBox);
 
             var participantCard = new Border
@@ -1546,8 +1737,16 @@ public sealed partial class MainWindow : Window
                 CornerRadius = new CornerRadius(6),
                 Child = row
             };
+            participantCard.Tapped += (_, args) =>
+            {
+                if (!isPending) return;
+                args.Handled = true;
+                ApprovePendingParticipant(name);
+            };
             participantCard.RightTapped += (_, _) => ToggleBlockedParticipant(name);
-            ToolTipService.SetToolTip(participantCard, state == AttachmentMemberState.Blocked
+            ToolTipService.SetToolTip(participantCard, isPending
+                ? UiText("Click to approve; right-click to reject", "单击允许加入；右键拒绝加入")
+                : state == AttachmentMemberState.Blocked
                 ? UiText("Right-click to allow attachment previews", "右键恢复附件预览")
                 : UiText("Right-click to block attachment previews", "右键阻止附件预览"));
             RoomParticipantsPanel.Children.Add(participantCard);
@@ -1563,6 +1762,7 @@ public sealed partial class MainWindow : Window
         {
             SessionMode.Host => UiText("server", "服务端"),
             SessionMode.Join => UiText("client", "客户端"),
+            SessionMode.PendingJoin => UiText("pending", "等待加入"),
             SessionMode.ConnectingHost => UiText("connecting server", "正在连接服务端"),
             SessionMode.ConnectingJoin => UiText("connecting client", "正在连接客户端"),
             _ => UiText("not connected", "未连接")
@@ -1656,24 +1856,19 @@ public sealed partial class MainWindow : Window
         SaveAppConfigIfReady();
     }
 
-    private async void BrowsePkiTrustStore_Click(object sender, RoutedEventArgs e)
-    {
-        await PickPkiFileIntoAsync(PkiTrustStoreBox);
-    }
-
-    private async void BrowsePkiIdentityCert_Click(object sender, RoutedEventArgs e)
-    {
-        await PickPkiFileIntoAsync(PkiIdentityCertBox);
-    }
-
-    private async void BrowsePkiIdentityKey_Click(object sender, RoutedEventArgs e)
-    {
-        await PickPkiFileIntoAsync(PkiIdentityKeyBox);
-    }
-
     private async void BrowseLocalServerTlsCa_Click(object sender, RoutedEventArgs e)
     {
         await PickPkiFileIntoAsync(LocalServerTlsCaBox);
+    }
+
+    private async System.Threading.Tasks.Task<string?> PickEntranceFileAsync()
+    {
+        var picker = new FileOpenPicker();
+        picker.FileTypeFilter.Add(".scp");
+        InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(this));
+
+        var file = await picker.PickSingleFileAsync();
+        return file?.Path;
     }
 
     private async System.Threading.Tasks.Task PickPkiFileIntoAsync(TextBox target)
@@ -1692,45 +1887,11 @@ public sealed partial class MainWindow : Window
         SaveAppConfigIfReady();
     }
 
-    private bool ApplySessionEnvironment()
-    {
-        return ApplyServerTlsEnvironment() && ApplyMemberPkiEnvironment();
-    }
-
     private bool ApplyServerTlsEnvironment()
     {
         // SECURECHAT_LOCAL_TLS_CA 只影响本地/局域网 WSS 服务器证书验证。
         // 该项是可选项：公网证书通常由系统信任 CA 签发，本地/局域网自签证书才需要填写。
         return SetProcessEnvironmentFromBox("SECURECHAT_LOCAL_TLS_CA", LocalServerTlsCaBox);
-    }
-
-    private bool ApplyMemberPkiEnvironment()
-    {
-        // native.dll 读取的是 SECURECHAT_PKI_* 环境变量。WinUI 用户通常
-        // 通过双击 exe 启动，所以这里把设置面板中的路径写入当前进程环境。
-        if (!SetProcessEnvironmentFromBox("SECURECHAT_PKI_TRUST_STORE", PkiTrustStoreBox) ||
-            !SetProcessEnvironmentFromBox("SECURECHAT_IDENTITY_CERT_FILE", PkiIdentityCertBox) ||
-            !SetProcessEnvironmentFromBox("SECURECHAT_IDENTITY_KEY_FILE", PkiIdentityKeyBox) ||
-            !SetProcessEnvironmentValue("SECURECHAT_IDENTITY_KEY_PASS", PkiIdentityKeyPassBox.Password))
-        {
-            return false;
-        }
-
-        var missing = new[]
-            {
-                ("SECURECHAT_PKI_TRUST_STORE", UiText("trust store", "信任根")),
-                ("SECURECHAT_IDENTITY_CERT_FILE", UiText("identity cert chain", "成员证书链")),
-                ("SECURECHAT_IDENTITY_KEY_FILE", UiText("identity private key", "成员私钥"))
-            }
-            .Where(item => string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(item.Item1)))
-            .Select(item => item.Item2)
-            .ToList();
-        if (missing.Count == 0) return true;
-
-        AddLine("error", UiText(
-            "Member PKI is required. Open Settings and choose: ",
-            "必须配置成员 PKI。请打开设置并选择：") + string.Join(", ", missing));
-        return false;
     }
 
     private bool SetProcessEnvironmentFromBox(string name, TextBox textBox)
@@ -2114,13 +2275,13 @@ public sealed partial class MainWindow : Window
             HostRoomBox.Header = UiText("Room", "房间");
             HostServerUrlBox.Header = UiText("Server URL", "服务器 URL");
             HostUserBox.Header = UiText("User", "用户");
-            HostPasswordBox.Header = UiText("Password", "密码");
-            HostButton.Content = UiText("Start Hosting", "启动房间");
+            HostJoinButton.Content = UiText("Join Room", "加入房间");
+            HostCreateButton.Content = UiText("Create Room", "创建房间");
             JoinRoomBox.Header = UiText("Room", "房间");
             JoinUrlBox.Header = UiText("Server URL", "服务器 URL");
             JoinUserBox.Header = UiText("User", "用户");
-            JoinPasswordBox.Header = UiText("Password", "密码");
-            JoinButton.Content = UiText("Join Room", "加入房间");
+            JoinExistingButton.Content = UiText("Join Room", "加入房间");
+            JoinImportButton.Content = UiText("Import Room", "导入房间");
             RoomStatusHeaderText.Text = UiText("Room Status", "房间状态");
             RoomParticipantsHeaderText.Text = UiText("Participants", "参与者");
 
@@ -2152,14 +2313,8 @@ public sealed partial class MainWindow : Window
             AutoLoadAudioToggleSwitch.Header = UiText("Auto load audio", "自动加载音频");
             AutoLoadAudioToggleSwitch.OnContent = UiText("On", "开");
             AutoLoadAudioToggleSwitch.OffContent = UiText("Off", "关");
-            PkiHeaderText.Text = UiText("Member PKI", "成员 PKI");
-            PkiTrustStoreBox.Header = UiText("Trust store", "信任根");
-            PkiIdentityCertBox.Header = UiText("Identity cert chain", "成员证书链");
-            PkiIdentityKeyBox.Header = UiText("Identity private key", "成员私钥");
-            PkiIdentityKeyPassBox.Header = UiText("Identity key passphrase", "成员私钥口令");
-            BrowsePkiTrustStoreButton.Content = UiText("Browse", "选择");
-            BrowsePkiIdentityCertButton.Content = UiText("Browse", "选择");
-            BrowsePkiIdentityKeyButton.Content = UiText("Browse", "选择");
+            RoomIdentityHeaderText.Text = UiText("Room Identity", "房间身份");
+            MemberKeyPassBox.Header = UiText("Member key passphrase", "成员私钥口令");
             ServerTlsHeaderText.Text = UiText("Server TLS", "服务器 TLS");
             LocalServerTlsCaBox.Header = UiText("Local Server TLS CA", "本地服务器 TLS 信任根");
             BrowseLocalServerTlsCaButton.Content = UiText("Browse", "选择");
@@ -2278,9 +2433,6 @@ public sealed partial class MainWindow : Window
             AppendYaml(builder, "show_only_messages", showOnlyMessages ? "true" : "false");
             AppendYaml(builder, "auto_preview_images", autoPreviewImages ? "true" : "false");
             AppendYaml(builder, "auto_load_audio", autoLoadAudio ? "true" : "false");
-            AppendYaml(builder, "pki_trust_store", PkiTrustStoreBox.Text.Trim());
-            AppendYaml(builder, "pki_identity_cert", PkiIdentityCertBox.Text.Trim());
-            AppendYaml(builder, "pki_identity_key", PkiIdentityKeyBox.Text.Trim());
             AppendYaml(builder, "local_server_tls_ca", LocalServerTlsCaBox.Text.Trim());
             AppendYaml(builder, "chat_background_path", chatBackgroundPath ?? "");
             AppendYaml(builder, "chat_background_opacity", NumberString(BackgroundOpacitySlider.Value));
@@ -2327,9 +2479,6 @@ public sealed partial class MainWindow : Window
             // per-session endpoint choice, so stale or sensitive endpoints
             // should not silently appear after a restart.
             HostServerUrlBox.Text = "";
-            PkiTrustStoreBox.Text = Value(chatValues, "pki_trust_store", "");
-            PkiIdentityCertBox.Text = Value(chatValues, "pki_identity_cert", "");
-            PkiIdentityKeyBox.Text = Value(chatValues, "pki_identity_key", "");
             LocalServerTlsCaBox.Text = Value(chatValues, "local_server_tls_ca", "");
             SetSlider(BackgroundOpacitySlider, Value(chatValues, "chat_background_opacity", "0.28"));
             SetComboByTag(BackgroundHorizontalComboBox, Value(chatValues, "chat_background_crop_x", "Center"));

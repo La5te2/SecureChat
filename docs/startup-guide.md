@@ -7,11 +7,10 @@
 同一个房间的 Host 和 Client 需要使用相同的：
 
 - Server URL，例如 `wss://127.0.0.1:25566` 或 `wss://chat.example.com:25566`；
-- Room，例如 `secure-room`；
-- Room password，在程序提示 `Room password:` 时输入；
-- 成员 PKI 信任根，也就是同一个 `root-ca.pem`。
+- room instance，也就是同一套 `logs/certs/<room-digest>` 房间证书目录；
+- 本地/局域网自动 TLS 证书场景下，还需要同一个 `local-root-ca.pem`。
 
-Server 只需要 TLS 证书和监听参数，不需要成员 PKI。Host 和 Client 必须配置成员 PKI，否则会启动失败。
+Server 只需要 TLS 证书和监听参数，不需要成员 PKI。Host 和 Client 使用 `--room-dir` 时会从房间目录自动读取 trust store、成员证书链、成员私钥和 room instance token。
 
 ## Server TLS 证书选择
 
@@ -56,6 +55,7 @@ C++ 可执行文件位置：
 out\build\x64-release\server.exe
 out\build\x64-release\host.exe
 out\build\x64-release\client.exe
+out\build\x64-release\cert.exe
 ```
 
 WinUI 可执行文件位置：
@@ -76,17 +76,18 @@ Remove-Item Env:SECURECHAT_TLS_KEY_FILE -ErrorAction SilentlyContinue
 
 Server 会自动生成 `certs/server-chain.pem`、`certs/server-key.pem` 和 `certs/local-root-ca.pem`。如果要使用正式域名证书，可以显式设置 `SECURECHAT_TLS_CERT_FILE` 和 `SECURECHAT_TLS_KEY_FILE`。
 
-## Windows：启动 Host
+## Windows：准备房间证书目录
 
-新开一个 PowerShell 窗口，配置 Host 的成员 PKI：
+在项目根目录执行。`create-entrance` 输出 Host 的房间目录；Client 使用 Host 分发的 `entrance.scp` 执行 `import-entrance` 后，会在本机生成成员私钥、CSR、设备/身份声明和 pending join proof。`roomDir` 末级目录名就是下面的 `<room-digest>`。成员证书由后续联机 `/approve` 自动签发，不需要普通用户手动运行 `sign-csr`。
 
 ```powershell
-$env:SECURECHAT_PKI_TRUST_STORE="certs\pki\root-ca.pem"
-$env:SECURECHAT_IDENTITY_CERT_FILE="certs\pki\alice-chain.pem"
-$env:SECURECHAT_IDENTITY_KEY_FILE="certs\pki\alice-key.pem"
+.\out\build\x64-release\cert.exe create-entrance --room secure-room --phrase "use-a-long-random-room-phrase" --host alice --out logs\certs
+.\out\build\x64-release\cert.exe import-entrance --entrance logs\certs\<room-digest>\entrance.scp --phrase "use-a-long-random-room-phrase" --user bob --out logs\certs
 ```
 
-如果 Server 使用私有 CA 或自动生成的开发 TLS 证书，CLI 还需要信任对应 Server CA：
+## Windows：启动 Host
+
+新开一个 PowerShell 窗口。如果 Server 使用私有 CA 或自动生成的开发 TLS 证书，先信任对应 Server CA：
 
 ```powershell
 $env:SECURECHAT_LOCAL_TLS_CA="certs\local-root-ca.pem"
@@ -95,22 +96,12 @@ $env:SECURECHAT_LOCAL_TLS_CA="certs\local-root-ca.pem"
 创建房间：
 
 ```powershell
-.\out\build\x64-release\host.exe --server wss://127.0.0.1:25566 secure-room alice
+.\out\build\x64-release\host.exe --server wss://127.0.0.1:25566 --room-dir logs\certs\<room-digest> alice
 ```
-
-看到 `Room password:` 后输入房间密码。输入时不会显示字符。
 
 ## Windows：启动 Client
 
-新开一个 PowerShell 窗口，配置 Client 的成员 PKI：
-
-```powershell
-$env:SECURECHAT_PKI_TRUST_STORE="certs\pki\root-ca.pem"
-$env:SECURECHAT_IDENTITY_CERT_FILE="certs\pki\bob-chain.pem"
-$env:SECURECHAT_IDENTITY_KEY_FILE="certs\pki\bob-key.pem"
-```
-
-如果 Server 使用私有 CA 或自动生成的开发 TLS 证书，同样设置：
+新开一个 PowerShell 窗口。如果 Server 使用私有 CA 或自动生成的开发 TLS 证书，同样设置：
 
 ```powershell
 $env:SECURECHAT_LOCAL_TLS_CA="certs\local-root-ca.pem"
@@ -119,10 +110,14 @@ $env:SECURECHAT_LOCAL_TLS_CA="certs\local-root-ca.pem"
 加入房间：
 
 ```powershell
-.\out\build\x64-release\client.exe wss://127.0.0.1:25566 secure-room bob
+.\out\build\x64-release\client.exe wss://127.0.0.1:25566 --room-dir logs\certs\<room-digest> bob
 ```
 
-看到 `Room password:` 后输入和 Host 相同的房间密码。
+Client 会进入 pending join。回到 Host 窗口执行：
+
+```powershell
+/approve bob
+```
 
 ## Windows：WinUI
 
@@ -134,16 +129,9 @@ WinUI 不启动 Server，也不配置 Server 私钥。使用 WinUI 前，需要�
 app\chat\bin\x64\Release\net10.0-windows10.0.19041.0\win-x64\SecureChat.exe
 ```
 
-第一次使用时，点击设置面板，选择当前成员的应用层 PKI 文件：
-
-- Trust store / 信任根：`root-ca.pem`；
-- Identity cert chain / 成员证书链：例如 `alice-chain.pem` 或 `bob-chain.pem`；
-- Identity private key / 成员私钥：例如 `alice-key.pem` 或 `bob-key.pem`；
-- Identity key passphrase / 成员私钥口令：只有私钥加密时填写，且不会保存到配置文件。
-
 WinUI 的 Server URL 必须填写 `wss://...`。如果 Server 使用 Certbot 等系统信任 CA 签发的证书，WinUI 不需要额外配置 Server CA。如果 Server 使用自动生成的开发证书，在设置面板的 `Local Server TLS CA / 本地服务器 TLS 信任根` 中选择 `certs/local-root-ca.pem`。
 
-Host 页填写 Room、User、Server URL、Password 后点击 Host/Create。Join 页填写同一个 Room、当前 User、同一个 Server URL、同一个 Password 后点击 Join。
+Host 页填写 Room、Server URL、User 后点击启动房间，WinUI 会自动生成 `logs/certs/<room-digest>/entrance.scp`。Join 页填写同一个 Room、Server URL、当前 User 后点击加入房间，并在弹出的文件选择器中选择 Host 分发的 `entrance.scp`。Client 进入 pending join 后，Host 可以左键灰色 pending 成员卡片允许加入，或在输入框中发送 `/approve <成员名>` 完成审批；右键灰色 pending 成员卡片会拒绝该申请。
 
 ## Linux：构建
 
@@ -160,6 +148,7 @@ chmod +x build.sh
 out/build/x64-linux-release/server
 out/build/x64-linux-release/host
 out/build/x64-linux-release/client
+out/build/x64-linux-release/cert
 ```
 
 ## Linux：启动 Server
@@ -197,55 +186,51 @@ chmod +x start_server.sh stop_server.sh
 ./stop_server.sh
 ```
 
-## Linux：启动 Host
+## Linux：准备房间证书目录
 
-新开终端，配置 Host 的成员 PKI：
+在项目根目录执行。`create-entrance` 输出 Host 的房间目录；Client 使用 Host 分发的 `entrance.scp` 执行 `import-entrance` 后，会在本机生成成员私钥、CSR、设备/身份声明和 pending join proof。`roomDir` 末级目录名就是下面的 `<room-digest>`。成员证书由后续联机 `/approve` 自动签发，不需要普通用户手动运行 `sign-csr`。
 
 ```bash
 cd ~/SecureChat
-export SECURECHAT_PKI_TRUST_STORE=certs/pki/root-ca.pem
-export SECURECHAT_IDENTITY_CERT_FILE=certs/pki/alice-chain.pem
-export SECURECHAT_IDENTITY_KEY_FILE=certs/pki/alice-key.pem
+./out/build/x64-linux-release/cert create-entrance --room secure-room --phrase "use-a-long-random-room-phrase" --host alice --out logs/certs
+./out/build/x64-linux-release/cert import-entrance --entrance logs/certs/<room-digest>/entrance.scp --phrase "use-a-long-random-room-phrase" --user bob --out logs/certs
 ```
 
-如果 Server 使用自动生成的开发证书，设置：
+## Linux：启动 Host
+
+新开终端。如果 Server 使用自动生成的开发证书，设置：
 
 ```bash
+cd ~/SecureChat
 export SECURECHAT_LOCAL_TLS_CA=certs/local-root-ca.pem
 ```
 
 创建房间：
 
 ```bash
-./out/build/x64-linux-release/host --server wss://127.0.0.1:25566 secure-room alice
+./out/build/x64-linux-release/host --server wss://127.0.0.1:25566 --room-dir logs/certs/<room-digest> alice
 ```
-
-看到 `Room password:` 后输入房间密码。
 
 ## Linux：启动 Client
 
-新开终端，配置 Client 的成员 PKI：
+新开终端。如果 Server 使用自动生成的开发证书，设置：
 
 ```bash
 cd ~/SecureChat
-export SECURECHAT_PKI_TRUST_STORE=certs/pki/root-ca.pem
-export SECURECHAT_IDENTITY_CERT_FILE=certs/pki/bob-chain.pem
-export SECURECHAT_IDENTITY_KEY_FILE=certs/pki/bob-key.pem
-```
-
-如果 Server 使用自动生成的开发证书，设置：
-
-```bash
 export SECURECHAT_LOCAL_TLS_CA=certs/local-root-ca.pem
 ```
 
 加入房间：
 
 ```bash
-./out/build/x64-linux-release/client wss://127.0.0.1:25566 secure-room bob
+./out/build/x64-linux-release/client wss://127.0.0.1:25566 --room-dir logs/certs/<room-digest> bob
 ```
 
-看到 `Room password:` 后输入和 Host 相同的房间密码。
+Client 会进入 pending join。回到 Host 终端输入：
+
+```bash
+/approve bob
+```
 
 ## Linux：局域网
 

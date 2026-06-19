@@ -34,8 +34,8 @@
                                 <TextBox x:Name="HostRoomBox" Header="Room" />
                                 <TextBox x:Name="HostServerUrlBox" Header="Server URL" />
                                 <TextBox x:Name="HostUserBox" Header="User" />
-                                <PasswordBox x:Name="HostPasswordBox" Header="Password" />
-                                <Button x:Name="HostButton" Content="Start Hosting" Click="Host_Click" HorizontalAlignment="Stretch" />
+                                <Button x:Name="HostJoinButton" Content="Join Room" Click="HostJoin_Click" HorizontalAlignment="Stretch" />
+                                <Button x:Name="HostCreateButton" Content="Create Room" Click="HostCreate_Click" HorizontalAlignment="Stretch" />
                             </StackPanel>
                         </PivotItem>
 
@@ -44,8 +44,8 @@
                                 <TextBox x:Name="JoinRoomBox" Header="Room" />
                                 <TextBox x:Name="JoinUrlBox" Header="Server URL" />
                                 <TextBox x:Name="JoinUserBox" Header="User" />
-                                <PasswordBox x:Name="JoinPasswordBox" Header="Password" />
-                                <Button x:Name="JoinButton" Content="Join Room" Click="Join_Click" HorizontalAlignment="Stretch" />
+                                <Button x:Name="JoinExistingButton" Content="Join Room" Click="JoinExisting_Click" HorizontalAlignment="Stretch" />
+                                <Button x:Name="JoinImportButton" Content="Import Room" Click="JoinImport_Click" HorizontalAlignment="Stretch" />
                             </StackPanel>
                         </PivotItem>
 
@@ -258,32 +258,8 @@
                         <TextBlock x:Name="AttachmentSafetyHeaderText" Text="Attachment Safety" FontWeight="SemiBold" />
                         <ToggleSwitch x:Name="AutoPreviewImagesToggleSwitch" Header="Auto preview images" IsOn="True" Toggled="AttachmentPreviewSetting_Toggled" />
                         <ToggleSwitch x:Name="AutoLoadAudioToggleSwitch" Header="Auto load audio" Toggled="AttachmentPreviewSetting_Toggled" />
-                        <TextBlock x:Name="PkiHeaderText" Text="Member PKI" FontWeight="SemiBold" />
-                        <Grid ColumnSpacing="8">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="88" />
-                            </Grid.ColumnDefinitions>
-                            <TextBox x:Name="PkiTrustStoreBox" Header="Trust store" TextChanged="PersistedSetting_Changed" />
-                            <Button x:Name="BrowsePkiTrustStoreButton" Grid.Column="1" Content="Browse" Click="BrowsePkiTrustStore_Click" HorizontalAlignment="Stretch" VerticalAlignment="Bottom" />
-                        </Grid>
-                        <Grid ColumnSpacing="8">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="88" />
-                            </Grid.ColumnDefinitions>
-                            <TextBox x:Name="PkiIdentityCertBox" Header="Identity cert chain" TextChanged="PersistedSetting_Changed" />
-                            <Button x:Name="BrowsePkiIdentityCertButton" Grid.Column="1" Content="Browse" Click="BrowsePkiIdentityCert_Click" HorizontalAlignment="Stretch" VerticalAlignment="Bottom" />
-                        </Grid>
-                        <Grid ColumnSpacing="8">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="88" />
-                            </Grid.ColumnDefinitions>
-                            <TextBox x:Name="PkiIdentityKeyBox" Header="Identity private key" TextChanged="PersistedSetting_Changed" />
-                            <Button x:Name="BrowsePkiIdentityKeyButton" Grid.Column="1" Content="Browse" Click="BrowsePkiIdentityKey_Click" HorizontalAlignment="Stretch" VerticalAlignment="Bottom" />
-                        </Grid>
-                        <PasswordBox x:Name="PkiIdentityKeyPassBox" Header="Identity key passphrase" />
+                        <TextBlock x:Name="RoomIdentityHeaderText" Text="Room Identity" FontWeight="SemiBold" />
+                        <PasswordBox x:Name="MemberKeyPassBox" Header="Member key passphrase" />
                         <TextBlock x:Name="ServerTlsHeaderText" Text="Server TLS" FontWeight="SemiBold" />
                         <Grid ColumnSpacing="8">
                             <Grid.ColumnDefinitions>

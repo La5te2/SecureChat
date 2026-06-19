@@ -1,10 +1,9 @@
-// SignalingServer 使用的内存房间注册表。它记录当前进程内的房间密码和
-// Host/Client 成员关系。
+// SignalingServer 使用的内存房间注册表。它记录当前进程内的 Host/Client
+// 成员关系；房间准入由 room instance token 和应用层 PKI 共同完成。
 #pragma once
 
 #include "auth_service.hpp"
 
-#include <array>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -24,10 +23,10 @@ struct RoomMember {
 
 class RoomRegistry {
 public:
-    // 使用给定 Host 和房间密码创建房间。
-    void createRoom(const std::string& roomId, const UserAccount& host, const std::string& password);
-    // 检查传入房间密码是否匹配已保存的房间密码。
-    bool passwordMatches(const std::string& roomId, const std::string& password) const;
+    // 使用给定 Host 创建房间。roomId 对 Server 来说是不透明 room instance token。
+    void createRoom(const std::string& roomId, const UserAccount& host);
+    // 持久化恢复或 Host 重接管时恢复 room registry 状态。
+    void restoreRoom(const std::string& roomId, const UserAccount& host);
     // 在已有房间中添加或刷新 Client 成员关系。
     RoomMember joinClient(const std::string& roomId, const UserAccount& client);
     // 移除房间及其所有内存成员关系。
@@ -35,9 +34,7 @@ public:
 
 private:
     struct RoomState {
-        // RoomState 从不保存房间密码本身，只保存其摘要。
         std::string roomId;
-        std::array<unsigned char, 32> passwordHash{};
         std::optional<RoomMember> host;
         std::unordered_map<std::string, RoomMember> clients;
     };

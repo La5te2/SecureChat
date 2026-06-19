@@ -4,7 +4,7 @@ SecureChat 是一个基于 C++ 和 WinUI 的安全双向通信系统。系统提
 
 ## 项目组成
 
-- `src/` 和 `include/`：C++ 核心代码，包含信令服务器、WebSocket 中继、贡献式群组密钥协商、成员 PKI、附件传输、CLI 和 native API。
+- `src/` 和 `include/`：C++ 核心代码，包含信令服务器、WebSocket 中继、贡献式群组密钥协商、成员 PKI、`entrance.scp` 证书工具、附件传输、CLI 和 native API。
 - `app/chat/`：Windows WinUI 图形客户端。
 - `certs/`：本地示例证书和证书生成材料。正式部署时应替换为独立生成的证书。
 - `docs/`：开发和部署说明，包括启动手册、环境变量、证书生成和安全边界文档。
@@ -22,7 +22,7 @@ SecureChat 分为三个运行角色。
 - Host 是创建房间的成员，也是房间生命周期管理者。Host 可以创建房间、关闭房间、禁言或驱逐当前房间成员，并发起新的群组密钥协商 epoch。
 - Client 是加入房间的普通成员。Client 参与成员身份认证、群组密钥协商、群聊消息收发和私发消息收发。
 
-同一个 Server 实例可以承载多个不同房间。同一个 Server 实例内房间名不能重复；不同 Server 或不同端口上的房间名可以重复。一台机器可以启动多个 Server，只要监听端口不同。
+同一个 Server 实例可以承载多个不同 room instance。Server 用 opaque room instance token 注册和路由，因此显示房间名可以重复；同一个 room instance token 不能重复。一台机器可以启动多个 Server，只要监听端口不同。
 
 ## 安全模型
 
@@ -38,25 +38,13 @@ SecureChat 有两层保护。
 
 ### 成员 PKI
 
-Host 和 Client 必须配置成员 PKI。成员证书用于证明长期身份，成员私钥用于签名临时 X25519 公钥、GKA 贡献和 group-state envelope。Server 不验证成员证书链，成员证书链验证发生在 Host/Client 本地。
+Host 和 Client 必须具备成员 PKI。成员证书用于证明长期身份，成员私钥用于签名临时 X25519 公钥、GKA 贡献、group-state envelope 和房间控制消息。Server 不验证成员证书链，成员证书链验证发生在 Host/Client 本地。
 
-必须配置的环境变量：
+当前入口使用 `cert.exe` 生成或导入房间级 `entrance.scp`，再通过 `--room-dir` 启动 Host/Client。程序会从房间目录自动读取 trust store、成员证书链、成员私钥和 room instance token。成员私钥带口令时，通过 CLI 的 `--key-pass` 或 WinUI 设置面板中的 `Member key passphrase / 成员私钥口令` 提供。
 
-```bash
-SECURECHAT_PKI_TRUST_STORE=certs/pki/root-ca.pem
-SECURECHAT_IDENTITY_CERT_FILE=certs/pki/member-chain.pem
-SECURECHAT_IDENTITY_KEY_FILE=certs/pki/member-key.pem
-```
+Host/Client 会验证证书链、证书有效期、Key Usage `digitalSignature`、签名算法一致性和签名内容。缺少有效 room-dir 或房间级 PKI 文件时，Host/Client 启动失败。
 
-如果成员私钥带密码，还需要设置：
-
-```bash
-SECURECHAT_IDENTITY_KEY_PASS=your-key-password
-```
-
-Host/Client 会验证证书链、证书有效期、Key Usage `digitalSignature`、签名算法一致性和签名内容。缺少完整 PKI 配置时，Host/Client 启动失败。
-
-成员私钥只在本机使用。WinUI 设置面板保存的是私钥文件路径，不会把私钥内容写入配置文件，也不会上传给 Server。
+成员私钥只在本机使用。WinUI 读取的是 room-dir 中的本机成员私钥文件，不会把私钥内容写入配置文件，也不会上传给 Server。
 
 ### 贡献式 GKA
 
@@ -144,6 +132,26 @@ Server 的安全边界是“不读取应用明文”。Server 仍可见部分元
 
 ### Windows
 
+CMakePresets 使用 `$env{VCPKG_ROOT}` 定位 vcpkg toolchain。假设 vcpkg 安装在 `C:\src\vcpkg`，先在 PowerShell 中设置当前窗口变量：
+
+```powershell
+$env:VCPKG_ROOT="C:\src\vcpkg"
+```
+
+需要长期保存到用户环境变量时执行：
+
+```powershell
+[Environment]::SetEnvironmentVariable("VCPKG_ROOT", "C:\src\vcpkg", "User")
+```
+
+安装 C++ 依赖：
+
+```powershell
+& "$env:VCPKG_ROOT\vcpkg.exe" install libdatachannel openssl nlohmann-json argon2 --triplet x64-windows
+```
+
+`x64-windows` 同时支持 Debug 和 Release 构建。只安装 `x64-windows-release` 会缺少 Debug 依赖，`x64-debug` preset 可能无法正常构建；如果只做 Release 发布，可以单独增加 release-only preset 并把该 preset 的 `VCPKG_TARGET_TRIPLET` 改为 `x64-windows-release`。
+
 构建 C++ 目标：
 
 ```bat
@@ -162,6 +170,7 @@ build_win.bat
 out\build\x64-release\server.exe
 out\build\x64-release\host.exe
 out\build\x64-release\client.exe
+out\build\x64-release\cert.exe
 ```
 
 ### Linux
@@ -187,7 +196,7 @@ source ~/.bashrc
 安装 C++ 依赖：
 
 ```bash
-$VCPKG_ROOT/vcpkg install libdatachannel openssl nlohmann-json --triplet x64-linux
+$VCPKG_ROOT/vcpkg install libdatachannel openssl nlohmann-json argon2 --triplet x64-linux
 ```
 
 构建：
@@ -204,19 +213,24 @@ chmod +x build.sh
 out/build/x64-linux-release/server
 out/build/x64-linux-release/host
 out/build/x64-linux-release/client
+out/build/x64-linux-release/cert
 out/build/x64-linux-release/libnative.so
 ```
 
 ## 成员证书
 
-成员证书建议采用 Root CA、Intermediate CA、成员证书链的结构。Root CA 用作信任根，Intermediate CA 用于签发成员证书。成员证书必须包含可用于数字签名的公钥，成员私钥必须由成员本人保存。
+成员证书采用 Root CA、Intermediate CA、成员证书链的结构。Root CA 用作信任根，Intermediate CA 用于签发成员证书。成员证书必须包含可用于数字签名的公钥，成员私钥必须由成员本人保存。
+
+当前推荐使用房间级 `entrance.scp` 流程。Host 创建 room instance 时生成房间级 Root/Intermediate、Host 证书、Host 私钥和加密准入容器；Client 导入 `entrance.scp` 后在本机生成自己的成员私钥和 CSR；Client 连接后先进入 pending 状态，Host 审批时在线签发成员证书响应，Client 安装响应后才成为 active 成员。首次 pending join 的 CSR bundle、设备声明、pending join proof 和 Host 返回的签发响应都会使用 `entrance.scp` 内 admission secret 派生的准入信令密钥加密，Server 只转发 admission-encrypted envelope。
+
+房间级证书是标准 OpenSSL/X.509 证书。证书保留版本、序列号、签发者、使用者、有效期、公钥、Key Usage、Extended Key Usage、Subject/Authority Key Identifier 和签名算法等字段；SecureChat 额外写入 `O=SecureChat`、`serialNumber=<roomInstanceTokenDigest>`、角色、设备名和 Netscape Comment。当前成员个人信息采用用户填写的用户名和本机设备名，不写入真实身份、IP 地址或操作系统密码。成员私钥支持口令保护，口令为空时写普通 PEM，口令非空时写加密 PEM。
 
 典型文件分发边界如下：
 
 - `root-ca.pem` 可以公开分发，但必须通过可信渠道校验指纹。
 - `intermediate-ca.pem` 和成员证书链可以公开分发。
 - `member-key.pem` 是成员私钥，只能交给对应成员本人保存。
-- `member-chain.pem` 是成员证书链，Host/Client 启动时通过 `SECURECHAT_IDENTITY_CERT_FILE` 指定。
+- `member-chain.pem` 是成员证书链，Host/Client 启动时由 room-dir 自动读取。
 
 证书生成和使用方法见 `docs/certificate-methods.md`。正式环境中，不应由同一个普通 Host 长期代管所有成员私钥。更好的流程是成员本地生成私钥和 CSR，由证书签发方只签发证书，不接触成员私钥。
 
@@ -224,7 +238,23 @@ out/build/x64-linux-release/libnative.so
 
 ### 本机 WSS
 
-打开三个终端，先启动 Server，再启动 Host，最后启动 Client。
+CLI 运行时仍需要 `--room-dir` 指向本机房间材料目录。下面示例中 `<room-digest>` 是 `cert.exe create-entrance` 或 `cert import-entrance` 输出的 `roomDir` 末级目录名。普通用户更推荐使用 WinUI，WinUI 会隐藏该路径。
+
+Windows：
+
+```powershell
+.\out\build\x64-release\cert.exe create-entrance --room secure-room --phrase "use-a-long-random-room-phrase" --host alice --out logs\certs
+.\out\build\x64-release\cert.exe import-entrance --entrance logs\certs\<room-digest>\entrance.scp --phrase "use-a-long-random-room-phrase" --user bob --out logs\certs
+```
+
+Linux：
+
+```bash
+./out/build/x64-linux-release/cert create-entrance --room secure-room --phrase "use-a-long-random-room-phrase" --host alice --out logs/certs
+./out/build/x64-linux-release/cert import-entrance --entrance logs/certs/<room-digest>/entrance.scp --phrase "use-a-long-random-room-phrase" --user bob --out logs/certs
+```
+
+然后打开三个终端，先启动 Server，再启动 Host，最后启动 Client。Client 连接后会停留在 pending join。Host 在输入框或 CLI 标准输入中执行 `/approve bob` 后，会自动解密准入信令 envelope，校验 Client 的 CSR、room instance 绑定、设备/身份声明和 pending join proof，并在线签发成员证书响应；签发响应同样经 admission-encrypted envelope 返回。Client 安装响应后才会成为 active 成员并收到当前 group key。
 
 Windows：
 
@@ -233,8 +263,8 @@ Remove-Item Env:SECURECHAT_TLS_CERT_FILE -ErrorAction SilentlyContinue
 Remove-Item Env:SECURECHAT_TLS_KEY_FILE -ErrorAction SilentlyContinue
 .\out\build\x64-release\server.exe 25566
 $env:SECURECHAT_LOCAL_TLS_CA="certs\local-root-ca.pem"
-.\out\build\x64-release\host.exe --server wss://127.0.0.1:25566 secure-room alice
-.\out\build\x64-release\client.exe wss://127.0.0.1:25566 secure-room bob
+.\out\build\x64-release\host.exe --server wss://127.0.0.1:25566 --room-dir logs\certs\<room-digest> alice
+.\out\build\x64-release\client.exe wss://127.0.0.1:25566 --room-dir logs\certs\<room-digest> bob
 ```
 
 Linux：
@@ -243,11 +273,11 @@ Linux：
 unset SECURECHAT_TLS_CERT_FILE SECURECHAT_TLS_KEY_FILE
 ./out/build/x64-linux-release/server 25566
 export SECURECHAT_LOCAL_TLS_CA=certs/local-root-ca.pem
-./out/build/x64-linux-release/host --server wss://127.0.0.1:25566 secure-room alice
-./out/build/x64-linux-release/client wss://127.0.0.1:25566 secure-room bob
+./out/build/x64-linux-release/host --server wss://127.0.0.1:25566 --room-dir logs/certs/<room-digest> alice
+./out/build/x64-linux-release/client wss://127.0.0.1:25566 --room-dir logs/certs/<room-digest> bob
 ```
 
-Host/Client 启动前需要配置成员 PKI 环境变量。WinUI 可以直接双击启动，并在设置面板中选择 trust store、成员证书链和成员私钥。
+使用 `--room-dir` 时，Host/Client 不需要额外配置成员 PKI 环境变量。
 
 ### 直接 WSS
 
@@ -264,8 +294,8 @@ export SECURECHAT_TLS_KEY_FILE=/path/to/privkey.pem
 Host/Client 连接：
 
 ```bash
-./out/build/x64-linux-release/host --server wss://chat.example.com:25566 secure-room alice
-./out/build/x64-linux-release/client wss://chat.example.com:25566 secure-room bob
+./out/build/x64-linux-release/host --server wss://chat.example.com:25566 --room-dir logs/certs/<room-digest> alice
+./out/build/x64-linux-release/client wss://chat.example.com:25566 --room-dir logs/certs/<room-digest> bob
 ```
 
 如果服务器证书由系统信任 CA 签发，Host/Client/WinUI 不需要额外配置服务器 CA。本地或局域网自签 CA 场景下，CLI 可通过 `SECURECHAT_LOCAL_TLS_CA` 指定 `certs/local-root-ca.pem`；WinUI 可在设置面板的 `Local Server TLS CA / 本地服务器 TLS 信任根` 中选择同一个文件。
@@ -334,12 +364,14 @@ sudo certbot certonly --nginx -d chat.example.com
 WinUI 面向日常使用场景。
 
 1. 打开 WinUI。
-2. 在设置面板选择 `Trust store`、`Identity certificate` 和 `Identity private key`。
-3. 在 Host 区域输入房间名、用户名和 Server URL，创建房间。
-4. 在 Join 区域输入房间名、用户名和 Server URL，加入房间。
-5. 发送栏留空 `To: member` 表示群发；填写成员名表示私发。
-6. 成员列表只显示成员名。点击成员卡片复制完整证书指纹，右键成员卡片切换附件自动预览允许状态。
-7. Host 点击 `Stop Session` 会关闭房间并让其他成员退出。
+2. 如果连接本地/局域网自动生成的 WSS 证书，在设置面板选择 `Local Server TLS CA / 本地服务器 TLS 信任根`。
+3. Host 区域输入 Room、Server URL 和 User，点击 `Start Hosting`。WinUI 会自动生成 `logs/certs/<room-digest>/entrance.scp` 和房间级 Host 证书材料。
+4. Join 区域输入同一个 Room、Server URL 和当前 User，点击 `Join Room` 后选择 Host 分发的 `entrance.scp` 文件。
+5. Client 正确解析 `entrance.scp` 后进入 pending 状态。此时发送框禁用，成员列表只显示自己的灰色卡片。
+6. Host 界面会显示该 pending 成员的灰色卡片。左键允许加入，右键拒绝加入并封禁该申请指纹。
+7. 审批通过后，Host 签发成员证书响应，Client 安装证书并参与 GKA。发送栏留空 `To: member` 表示群发；填写成员名表示私发。
+8. 成员列表只显示成员名。点击已加入成员卡片复制完整证书指纹，右键成员卡片切换附件自动预览允许状态。
+9. Host 点击 `Stop Session` 会关闭房间并让其他成员退出。
 
 成员名用于图形界面展示和私发目标匹配。协议内部仍有 member id，用于路由、身份绑定和排障。
 
@@ -352,11 +384,16 @@ Host 管理命令在 Host 输入框或 CLI 标准输入中发送：
 /unsilence <成员名或成员id>
 /evict <成员名或成员id>
 /ban <成员名或成员id>
+/approve <成员名或requestId>
+/reject <成员名或requestId> [原因]
+/close_room
 ```
 
 `silence` 是当前房间内的发送限制。目标成员仍在线并继续参与后续 GKA epoch。
 
 `evict` 和 `ban` 会驱逐目标成员，并把该成员已验证证书指纹加入当前房间内存封禁集。封禁不写入磁盘，房间结束后失效。
+
+`approve` 会把已验证的 pending join 提升为 active 成员。`reject` 会拒绝 pending 成员，拒绝响应带 Host 签名。`close_room` 显式关闭当前 room instance。
 
 私发命令：
 
@@ -377,9 +414,13 @@ Host 管理命令在 Host 输入框或 CLI 标准输入中发送：
 
 ## 房间生命周期
 
-当前房间不做持久化。Host 关闭 WinUI、结束 Host 进程、按 Ctrl+C 或点击 `Stop Session` 都会关闭房间。Server 会通知 Clients 离开该 room，但 Server 进程继续监听。
+当前已拆分 Host 断线和显式关闭。Host 关闭 WinUI、结束 Host 进程、按 Ctrl+C 或网络瞬断只表示 Host disconnected，Server 保留房间 open 状态和 pending join 队列，Client 只看到 Host 暂离状态。Host 使用 WinUI 的 `Stop Session`、CLI 的 `/stop_session` 或 `/close_room` 时才发送带 Host 签名的 `close_room`，Server 广播 `room_closed` 并关闭该 room instance。
 
-Client 主动离开、断线或被 Host 驱逐后，Host 会移除其 public key 并发起新的 GKA epoch。禁言不改变成员资格，因此不触发重密钥。
+Server 使用 SQLite 保存 room instance 的 open/closed 状态和 pending join 原始请求。Server 不保存聊天明文、附件明文、成员私钥、Root/Intermediate 私钥、群密钥或 entrance secret。
+
+Server 进程停止或重启只表示中继暂时不可用，不会把 open 房间标记为 closed。房间进入 closed 状态只能来自 Host 在线发送的签名 `close_room`。
+
+Client 关闭进程或网络断开只表示当前连接离线，不自动吊销成员资格，也不把成员证书指纹写入封禁集。已批准成员重新连接时会再次经过 Host 验证并进入新的 GKA epoch。Host 显式 `/evict` 或 `/ban` 才移除成员资格、封禁当前房间内证书指纹并触发后续 group key rotation。禁言不改变成员资格，因此不触发重密钥。
 
 ## 附件处理
 
@@ -419,10 +460,6 @@ WinUI 对附件预览采用当前房间内的本机 UI 策略。成员默认 All
 
 | 变量 | 作用 |
 | --- | --- |
-| `SECURECHAT_PKI_TRUST_STORE` | Host/Client 信任根证书文件 |
-| `SECURECHAT_IDENTITY_CERT_FILE` | Host/Client 成员证书链 |
-| `SECURECHAT_IDENTITY_KEY_FILE` | Host/Client 成员私钥 |
-| `SECURECHAT_IDENTITY_KEY_PASS` | 成员私钥密码 |
 | `SECURECHAT_TLS_CERT_FILE` | Server TLS 证书链；手动运行 Server 时可留空以生成本地证书 |
 | `SECURECHAT_TLS_KEY_FILE` | Server TLS 私钥；手动运行 Server 时可留空以生成本地私钥 |
 | `SECURECHAT_TLS_KEY_PASS` | Server TLS 私钥密码 |
@@ -430,7 +467,6 @@ WinUI 对附件预览采用当前房间内的本机 UI 策略。成员默认 All
 | `SECURECHAT_TLS_AUTO_DIR` | 手动运行 Server 时自动生成本地/局域网 TLS 材料的目录 |
 | `SECURECHAT_BIND_ADDRESS` | Server 监听地址 |
 | `SECURECHAT_PORT` | Server 默认端口 |
-| `SECURECHAT_ROOM_PASSWORD` | CLI Host/Client 的房间密码 |
 | `SECURECHAT_ATTACHMENT_MAX_BYTES` | 附件发送大小上限 |
 | `SECURECHAT_LOGS_MAX_BYTES` | 本地附件缓存上限 |
 | `SECURECHAT_SERVER_LOG_FILE` | Server 日志文件 |
@@ -458,7 +494,7 @@ taskkill /PID <pid> /F
 
 ### Client 一直等待 group key
 
-检查 Host 是否仍在房间内，Server 是否仍在转发 `group_key` envelope，以及 Host/Client 是否使用同一套成员 PKI 信任根。需要排障时可以临时启用日志：
+先检查 Client 是否仍处于 pending join。新成员需要 Host 执行 `/approve <成员名或requestId>` 后才会成为 active 成员并收到当前 group key。然后检查 Host 是否仍在房间内，Server 是否仍在转发 `group_key` envelope，以及 Host/Client 是否使用同一套房间级 PKI 信任根。需要排障时可以临时启用日志：
 
 ```bash
 export SECURECHAT_SERVER_LOG_FILE=server.log

@@ -5,7 +5,7 @@
 #include "attachment_transfer.hpp"
 #include "common.hpp"
 #include "events.hpp"
-#include "identity_pki.hpp"
+#include "pki_application.hpp"
 #include "secure_relay.hpp"
 #include "websocket_config.hpp"
 
@@ -28,12 +28,15 @@
 // 接收 Host 封装的房间群密钥，然后通过 SignalingServer 发送加密中继封装。
 class ClientSessionCore {
 public:
-    // 创建绑定到一个信令 URL 和房间身份的 Client 会话。
+    // 创建绑定到一个信令 URL、房间显示名和 opaque room instance token 的 Client 会话。
     ClientSessionCore(
         std::string url,
         std::string room,
         std::string username,
-        std::string password,
+        chat::pki_application::IdentityContext identity,
+        std::string roomToken,
+        std::string roomDir = {},
+        std::string keyPassword = {},
         rtc::WebSocket::Configuration wsConfig = {});
     ~ClientSessionCore();
 
@@ -86,7 +89,8 @@ private:
         const std::string& publicKey,
         const json& identity,
         const std::string& advertisedFingerprint,
-        const std::string& source);
+        const std::string& source,
+        bool allowSessionKeyRotation = false);
     // 发送本 Client 针对一个 GKA epoch 的签名随机 contribution。
     void sendGkaContribution(std::uint64_t epoch);
     // 验证已解密的 GKA 状态，并安装派生出的房间群密钥。
@@ -105,11 +109,11 @@ private:
 private:
     std::string mWsUrl;
     std::string mRoomId;
-    // 由 roomId + 房间密码派生的不透明路由 token。Server 把该 token 当作 roomId；
-    // 人类可读 room id 只留在本地 UI 和 PKI 语义中。
+    // Server 把该 token 当作 roomId；人类可读 room id 只留在本地 UI 和 PKI 语义中。
     std::string mRoomToken;
+    std::string mRoomDir;
+    std::string mKeyPassword;
     std::string mUsername;
-    std::string mPassword;
     std::string mClientId;
     std::mutex mMembersMutex;
     std::unordered_map<std::string, std::string> mMemberNamesById;
@@ -121,7 +125,7 @@ private:
     std::shared_ptr<rtc::WebSocket> mWs;
     rtc::WebSocket::Configuration mWsConfig;
     chat::secure_relay::MemberKeyPair mMemberKeys;
-    chat::identity_pki::IdentityContext mIdentity;
+    chat::pki_application::IdentityContext mIdentity;
     std::vector<unsigned char> mGroupKey;
     std::uint64_t mGroupKeyEpoch = 0;
     std::mutex mSignalingQueueMutex;

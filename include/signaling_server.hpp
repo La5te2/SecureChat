@@ -5,6 +5,7 @@
 #include "auth_service.hpp"
 #include "common.hpp"
 #include "room_registry.hpp"
+#include "server_room_store.hpp"
 
 #include <rtc/rtc.hpp>
 
@@ -43,6 +44,9 @@ private:
         // 当前设计会关闭房间并通知所有 Client。
         std::shared_ptr<rtc::WebSocket> host;
         std::unordered_map<std::string, std::shared_ptr<rtc::WebSocket>> clients;
+        // Host 离线期间收到的新成员申请。Server 只保存和转发原始 JSON，
+        // 不解释 CSR 或成员证书语义。
+        std::unordered_map<std::string, json> pendingJoins;
         // Host 请求的房间内发送限制。被禁言 Client 仍保持连接并可接收重密钥流量，
         // 但 Server 会拒绝它们发送中继消息。
         std::unordered_set<std::string> silencedClients;
@@ -62,6 +66,7 @@ private:
         std::string userId;
         std::string username;
         std::string publicKey;
+        std::string pendingRequestId;
         // 来自 join_room 的不透明 PKI identity 对象。Server 只保存它，
         // 以便其他 Client 独立验证广播中的成员 key。
         json identity;
@@ -85,6 +90,12 @@ private:
     void handleRejectClient(rtc::WebSocket* key, const json& data);
     // 允许 Host 为某个 Client 启用或禁用房间内发送限制。
     void handleClientSilence(rtc::WebSocket* key, const json& data, bool silenced);
+    // Host 显式批准一个 pending join 后，Server 才把申请者变成 active Client。
+    void handleApproveJoin(rtc::WebSocket* key, const json& data);
+    // Host 显式拒绝一个 pending join，并把签名拒绝原因转发给申请者。
+    void handleRejectPendingJoin(rtc::WebSocket* key, const json& data);
+    // 只有当前 Host 发送显式 close_room 时才销毁 room instance。
+    void handleCloseRoom(rtc::WebSocket* key, const json& data);
     // 向当前 Client 广播 Host 发起的 GKA epoch 请求。
     void relayGkaRequest(rtc::WebSocket* key, const json& data);
     // 向 Host 转发一个加密成员 contribution。
@@ -115,6 +126,8 @@ private:
     void sendToClient(rtc::WebSocket* key, const json& data);
     // 接收者快照离开 mutex 后使用的共享受保护发送工具。
     void safeSend(const std::shared_ptr<rtc::WebSocket>& ws, const json& data);
+    // Host 上线或重连后，把积压的 pending join 转交给 Host。
+    void flushPendingJoinsToHost(const std::string& roomId);
 
     std::unique_ptr<rtc::WebSocketServer> mServer;
     std::string mUrlScheme = "wss";
@@ -125,6 +138,7 @@ private:
     std::mutex mMutex;
     AuthService mAuth;
     RoomRegistry mRegistry;
+    ServerRoomStore mRoomStore;
     std::unordered_map<std::string, Room> mRooms;
     std::unordered_map<rtc::WebSocket*, ClientState> mClients;
 };

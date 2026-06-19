@@ -31,5 +31,6 @@
     <Content Include="..\..\out\build\x64-release\juice.dll" Link="juice.dll" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="..\..\out\build\x64-release\libcrypto-3-x64.dll" Link="libcrypto-3-x64.dll" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="..\..\out\build\x64-release\libssl-3-x64.dll" Link="libssl-3-x64.dll" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\..\out\build\x64-release\argon2.dll" Link="argon2.dll" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

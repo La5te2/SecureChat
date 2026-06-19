@@ -14,7 +14,7 @@ Client：加入 room，提交成员 public key，参与 GKA epoch；使用 group
 
 `Server` 的职责是公网可达、房间注册、成员状态维护，以及不透明加密中继转发。`Host` 和 `Client` 才是可见聊天成员。系统边界是：攻破或托管 `Server` 不应得到应用层文本、附件明文或 room group key。
 
-同一个 Server 实例可以承载多个不同 room token，但同一个 Server 实例内 token 不能重复；不同 Server 或不同端口上的房间名可以重复。一台主机可以开多个 Server，只要监听端口不同。Host/Client 本地保留真实 roomId，Server 注册和路由只看到由 roomId 和房间密码派生出的 opaque room token。
+同一个 Server 实例可以承载多个不同 room instance token，但同一个 Server 实例内 token 不能重复；不同 Server 或不同端口上的显示房间名可以重复。一台主机可以开多个 Server，只要监听端口不同。Host/Client 本地保留真实显示名称和房间级证书材料，Server 注册和路由只看到 opaque room instance token。
 
 ## 当前数据拓扑
 

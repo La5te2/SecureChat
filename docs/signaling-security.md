@@ -7,16 +7,18 @@
 信令通道是 Host/Client 和不可信 Server 之间的 WebSocket 连接。它承载：
 
 - 创建房间和加入房间请求；
-- opaque room token、username 和房间访问 token；
+- opaque room instance token、username 和房间访问状态；
 - 必填 PKI `identity` 对象；
 - 成员加入/离开状态；
 - Host 拒绝身份验证失败成员的 `reject_client`；
 - Host 发起的 `silence_client` / `unsilence_client` 当前房间禁言控制；
+- Host 显式关闭房间的 `close_room` 控制消息；
+- Server 发给成员的 `host_disconnected` 和 `room_closed` 状态；
 - Host 发起的 `gka_request`、Client 发给 Host 的 `gka_contribution` envelope；
 - Host 发给 Client 的 `group_key`/group-state envelope；
 - opaque `encrypted_relay` envelope。
 
-创建/加入房间和成员状态不是聊天消息，但仍然敏感。Host/Client 会先把 roomId 和房间密码派生为 opaque room token，Server 用该 token 注册和路由房间；加密中继 envelope 的连接 id、大小和时序仍可能暴露通信模式。`encrypted_relay` envelope 是应用层密文，Server 只负责转发。
+创建/加入房间和成员状态不是聊天消息，但仍然敏感。CLI 的 room-dir 路径和 WinUI 的自动 entrance 导入流程都会读取 opaque room instance token，Server 用该 token 注册和路由房间；加密中继 envelope 的连接 id、大小和时序仍可能暴露通信模式。`encrypted_relay` envelope 是应用层密文，Server 只负责转发。
 
 ## WSS 信令模式
 
@@ -37,7 +39,7 @@
 
 优点：
 
-- 房间密码跨网络传输时受到保护；
+- room instance token 和入房控制信令在网络传输中受到保护；
 - room token、username、成员状态和中继 metadata 不会被被动网络观察者直接读取；
 - 使用受信任证书和匹配域名时，客户端可以进行基于证书的服务器身份校验；
 - 对信令流量的主动篡改会被 TLS 检测到。
@@ -60,7 +62,7 @@ Nginx 可以监听公网入口，完成外部 TLS 和 WebSocket upgrade，再把
 
 ## 密码处理
 
-`start_server.sh` 不需要房间密码，默认把不可信 Server 作为 daemon 常驻。Host/Client CLI 默认使用隐藏输入读取房间密码。`SECURECHAT_ROOM_PASSWORD` 仍可用于非交互自动化，但交互运行时不建议长期保存在 shell 环境中。
+`start_server.sh` 不需要房间密码，默认把不可信 Server 作为 daemon 常驻。Host/Client CLI 使用 `--room-dir` 读取房间级 PKI 和 room instance token，不再从环境变量或 stdin 读取房间密码。
 
 GKA 由当前成员的签名随机贡献共同生成 room group key。Client 加入时提交临时 X25519 public key；Host 在成员变化时发起 GKA epoch；当前成员提交签名随机 contribution；Host 汇总贡献集合后通过 `group_key`/group-state envelope 分别封装给当前成员。Client 解封装 group state、验证贡献签名后本地导出 room group key。Server 负责转发这些 envelope，群密钥生成和密钥协商状态由 Host/Client 本地维护。Host 维护 GKA watchdog；如果某个 Client 在 10 秒内没有提交当前 epoch 的有效 contribution，Host 会驱逐该成员、封当前房间内的证书指纹，并用剩余成员重新发起 epoch。
 
@@ -79,11 +81,19 @@ Host 可以通过普通输入框发送以下本地管理命令：
 /unsilence <member>
 /evict <member>
 /ban <member>
+/approve <member-or-request-id>
+/reject <member-or-request-id> [reason]
+/stop_session
+/close_room
 ```
 
 `/silence` 和 `/unsilence` 会转换为 Host 到 Server 的 `silence_client` / `unsilence_client` 信令。Server 验证发送方确实是当前 room 的 Host 后，只在当前房间内记录目标 clientId 的发送限制。被禁言 Client 保持连接，可以继续参与后续 GKA epoch，但它发送 `encrypted_relay` 时 Server 返回 `member is silenced`，不会转发文本或附件。
 
 `/evict` 和 `/ban` 使用现有 `reject_client` 关闭目标 Client WebSocket。Host 同时把该成员已经通过 PKI 验证的证书 SHA-256 指纹记录到当前房间内存封禁集中。相同证书再次加入时，Host 会在验证 identity 后拒绝该成员，不记录 public key，也不允许其参与 GKA epoch。该封禁不写入磁盘，Host 进程或房间结束后失效。
+
+新成员发送 `join_room` 后先进入 `pending_join`。Server 只保存和转发该 opaque 请求，不给 pending 成员下发 group key。首次导入 `entrance.scp` 的 Client 会把 CSR bundle、设备声明和 join proof 放入 admission-encrypted payload；该 payload 使用 admission secret 经 HKDF-SHA256 派生 AES-256-GCM key 加密。Host 解密后验证 CSR、成员声明、room instance 绑定和 pending join proof，可以用 `/approve` 在线签发成员证书响应，并发送带 Host 签名的 `approve_join`；签发响应同样放入 admission-encrypted payload。验证失败或 Host 主动拒绝时使用 `/reject` 发送带签名的拒绝响应。Client 收到 `joined` 后会解密并安装签发响应，再验证 Host 的 approval 签名，验证通过才进入 active 成员状态。
+
+`/stop_session` 和 `/close_room` 会转换为 Host 到 Server 的 `close_room` 信令。该控制消息包含 Host 房间级证书签名，签名内容绑定 room instance token、动作类型、epoch 和 payload digest。Server 验证发送连接是当前 room 的 Host 后，广播 `room_closed` 并移除该房间；Client 本地验证 Host 签名后才接受房间关闭事件。Host 关闭 WinUI、Ctrl+C、进程退出或网络瞬断不会发送 `close_room`，Server 只广播 `host_disconnected` 并保留房间状态。Host 用同一 room token 重新连接时可以重新接管房间；Host 会从 `room_members` 重新验证已有 Client identity，再发起后续 GKA。
 
 ## 恶意 Server 行为边界
 
@@ -95,6 +105,6 @@ Server 可以断开连接、丢弃消息或伪造成员离线，这属于可用�
 - 私发中继消息的内层 `pairwise_private` 不从 room group key 派生，没有目标成员私钥的端点无法解密；
 - Host/Client 维护最近中继 nonce/tag cache，重复 envelope 会被丢弃；
 - Client 检查递增 `group_key.epoch`，拒绝旧 group state 回滚；
-- Client 只把入房失败和 `host disconnected` 等明确终止事件作为 shutdown；非终止类中继错误只提示，不主动离开房间；
-- Server 仍能对已知成员伪造断线通知或直接断开连接，这会导致 Host 移除该成员并轮换 group key；这是可用性攻击，不能由应用层密码学完全阻止。
+- Client 只把入房失败、`room_closed` 和 Host 拒绝等明确终止事件作为 shutdown；`host_disconnected` 只显示状态，不主动离开房间；
+- Server 仍能对已知成员伪造断线通知或直接断开连接，但 Host 只把它视为 connection disconnected，不自动吊销成员资格或封禁证书；这仍然是可用性攻击，不能由应用层密码学完全阻止。
 

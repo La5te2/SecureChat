@@ -3,10 +3,13 @@
 #include "client_session_core.hpp"
 
 #include "attachment_transfer.hpp"
+#include "cert_generation.hpp"
+#include "cert_utils.hpp"
 #include "secure_relay.hpp"
 
 #include <algorithm>
 #include <cctype>
+#include <fstream>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -42,6 +45,14 @@ std::string trimCopy(std::string value) {
     return value.substr(first, last - first + 1);
 }
 
+json readJsonFile(const std::string& path) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) throw std::runtime_error("failed to open file: " + path);
+    std::ostringstream buffer;
+    buffer << file.rdbuf();
+    return json::parse(buffer.str());
+}
+
 bool parseDirectPrefix(const std::string& line, std::string& target, std::string& body) {
     // 将 "/to alice hello" 拆成路由 token 和剩余命令正文。
     // 正文本身也可以是 "/image p.png" 这类附件命令。
@@ -65,6 +76,22 @@ void markPrivateTarget(Message& msg, const std::string& targetId, const std::str
     msg.payload["private"] = true;
     msg.payload["targetId"] = targetId;
     msg.payload["targetName"] = targetName.empty() ? targetId : targetName;
+}
+
+std::string pendingJoinDigest(
+    const std::string& requestId,
+    const std::string& username,
+    const std::string& publicKey) {
+    return chat::cert_utils::sha256Hex(
+        "approve_join\nrequestId=" + requestId +
+        "\nusername=" + username +
+        "\npublicKey=" + publicKey);
+}
+
+std::string pendingRejectDigest(const std::string& requestId, const std::string& reason) {
+    return chat::cert_utils::sha256Hex(
+        "reject_pending_join\nrequestId=" + requestId +
+        "\nreason=" + reason);
 }
 
 bool attachmentKindForMeta(const std::string& type, attachment::Kind& kind) {
@@ -102,30 +129,32 @@ std::string actorIdFromMessage(const Message& msg) {
 }
 }
 
-// 保存信令目标和 Client 凭据。
-// Client 输入会直接映射为普通 SecureChat 协议消息。
 ClientSessionCore::ClientSessionCore(
     std::string url,
     std::string room,
     std::string username,
-    std::string password,
+    chat::pki_application::IdentityContext identity,
+    std::string roomToken,
+    std::string roomDir,
+    std::string keyPassword,
     rtc::WebSocket::Configuration wsConfig)
     : mWsUrl(std::move(url)),
       mRoomId(std::move(room)),
       mUsername(std::move(username)),
-      mPassword(std::move(password)),
+      mRoomToken(std::move(roomToken)),
+      mRoomDir(std::move(roomDir)),
+      mKeyPassword(std::move(keyPassword)),
       mWsConfig(std::move(wsConfig)) {
     requireWssServerUrl(mWsUrl);
-    // Server 使用该不透明 token 注册和路由。
-    // 用户输入的 room id 保留在本地，并作为 PKI 签名绑定对象。
-    mRoomToken = chat::secure_relay::deriveRoomToken(mRoomId, mPassword);
+    // Server 使用该不透明 token 注册和路由；显示房间名只留在本地 PKI 语义中。
+    if (mRoomToken.empty()) throw std::runtime_error("room instance token is required");
     // X25519 密钥对按会话生成。公钥会在 join_room 中被签名；
     // 私钥留在本地，用于解封装 Host 分发的群密钥。
     mMemberKeys = chat::secure_relay::generateMemberKeyPair();
     chat::websocket_config::applyClientTlsFromEnvironment(mWsConfig);
     // Host/Client 启动必须具备 PKI 配置。
     // 环境变量缺失会在这里失败，且不会发送任何入房消息。
-    mIdentity = chat::identity_pki::loadFromEnvironment();
+    mIdentity = std::move(identity);
 }
 
 ClientSessionCore::~ClientSessionCore() {
@@ -154,17 +183,33 @@ void ClientSessionCore::start() {
             {"type", "join_room"},
             {"roomId", mRoomToken},
             {"username", mUsername},
-            {"password", mRoomToken},
             {"publicKey", mMemberKeys.publicKey}
         };
-        chatEmit(mCallbacks.onStatus, "PKI identity ready: " + mIdentity.fingerprint());
-        // 对 roomId、username 和临时 X25519 公钥签名，
-        // 使 Host 在给该 Client 发送房间群密钥前能检测替换攻击。
-        msg["identity"] = mIdentity.signJoinRoom(mRoomId, mUsername, mMemberKeys.publicKey);
+        if (mIdentity.enabled()) {
+            chatEmit(mCallbacks.onStatus, "PKI identity ready: " + mIdentity.fingerprint());
+            // 对 roomId、username 和临时 X25519 公钥签名，
+            // 使 Host 在给该 Client 发送房间群密钥前能检测替换攻击。
+            msg["identity"] = mIdentity.signJoinRoom(mRoomId, mUsername, mMemberKeys.publicKey);
+        }
+        else {
+            // 首次导入 entrance.scp 时还没有 Host 签发的成员证书。
+            // 这时用 CSR 私钥签名 pending join proof，再用 admission secret
+            // 加密 CSR/proof；Server 只能转发密文，看不到 CSR PEM 或设备声明。
+            const auto material = chat::certs::loadRoomRuntimeMaterial(mRoomDir, mUsername, false, false);
+            json admissionPlaintext = {
+                {"csrBundle", readJsonFile(material.memberCsrBundleFile)},
+                {"joinProof", chat::certs::makePendingJoinProof(
+                    mRoomDir,
+                    mUsername,
+                    mMemberKeys.publicKey,
+                    mKeyPassword)}
+            };
+            msg["admissionPayload"] = chat::certs::encryptAdmissionPayload(
+                mRoomDir,
+                "pending_join",
+                admissionPlaintext);
+        }
         mWs->send(msg.dump());
-        // 房间密码只保留到完成入房认证为止。
-        std::fill(mPassword.begin(), mPassword.end(), '\0');
-        mPassword.clear();
     });
 
     mWs->onMessage([this](rtc::message_variant data) {
@@ -178,7 +223,7 @@ void ClientSessionCore::start() {
             // 报告当前准入阶段，避免 WinUI 把所有静默关闭都误判为构建版本不匹配。
             const auto message = mJoinedRoom.load()
                 ? "Signaling connection ended unexpectedly; the Server or Host may have stopped, or the network closed the socket"
-                : "Signaling closed before room join completed; check Server URL, room/password, Host status, PKI files, and rebuild all components if one executable was updated";
+                : "Signaling closed before room join completed; check Server URL, room certificate directory, Host status, PKI files, and rebuild all components if one executable was updated";
             chatEmit(mCallbacks.onError, message);
         }
         requestShutdown("Signaling connection ended");
@@ -343,7 +388,8 @@ bool ClientSessionCore::rememberVerifiedMemberIdentity(
     const std::string& publicKey,
     const json& identity,
     const std::string& advertisedFingerprint,
-    const std::string& source) {
+    const std::string& source,
+    bool allowSessionKeyRotation) {
     // Server/Host 可以报告成员列表，但二者都不被视为密钥权威。
     // 成员证书签名必须绑定 roomId、displayName 和 X25519 公钥后，
     // 双方私发才能使用该成员信息。
@@ -356,14 +402,15 @@ bool ClientSessionCore::rememberVerifiedMemberIdentity(
 
         {
             std::lock_guard<std::mutex> lock(mMembersMutex);
-            const auto existingPublicKey = mMemberPublicKeysById.find(memberId);
-            if (existingPublicKey != mMemberPublicKeysById.end() && existingPublicKey->second != publicKey) {
-                throw std::runtime_error("member public key changed for existing id");
-            }
             const auto existingFingerprint = mMemberFingerprintsById.find(memberId);
             if (existingFingerprint != mMemberFingerprintsById.end() &&
                 existingFingerprint->second != verified.fingerprint) {
                 throw std::runtime_error("member fingerprint changed for existing id");
+            }
+            const auto existingPublicKey = mMemberPublicKeysById.find(memberId);
+            if (existingPublicKey != mMemberPublicKeysById.end() && existingPublicKey->second != publicKey &&
+                !allowSessionKeyRotation) {
+                throw std::runtime_error("member public key changed for existing id");
             }
             mMemberNamesById[memberId] = displayName.empty() ? memberId : displayName;
             mMemberPublicKeysById[memberId] = publicKey;
@@ -492,14 +539,18 @@ bool ClientSessionCore::installGroupState(const json& groupState, std::uint64_t 
             }
             {
                 std::lock_guard<std::mutex> lock(mMembersMutex);
-                const auto existingPublicKey = mMemberPublicKeysById.find(memberId);
-                if (existingPublicKey != mMemberPublicKeysById.end() && existingPublicKey->second != publicKey) {
-                    throw std::runtime_error("member public key changed inside GKA state");
-                }
                 const auto existingFingerprint = mMemberFingerprintsById.find(memberId);
                 if (existingFingerprint != mMemberFingerprintsById.end() &&
                     existingFingerprint->second != verified.fingerprint) {
                     throw std::runtime_error("member fingerprint changed inside GKA state");
+                }
+                const auto existingPublicKey = mMemberPublicKeysById.find(memberId);
+                const bool sameStableIdentity = existingFingerprint != mMemberFingerprintsById.end() &&
+                    existingFingerprint->second == verified.fingerprint;
+                const bool allowSessionKeyRotation = memberId == chat::protocol::HostActorId && sameStableIdentity;
+                if (existingPublicKey != mMemberPublicKeysById.end() && existingPublicKey->second != publicKey &&
+                    !allowSessionKeyRotation) {
+                    throw std::runtime_error("member public key changed inside GKA state");
                 }
                 mMemberNamesById[memberId] = username.empty() ? memberId : username;
                 mMemberPublicKeysById[memberId] = publicKey;
@@ -954,16 +1005,56 @@ void ClientSessionCore::handleSignalingMessage(const std::string& s) {
         if (type == "joined") {
             // Server 分配的 clientId 会成为后续私发中继和 group-key envelope 的路由 id。
             mClientId = j.value("clientId", "");
-            mJoinedRoom.store(true);
             // 后续签名 GKA contribution 使用 Server 接受的显示名。
             // Host 会用成员表验证该字段，本地副本保持同步可避免不必要的 GKA 拒绝。
             const auto acceptedUsername = j.value("username", mUsername);
             if (!acceptedUsername.empty()) {
                 mUsername = acceptedUsername;
             }
+            const auto acceptedPublicKey = j.value("publicKey", "");
+            if (acceptedPublicKey != mMemberKeys.publicKey) {
+                chatEmit(mCallbacks.onError, "Join response public key does not match this Client session");
+                requestShutdown("Host approval verification failed");
+                return;
+            }
             const auto hostPublicKey = j.value("hostPublicKey", "");
             const auto hostUsername = j.value("hostUsername", chat::protocol::HostActorId);
             const auto hostIdentity = j.find("hostIdentity");
+            const auto admissionSignResponse = j.find("admissionSignResponse");
+            if (!mIdentity.enabled()) {
+                if (admissionSignResponse == j.end() || !admissionSignResponse->is_object()) {
+                    chatEmit(mCallbacks.onError, "Join approval is missing signed member certificate response");
+                    requestShutdown("Member certificate signing response missing");
+                    return;
+                }
+                try {
+                    const auto responsePlaintext = chat::certs::decryptAdmissionPayload(
+                        mRoomDir,
+                        "sign_response",
+                        *admissionSignResponse);
+                    const auto signResponse = responsePlaintext.find("signResponse");
+                    if (signResponse == responsePlaintext.end() || !signResponse->is_object()) {
+                        throw std::runtime_error("admission sign response is missing signResponse");
+                    }
+                    const auto installed = chat::certs::installRoomMemberCertificateJson(
+                        mRoomDir,
+                        *signResponse,
+                        mUsername);
+                    const auto material = chat::certs::loadRoomRuntimeMaterial(mRoomDir, mUsername, false, true);
+                    mIdentity = chat::pki_application::loadFromFiles(
+                        material.trustStoreFile,
+                        material.identityCertFile,
+                        material.identityKeyFile,
+                        mKeyPassword);
+                    chatEmit(mCallbacks.onStatus, "PKI identity ready: " + mIdentity.fingerprint());
+                    chatEmit(mCallbacks.onStatus, "Room member certificate installed: " + installed.memberFingerprint);
+                }
+                catch (const std::exception& e) {
+                    chatEmit(mCallbacks.onError, std::string("Member certificate install failed: ") + e.what());
+                    requestShutdown("Member certificate install failed");
+                    return;
+                }
+            }
             if (hostPublicKey.empty() || hostIdentity == j.end() || !hostIdentity->is_object()) {
                 // Client 只有认证 Host 签名的 identity/publicKey 绑定后才能参与 GKA。
                 // 此处字段缺失通常表示仍在运行旧 Server 构建。
@@ -988,11 +1079,48 @@ void ClientSessionCore::handleSignalingMessage(const std::string& s) {
                 requestShutdown("Host identity verification failed");
                 return;
             }
+            const auto approvalRequestId = j.value("approvalRequestId", "");
+            const auto approvalDigest = j.value("approvalPayloadDigest", "");
+            const auto approvalEpoch = j.value("approvalEpoch", 0ULL);
+            const auto approvalControl = j.find("approvalControl");
+            if (approvalRequestId.empty() || approvalDigest.empty() ||
+                approvalControl == j.end() || !approvalControl->is_object() ||
+                approvalDigest != pendingJoinDigest(approvalRequestId, mUsername, mMemberKeys.publicKey)) {
+                chatEmit(mCallbacks.onError, "Join response is missing a valid Host approval signature");
+                requestShutdown("Host approval verification failed");
+                return;
+            }
+            try {
+                const auto approvalSigner = mIdentity.verifyRoomControl(
+                    mRoomId,
+                    mRoomToken,
+                    "approve_join",
+                    approvalEpoch,
+                    approvalDigest,
+                    *approvalControl);
+                std::lock_guard<std::mutex> lock(mMembersMutex);
+                const auto hostFp = mMemberFingerprintsById.find(chat::protocol::HostActorId);
+                if (hostFp != mMemberFingerprintsById.end() && hostFp->second != approvalSigner.fingerprint) {
+                    throw std::runtime_error("approval signer is not the verified Host");
+                }
+            }
+            catch (const std::exception& e) {
+                chatEmit(mCallbacks.onError, std::string("Host approval rejected: ") + e.what());
+                requestShutdown("Host approval verification failed");
+                return;
+            }
+            mJoinedRoom.store(true);
             chatEmit(mCallbacks.onLog, "own_actor_id " + mClientId);
             chatEmit(
                 mCallbacks.onStatus,
                 "Joined room " + mRoomId + " as " + mUsername + " (" + mClientId + ")");
             chatEmit(mCallbacks.onStatus, "Waiting for room group key");
+        }
+        else if (type == "join_pending") {
+            const auto requestId = j.value("requestId", "");
+            chatEmit(
+                mCallbacks.onStatus,
+                "Join request is waiting for Host approval: " + requestId.substr(0, 12));
         }
         else if (type == "room_members") {
             // 保存最新成员 name/id 映射，用于解析 To: name 输入。
@@ -1048,17 +1176,41 @@ void ClientSessionCore::handleSignalingMessage(const std::string& s) {
                     // 使新加入 Client 能在 Host 侧 contribution 截止前响应 gka_request。
                     continue;
                 }
-                {
-                    std::lock_guard<std::mutex> lock(mMembersMutex);
-                    if (mMemberPublicKeysById.find(id) != mMemberPublicKeysById.end()) {
-                        continue;
-                    }
-                }
                 const auto username = member.value("username", id);
                 const auto publicKey = member.value("publicKey", "");
                 const auto identity = member.find("identity");
                 if (identity != member.end() && identity->is_object()) {
-                    rememberVerifiedMemberIdentity(id, username, publicKey, *identity, "", "room_members");
+                    try {
+                        // Host 重连时 Server 会重新广播 Host identity。
+                        // Client 必须重新验证它，而不是相信“同一个 room token”
+                        // 就仍然是同一个 Host。
+                        const auto verified = mIdentity.verifyJoinRoom(mRoomId, username, publicKey, *identity);
+                        {
+                            std::lock_guard<std::mutex> lock(mMembersMutex);
+                            const auto oldFp = mMemberFingerprintsById.find(id);
+                            if (oldFp != mMemberFingerprintsById.end() && oldFp->second != verified.fingerprint) {
+                                chatEmit(mCallbacks.onError, "Rejected changed Host identity in room member list");
+                                requestShutdown("Host identity changed");
+                                return;
+                            }
+                        }
+                        // Host 重连会生成新的 X25519 session public key。
+                        // 只要新公钥由同一 Host 证书签名绑定，且证书 fingerprint 未变，
+                        // 就更新 session key；这不是 Host 身份被替换。
+                        rememberVerifiedMemberIdentity(
+                            id,
+                            username,
+                            publicKey,
+                            *identity,
+                            verified.fingerprint,
+                            "room_members",
+                            true);
+                    }
+                    catch (const std::exception& e) {
+                        chatEmit(mCallbacks.onError, std::string("Rejected Host identity in room member list: ") + e.what());
+                        requestShutdown("Host identity verification failed");
+                        return;
+                    }
                 }
             }
             if (first) {
@@ -1078,6 +1230,14 @@ void ClientSessionCore::handleSignalingMessage(const std::string& s) {
                 const auto host = mMemberNamesById.find(chat::protocol::HostActorId);
                 if (host != mMemberNamesById.end() && !host->second.empty()) {
                     hostName = host->second;
+                }
+                const auto knownHostFingerprint = mMemberFingerprintsById.find(chat::protocol::HostActorId);
+                if (knownHostFingerprint != mMemberFingerprintsById.end() &&
+                    !knownHostFingerprint->second.empty() &&
+                    knownHostFingerprint->second != verified.fingerprint) {
+                    chatEmit(mCallbacks.onError, "Rejected group key from changed Host identity");
+                    requestShutdown("Host identity changed");
+                    return;
                 }
                 // group_key 上的 Host 签名会在 member_identity 广播到达前认证 Host 身份。
                 // 立即保存指纹，使来自 Host 的 pairwise 私发消息可以被打开。
@@ -1152,19 +1312,82 @@ void ClientSessionCore::handleSignalingMessage(const std::string& s) {
             // Host 仍是请求状态变化的权威。
             chatEmit(mCallbacks.onStatus, j.value("message", "moderation state changed"));
         }
+        else if (type == "host_disconnected") {
+            // 阶段 15：Host 暂离不再等价于房间关闭。
+            // Client 保留当前连接和当前 epoch，等待 Host 重新接管后轮换密钥。
+            chatEmit(mCallbacks.onStatus, "Host disconnected");
+        }
+        else if (type == "join_rejected") {
+            const auto requestId = j.value("requestId", "");
+            const auto reason = j.value("reason", "join request rejected by host");
+            const auto epoch = j.value("epoch", 0ULL);
+            const auto payloadDigest = j.value("payloadDigest", "");
+            const auto control = j.find("control");
+            if (requestId.empty() || payloadDigest != pendingRejectDigest(requestId, reason) ||
+                control == j.end() || !control->is_object()) {
+                chatEmit(mCallbacks.onError, "Rejected malformed join rejection");
+                return;
+            }
+            try {
+                mIdentity.verifyRoomControl(
+                    mRoomId,
+                    mRoomToken,
+                    "reject_pending_join",
+                    epoch,
+                    payloadDigest,
+                    *control);
+            }
+            catch (const std::exception& e) {
+                chatEmit(mCallbacks.onError, std::string("Rejected unsigned join rejection: ") + e.what());
+                return;
+            }
+            mSawErrorFrame.store(true);
+            chatEmit(mCallbacks.onError, "Host rejected join request: " + reason);
+            requestShutdown("Host rejected join request");
+        }
+        else if (type == "room_closed") {
+            const auto reason = j.value("reason", "room closed");
+            const auto epoch = j.value("epoch", 0ULL);
+            const auto payloadDigest = j.value("payloadDigest", "");
+            const auto control = j.find("control");
+            if (control == j.end() || !control->is_object() ||
+                payloadDigest != chat::cert_utils::sha256Hex(reason)) {
+                chatEmit(mCallbacks.onError, "Rejected unsigned or malformed room close event");
+                return;
+            }
+            try {
+                const auto verified = mIdentity.verifyRoomControl(
+                    mRoomId,
+                    mRoomToken,
+                    "close_room",
+                    epoch,
+                    payloadDigest,
+                    *control);
+                std::lock_guard<std::mutex> lock(mMembersMutex);
+                const auto hostFp = mMemberFingerprintsById.find(chat::protocol::HostActorId);
+                if (hostFp != mMemberFingerprintsById.end() && hostFp->second != verified.fingerprint) {
+                    throw std::runtime_error("room close signer is not the verified Host");
+                }
+            }
+            catch (const std::exception& e) {
+                chatEmit(mCallbacks.onError, std::string("Rejected room close event: ") + e.what());
+                return;
+            }
+            mSawErrorFrame.store(true);
+            requestShutdown("Room is no longer available: " + reason);
+        }
         else if (type == "error") {
             mSawErrorFrame.store(true);
             const std::string message = j.value("message", "unknown");
             if (message == "host disconnected") {
-                requestShutdown("Session stopped");
+                chatEmit(mCallbacks.onStatus, "Host disconnected");
             }
             else if (message == "invalid username or password" ||
-                     message == "invalid room password" ||
                      message == "invalid room or username" ||
                      message == "room is full" ||
+                     message == "room closed" ||
                      message == "room not found" ||
-                     message == "missing roomId" ||
-                     message == "missing room password") {
+                     message == "missing roomId") {
                 chatEmit(mCallbacks.onError, "Signaling server error: " + message);
                 requestShutdown(message);
             }

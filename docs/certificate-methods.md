@@ -123,253 +123,97 @@ unset SECURECHAT_TLS_CERT_FILE SECURECHAT_TLS_KEY_FILE
 
 自动生成证书只覆盖本机名、`localhost`、回环地址和探测到的本机网卡 IP。它不生成公网域名证书；公网域名证书应使用 Certbot 等外部工具获取。
 
-## 成员 PKI 启用方式
+## 房间级 entrance.scp 工具
 
-Host 和 Client 必须配置成员 PKI，否则启动失败：
+房间级 PKI 工具链由 `cert.exe` 提供。它负责创建、检查、导入 `entrance.scp`，生成成员 CSR，并由 Host 的房间级 Intermediate CA 签发成员证书。该工具不会启动聊天会话，也不会把 Root/Intermediate 私钥、成员私钥或 entrance secret 上传给 Server。
 
-```bash
-export SECURECHAT_PKI_TRUST_STORE=certs/pki/root-ca.pem
-export SECURECHAT_IDENTITY_CERT_FILE=certs/pki/member-chain.pem
-export SECURECHAT_IDENTITY_KEY_FILE=certs/pki/member-key.pem
-```
-
-成员私钥加密时再配置：
-
-```bash
-export SECURECHAT_IDENTITY_KEY_PASS='key-password'
-```
-
-每个成员使用自己的成员证书链和私钥，所有成员共享同一个受信任 CA bundle。成员证书的 Key Usage 如果存在，必须允许 `digitalSignature`。当前实现支持 OpenSSL 可验证的 PEM 证书链，以及 Ed25519、ECDSA P-256、RSA/RSA-PSS 等 OpenSSL 支持的签名密钥。
-
-成员私钥始终留在成员本地。WinUI 设置面板保存的是私钥文件路径，程序在本机读取该路径完成签名；私钥内容不会上传给 Server。
-
-## Windows 生成成员 PKI 示例
-
-在项目根目录打开 PowerShell：
+创建房间准入容器：
 
 ```powershell
-New-Item -ItemType Directory -Force certs\pki
-Set-Location certs\pki
+.\out\build\x64-release\cert.exe create-entrance `
+  --room my-room `
+  --phrase "long random room phrase" `
+  --host alice `
+  --out logs\certs
 ```
 
-生成 Root CA：
+该命令会在 `logs/certs/<hash(roomInstanceToken)>/` 下生成：
+
+```text
+entrance.scp
+root-ca.pem
+root-ca-key.pem
+intermediate-ca.pem
+intermediate-ca-key.pem
+host-key.pem
+host-cert.pem
+host-chain.pem
+room-descriptor.json
+```
+
+`entrance.scp` 是 AES-256-GCM 加密的 JSON 容器，解锁密钥由 Argon2id 从房间短语和容器 salt 派生。外层只包含 magic、version、KDF 参数、salt、nonce、ciphertext 和 tag；Root/Intermediate 公钥证书、准入 secret 和 room instance 信息只在解密后的 payload 中。
+
+房间级证书仍是标准 OpenSSL/X.509 证书。证书文本中包含版本号、序列号、签发者、使用者、有效期、公钥、Key Usage、Extended Key Usage、Subject Key Identifier、Authority Key Identifier 和签名算法等标准字段。SecureChat 额外把房间绑定信息写入证书本体：`O=SecureChat`，`serialNumber=<roomInstanceTokenDigest>`，`OU=Role:<role>`，`OU=Device:<deviceName>`，并在 Netscape Comment 扩展中写入完整 `roomInstanceTokenDigest`、`roomInstanceId` 和角色。当前采用的成员个人信息是用户在界面或 CLI 中填写的 `username`，以及程序读取到的本机设备名 `deviceName`；系统不会写入真实姓名、身份证明、操作系统登录密码、IP 地址或生物身份信息。
+
+Host 创建房间时先生成 Root、Intermediate 和 Host 的密钥对，再用 canonical room name、`roomInstanceId`、准入 secret、Root 公钥指纹、Intermediate 公钥指纹和 Host 公钥指纹派生 `roomInstanceToken`。随后生成 Root/Intermediate/Host 证书，并把 `roomInstanceTokenDigest` 写入证书 subject 和扩展。这样可以避免“token 依赖证书指纹，证书内容又依赖 token”的循环引用。
+
+成员私钥支持口令保护。`--key-pass` 为空时写出普通 PEM 私钥；`--key-pass` 非空时写出 `BEGIN ENCRYPTED PRIVATE KEY`，使用 AES-256-CBC 加密 PEM 私钥。私钥口令只在本机用于打开该成员的房间级私钥，不写入 `entrance.scp`，也不会发送给 Server、Host 或其他成员。
+
+`entrance.scp` 内的 admission secret 还用于派生准入信令加密 key。派生方式为 HKDF-SHA256，salt 绑定 `roomInstanceTokenDigest`，info 绑定用途，例如 `pending_join` 或 `sign_response`；加密算法为 AES-256-GCM。首次入房时，Client 把 CSR bundle、设备声明和 pending join proof 放入 admission-encrypted payload；Host approve 时把成员证书签发响应放入 admission-encrypted payload。Server 只看到 envelope 的版本、用途、nonce、ciphertext、tag 和长度，看不到 CSR PEM、设备声明、CSR hash、成员证书 PEM 或签发响应内容。
+
+检查 entrance：
 
 ```powershell
-openssl genpkey -algorithm ED25519 -out root-ca-key.pem
-
-openssl req -x509 -new -key root-ca-key.pem `
-  -out root-ca.pem `
-  -days 3650 `
-  -subj "/CN=SecureChat Example Root CA" `
-  -addext "basicConstraints=critical,CA:TRUE,pathlen:1" `
-  -addext "keyUsage=critical,keyCertSign,cRLSign" `
-  -addext "subjectKeyIdentifier=hash"
+.\out\build\x64-release\cert.exe inspect-entrance `
+  --entrance logs\certs\<room-digest>\entrance.scp `
+  --phrase "long random room phrase"
 ```
 
-生成 Intermediate CA，并由 Root CA 签发：
+Client 导入 entrance 并在本机生成成员私钥和 CSR：
 
 ```powershell
-openssl genpkey -algorithm ED25519 -out intermediate-ca-key.pem
-
-openssl req -new -key intermediate-ca-key.pem `
-  -out intermediate-ca.csr `
-  -subj "/CN=SecureChat Example Intermediate CA"
-
-@"
-basicConstraints=critical,CA:TRUE,pathlen:0
-keyUsage=critical,keyCertSign,cRLSign
-subjectKeyIdentifier=hash
-authorityKeyIdentifier=keyid,issuer
-"@ | Set-Content -Encoding ascii intermediate-ca.ext
-
-openssl x509 -req -in intermediate-ca.csr `
-  -CA root-ca.pem -CAkey root-ca-key.pem -CAcreateserial `
-  -out intermediate-ca.pem `
-  -days 1825 `
-  -extfile intermediate-ca.ext
+.\out\build\x64-release\cert.exe import-entrance `
+  --entrance logs\certs\<room-digest>\entrance.scp `
+  --phrase "long random room phrase" `
+  --user bob `
+  --out logs\certs
 ```
 
-准备成员证书扩展：
+Host 手工签发 Client CSR。这个命令主要用于开发调试和离线检查，不推荐普通用户手动执行。正常联机场景中，Client 从 `entrance.scp` 导入 room instance token、Root/Intermediate 公钥证书和 signed room descriptor 后，本机生成成员私钥、CSR、设备/身份声明和 pending join proof；联机申请和签发响应通过 admission-encrypted payload 传输；Host 在 `/approve` 或 WinUI 左键审批时自动解密、读取 room instance 绑定信息、校验 CSR 和声明，然后签发成员证书响应。
 
 ```powershell
-@"
-basicConstraints=critical,CA:FALSE
-keyUsage=critical,digitalSignature
-subjectKeyIdentifier=hash
-authorityKeyIdentifier=keyid,issuer
-"@ | Set-Content -Encoding ascii member.ext
+.\out\build\x64-release\cert.exe sign-csr `
+  --room-dir logs\certs\<room-digest> `
+  --csr logs\certs\<room-digest>\bob.csr `
+  --user bob
 ```
 
-生成 Alice 成员证书链：
+Client 安装 Host 返回的签发响应：
 
 ```powershell
-openssl genpkey -algorithm ED25519 -out alice-key.pem
-
-openssl req -new -key alice-key.pem `
-  -out alice.csr `
-  -subj "/CN=alice"
-
-openssl x509 -req -in alice.csr `
-  -CA intermediate-ca.pem -CAkey intermediate-ca-key.pem -CAcreateserial `
-  -out alice-cert.pem `
-  -days 365 `
-  -extfile member.ext
-
-Get-Content .\alice-cert.pem, .\intermediate-ca.pem |
-  Set-Content -Encoding ascii .\alice-chain.pem
+.\out\build\x64-release\cert.exe install-sign-response `
+  --room-dir logs\certs\<room-digest> `
+  --response logs\certs\<room-digest>\bob-sign-response.json `
+  --user bob
 ```
 
-生成 Bob 成员证书链：
+查看某个房间目录可用于运行会话的材料：
 
 ```powershell
-openssl genpkey -algorithm ED25519 -out bob-key.pem
-
-openssl req -new -key bob-key.pem `
-  -out bob.csr `
-  -subj "/CN=bob"
-
-openssl x509 -req -in bob.csr `
-  -CA intermediate-ca.pem -CAkey intermediate-ca-key.pem -CAcreateserial `
-  -out bob-cert.pem `
-  -days 365 `
-  -extfile member.ext
-
-Get-Content .\bob-cert.pem, .\intermediate-ca.pem |
-  Set-Content -Encoding ascii .\bob-chain.pem
+.\out\build\x64-release\cert.exe room-runtime `
+  --room-dir logs\certs\<room-digest> `
+  --user bob `
+  --role client
 ```
 
-回到项目根目录：
+Host/Client CLI 已支持 `--room-dir` 直接加载房间级 PKI 和 room instance token：
 
 ```powershell
-Set-Location ..\..
+.\out\build\x64-release\host.exe --server wss://server.example:25566 --room-dir logs\certs\<room-digest> alice
+.\out\build\x64-release\client.exe wss://server.example:25566 --room-dir logs\certs\<room-digest> bob
 ```
 
-Windows CLI 使用 Alice 证书：
-
-```powershell
-$env:SECURECHAT_PKI_TRUST_STORE="certs\pki\root-ca.pem"
-$env:SECURECHAT_IDENTITY_CERT_FILE="certs\pki\alice-chain.pem"
-$env:SECURECHAT_IDENTITY_KEY_FILE="certs\pki\alice-key.pem"
-```
-
-Bob 把 `alice-chain.pem` 和 `alice-key.pem` 换成 `bob-chain.pem` 和 `bob-key.pem`。WinUI 中选择同样的文件路径。
-
-## Linux 生成成员 PKI 示例
-
-在项目根目录执行：
-
-```bash
-mkdir -p certs/pki
-```
-
-生成 Root CA：
-
-```bash
-openssl genpkey -algorithm ED25519 -out certs/pki/root-ca-key.pem
-
-openssl req -x509 -new -key certs/pki/root-ca-key.pem \
-  -out certs/pki/root-ca.pem \
-  -days 3650 \
-  -subj "/CN=SecureChat Example Root CA" \
-  -addext "basicConstraints=critical,CA:TRUE,pathlen:1" \
-  -addext "keyUsage=critical,keyCertSign,cRLSign" \
-  -addext "subjectKeyIdentifier=hash"
-```
-
-生成 Intermediate CA：
-
-```bash
-openssl genpkey -algorithm ED25519 -out certs/pki/intermediate-ca-key.pem
-
-openssl req -new -key certs/pki/intermediate-ca-key.pem \
-  -out certs/pki/intermediate-ca.csr \
-  -subj "/CN=SecureChat Example Intermediate CA"
-
-cat > certs/pki/intermediate-ca.ext <<'EOF'
-basicConstraints=critical,CA:TRUE,pathlen:0
-keyUsage=critical,keyCertSign,cRLSign
-subjectKeyIdentifier=hash
-authorityKeyIdentifier=keyid,issuer
-EOF
-
-openssl x509 -req \
-  -in certs/pki/intermediate-ca.csr \
-  -CA certs/pki/root-ca.pem \
-  -CAkey certs/pki/root-ca-key.pem \
-  -CAcreateserial \
-  -out certs/pki/intermediate-ca.pem \
-  -days 1825 \
-  -extfile certs/pki/intermediate-ca.ext
-```
-
-准备成员证书扩展：
-
-```bash
-cat > certs/pki/member.ext <<'EOF'
-basicConstraints=critical,CA:FALSE
-keyUsage=critical,digitalSignature
-subjectKeyIdentifier=hash
-authorityKeyIdentifier=keyid,issuer
-EOF
-```
-
-生成 Alice 成员证书链：
-
-```bash
-openssl genpkey -algorithm ED25519 -out certs/pki/alice-key.pem
-
-openssl req -new -key certs/pki/alice-key.pem \
-  -out certs/pki/alice.csr \
-  -subj "/CN=alice"
-
-openssl x509 -req \
-  -in certs/pki/alice.csr \
-  -CA certs/pki/intermediate-ca.pem \
-  -CAkey certs/pki/intermediate-ca-key.pem \
-  -CAcreateserial \
-  -out certs/pki/alice-cert.pem \
-  -days 365 \
-  -extfile certs/pki/member.ext
-
-cat certs/pki/alice-cert.pem certs/pki/intermediate-ca.pem > certs/pki/alice-chain.pem
-```
-
-生成 Bob 成员证书链：
-
-```bash
-openssl genpkey -algorithm ED25519 -out certs/pki/bob-key.pem
-
-openssl req -new -key certs/pki/bob-key.pem \
-  -out certs/pki/bob.csr \
-  -subj "/CN=bob"
-
-openssl x509 -req \
-  -in certs/pki/bob.csr \
-  -CA certs/pki/intermediate-ca.pem \
-  -CAkey certs/pki/intermediate-ca-key.pem \
-  -CAcreateserial \
-  -out certs/pki/bob-cert.pem \
-  -days 365 \
-  -extfile certs/pki/member.ext
-
-cat certs/pki/bob-cert.pem certs/pki/intermediate-ca.pem > certs/pki/bob-chain.pem
-```
-
-Linux CLI 使用 Alice 证书：
-
-```bash
-export SECURECHAT_PKI_TRUST_STORE=certs/pki/root-ca.pem
-export SECURECHAT_IDENTITY_CERT_FILE=certs/pki/alice-chain.pem
-export SECURECHAT_IDENTITY_KEY_FILE=certs/pki/alice-key.pem
-```
-
-Bob 把 `alice-chain.pem` 和 `alice-key.pem` 换成 `bob-chain.pem` 和 `bob-key.pem`。
-
-查看成员证书 SHA-256 指纹：
-
-```bash
-openssl x509 -in certs/pki/alice-cert.pem -noout -fingerprint -sha256
-```
+WinUI 不显示 `room-dir` 路径。Host 面板只需要 Room、Server URL 和 User，点击启动房间后会自动生成 `logs/certs/<room-digest>/entrance.scp` 和 Host 房间级证书材料。Join 面板只需要 Room、Server URL 和 User，点击加入房间后选择 Host 分发的 `entrance.scp`，WinUI 会自动导入并生成本机成员私钥和 CSR。Client 会先进入 pending 状态，Host 左键 pending 成员卡片允许加入，右键拒绝并封禁该申请指纹。审批通过时，Host 签发成员证书响应，Client 安装后再参与 GKA。
 
 ## 成员 PKI 在协议中的作用
 

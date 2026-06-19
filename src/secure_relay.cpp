@@ -5,7 +5,6 @@
 #include <openssl/evp.h>
 #include <openssl/kdf.h>
 #include <openssl/rand.h>
-#include <openssl/sha.h>
 
 #include <algorithm>
 #include <array>
@@ -323,18 +322,6 @@ bool hasUsableGroupKey(const std::vector<unsigned char>& key) {
 std::string generateGroupContribution() {
     const auto contribution = randomBytes(GroupKeyBytes);
     return base64Encode(contribution.data(), contribution.size());
-}
-
-std::string deriveRoomToken(const std::string& roomId, const std::string& roomPassword) {
-    // Server 只需要稳定的房间路由 token。
-    // 对 room id 和房间密码做哈希后，人类可读房间名不会进入 Server 日志/状态。
-    const std::string input = "securechat-room-token-v1|" + roomId + "|" + roomPassword;
-    unsigned char digest[SHA256_DIGEST_LENGTH] = {};
-    SHA256(
-        reinterpret_cast<const unsigned char*>(input.data()),
-        input.size(),
-        digest);
-    return base64Encode(digest, sizeof(digest));
 }
 
 std::vector<unsigned char> deriveGroupKeyFromContributions(

@@ -22,12 +22,14 @@
 namespace {
 constexpr std::size_t maxSignalingClients = 32;
 constexpr std::size_t maxRoomClients = 16;
+constexpr std::size_t maxPendingJoinsPerRoom = 32;
 constexpr std::size_t maxBadMessagesPerClient = 4;
 constexpr std::size_t maxPasswordBytes = 256;
 constexpr std::size_t maxRelayFieldBytes = 512 * 1024;
 constexpr std::size_t maxPublicKeyBytes = 128;
 constexpr std::size_t maxIdentityCertChainBytes = 128 * 1024;
 constexpr std::size_t maxIdentitySignatureBytes = 4096;
+constexpr std::size_t maxCertPayloadBytes = 128 * 1024;
 constexpr auto maintenanceInterval = std::chrono::seconds(15);
 constexpr auto healthLogInterval = std::chrono::minutes(1);
 // 关闭前给终止性 error 帧留出足够时间离开 WebSocket。
@@ -148,28 +150,60 @@ void identityField(const json& data, bool required) {
     stringField(identity, "signature", maxIdentitySignatureBytes, true);
 }
 
+void controlField(const json& data, bool required) {
+    auto it = data.find("control");
+    if (it == data.end()) {
+        if (required) throw std::runtime_error("missing control");
+        return;
+    }
+    if (!it->is_object()) throw std::runtime_error("control must be an object");
+    const auto& control = *it;
+    if (!hasOnlyFields(control, {"version", "certChainPem", "nonce", "signatureAlg", "signature"})) {
+        throw std::runtime_error("control has unknown field");
+    }
+    if (!control.contains("version") || !control["version"].is_number_integer()) {
+        throw std::runtime_error("control version must be an integer");
+    }
+    stringField(control, "certChainPem", maxIdentityCertChainBytes, true);
+    stringField(control, "nonce", 64, true);
+    stringField(control, "signatureAlg", 32, true);
+    stringField(control, "signature", maxIdentitySignatureBytes, true);
+}
+
+void boundedObjectField(const json& data, const std::string& name, std::size_t maxBytes, bool required) {
+    auto it = data.find(name);
+    if (it == data.end()) {
+        if (required) throw std::runtime_error("missing " + name);
+        return;
+    }
+    if (!it->is_object()) throw std::runtime_error(name + " must be an object");
+    if (it->dump().size() > maxBytes) throw std::runtime_error(name + " is too large");
+}
+
 void requireFieldsForType(const json& data, const std::string& type) {
     // 信令属于公开网络输入。按类型保持 schema，
     // 避免未知字段变成意外协议扩展或伪造通道。
     if (type == "create_room") {
-        if (!hasOnlyFields(data, {"type", "roomId", "username", "password", "publicKey", "identity"})) {
+        if (!hasOnlyFields(data, {"type", "roomId", "username", "publicKey", "identity"})) {
             throw std::runtime_error("create_room has unknown field");
         }
         stringField(data, "roomId", 64, true);
         stringField(data, "username", 64, true);
-        stringField(data, "password", maxPasswordBytes, true);
         stringField(data, "publicKey", maxPublicKeyBytes, true);
         identityField(data, true);
     }
     else if (type == "join_room") {
-        if (!hasOnlyFields(data, {"type", "roomId", "username", "password", "publicKey", "identity"})) {
+        if (!hasOnlyFields(data, {"type", "roomId", "username", "publicKey", "identity", "admissionPayload"})) {
             throw std::runtime_error("join_room has unknown field");
         }
         stringField(data, "roomId", 64, true);
         stringField(data, "username", 64, true);
-        stringField(data, "password", maxPasswordBytes, true);
         stringField(data, "publicKey", maxPublicKeyBytes, true);
-        identityField(data, true);
+        identityField(data, false);
+        boundedObjectField(data, "admissionPayload", maxCertPayloadBytes, false);
+        if (!data.contains("identity") && !data.contains("admissionPayload")) {
+            throw std::runtime_error("join_room must contain identity or admission payload");
+        }
     }
     else if (type == "group_key") {
         if (!hasOnlyFields(data, {
@@ -262,6 +296,47 @@ void requireFieldsForType(const json& data, const std::string& type) {
         stringField(data, "roomId", 64, true);
         stringField(data, "targetId", 64, true);
     }
+    else if (type == "approve_join") {
+        if (!hasOnlyFields(data, {"type", "roomId", "requestId", "epoch", "payloadDigest", "control", "admissionSignResponse"})) {
+            throw std::runtime_error("approve_join has unknown field");
+        }
+        stringField(data, "roomId", 64, true);
+        stringField(data, "requestId", 128, true);
+        if (!data.contains("epoch") || !data["epoch"].is_number_integer() ||
+            (!data["epoch"].is_number_unsigned() && data["epoch"].get<long long>() < 0)) {
+            throw std::runtime_error("approve_join epoch must be a non-negative integer");
+        }
+        stringField(data, "payloadDigest", 128, true);
+        controlField(data, true);
+        boundedObjectField(data, "admissionSignResponse", maxCertPayloadBytes, false);
+    }
+    else if (type == "reject_pending_join") {
+        if (!hasOnlyFields(data, {"type", "roomId", "requestId", "reason", "epoch", "payloadDigest", "control"})) {
+            throw std::runtime_error("reject_pending_join has unknown field");
+        }
+        stringField(data, "roomId", 64, true);
+        stringField(data, "requestId", 128, true);
+        stringField(data, "reason", 256, true);
+        if (!data.contains("epoch") || !data["epoch"].is_number_integer() ||
+            (!data["epoch"].is_number_unsigned() && data["epoch"].get<long long>() < 0)) {
+            throw std::runtime_error("reject_pending_join epoch must be a non-negative integer");
+        }
+        stringField(data, "payloadDigest", 128, true);
+        controlField(data, true);
+    }
+    else if (type == "close_room") {
+        if (!hasOnlyFields(data, {"type", "roomId", "reason", "epoch", "payloadDigest", "control"})) {
+            throw std::runtime_error("close_room has unknown field");
+        }
+        stringField(data, "roomId", 64, true);
+        stringField(data, "reason", 256, false);
+        if (!data.contains("epoch") || !data["epoch"].is_number_integer() ||
+            (!data["epoch"].is_number_unsigned() && data["epoch"].get<long long>() < 0)) {
+            throw std::runtime_error("close_room epoch must be a non-negative integer");
+        }
+        stringField(data, "payloadDigest", 128, true);
+        controlField(data, true);
+    }
     else if (type == "encrypted_relay") {
         if (!hasOnlyFields(data, {
                 "type",
@@ -327,6 +402,18 @@ SignalingServer::SignalingServer(uint16_t port) {
         addClient(std::move(ws));
     });
 
+    {
+        std::lock_guard<std::mutex> lock(mMutex);
+        for (const auto& roomId : mRoomStore.loadOpenRooms()) {
+            auto& room = mRooms[roomId];
+            for (const auto& pending : mRoomStore.loadPendingJoins(roomId)) {
+                room.pendingJoins[pending.requestId] = pending.payload;
+            }
+            std::cout << "[signal] restored open room state: " << roomId
+                      << " pending=" << room.pendingJoins.size() << std::endl;
+        }
+    }
+
     std::cout << "[signal] server running on " << mUrlScheme << "://"
               << *config.bindAddress << ":" << mServer->port() << std::endl;
     if (tlsMaterial.generatedLocal) {
@@ -365,7 +452,13 @@ void SignalingServer::closeAllRooms(const std::string& reason) {
         std::lock_guard<std::mutex> lock(mMutex);
         for (auto& [roomId, room] : mRooms) {
             for (auto& item : room.clients) notifyClients.push_back(item.second);
+            for (auto& [_, state] : mClients) {
+                if (state.roomId == roomId && state.role == "pending" && state.ws) {
+                    notifyClients.push_back(state.ws);
+                }
+            }
             mRegistry.closeRoom(roomId);
+            mRoomStore.markRoomClosed(roomId);
         }
         mRooms.clear();
     }
@@ -393,7 +486,9 @@ void SignalingServer::addClient(std::shared_ptr<rtc::WebSocket> ws) {
             serverFull = true;
         }
         else {
-            mClients[key] = ClientState{"", "", "", "", "", json{}, "", ws};
+            ClientState state;
+            state.ws = ws;
+            mClients[key] = std::move(state);
         }
     }
     if (serverFull) {
@@ -442,6 +537,15 @@ void SignalingServer::handleMessage(rtc::WebSocket* key, const std::string& payl
         else if (type == "unsilence_client") {
             handleClientSilence(key, data, false);
         }
+        else if (type == "approve_join") {
+            handleApproveJoin(key, data);
+        }
+        else if (type == "reject_pending_join") {
+            handleRejectPendingJoin(key, data);
+        }
+        else if (type == "close_room") {
+            handleCloseRoom(key, data);
+        }
         else if (type == chat::secure_relay::GkaRequestType) {
             relayGkaRequest(key, data);
         }
@@ -467,18 +571,13 @@ void SignalingServer::handleMessage(rtc::WebSocket* key, const std::string& payl
 }
 
 void SignalingServer::handleCreateRoom(rtc::WebSocket* key, const json& data) {
-    // 房间创建是注册操作：Server 记录一个唯一 room id 和 Host socket。
+    // 房间创建是注册操作：Server 记录一个唯一 opaque room token 和 Host socket。
     // Server 不创建群密钥，也不成为成员。
     const std::string roomId = data.value("roomId", "");
     const std::string username = data.value("username", "host");
-    const std::string password = data.value("password", "");
     const std::string publicKey = data.value("publicKey", "");
     if (roomId.empty()) {
         sendToClient(key, {{"type", "error"}, {"message", "missing roomId"}});
-        return;
-    }
-    if (password.empty()) {
-        sendToClient(key, {{"type", "error"}, {"message", "missing room password"}});
         return;
     }
     if (!validName(roomId, 64) || !validName(username, 64) || publicKey.empty()) {
@@ -489,30 +588,62 @@ void SignalingServer::handleCreateRoom(rtc::WebSocket* key, const json& data) {
     std::shared_ptr<rtc::WebSocket> ws;
     UserAccount account;
     bool roomAlreadyExists = false;
+    bool hostReattached = false;
+    bool roomClosed = false;
     {
         std::lock_guard<std::mutex> lock(mMutex);
         auto client = findClient(key);
         if (!client) return;
 
-        if (mRooms.find(roomId) != mRooms.end()) {
+        auto existingRoom = mRooms.find(roomId);
+        if (existingRoom != mRooms.end()) {
             ws = client->ws;
-            roomAlreadyExists = true;
+            if (existingRoom->second.host) {
+                roomAlreadyExists = true;
+            }
+            else {
+                // 阶段 15：Host 网络断开不再销毁房间。重新连接的 Host
+                // 通过相同 room instance token 重新接管现有 room instance。
+                account = mAuth.registerOrLogin(username, "local-account");
+                existingRoom->second.host = ws;
+                client->roomId = roomId;
+                client->role = "host";
+                client->clientId = "host";
+                client->userId = account.userId;
+                client->username = account.username;
+                client->publicKey = publicKey;
+                client->identity = data["identity"];
+                mRegistry.restoreRoom(roomId, account);
+                mRoomStore.markRoomOpen(roomId);
+                hostReattached = true;
+            }
         }
         else {
-            // 本地 AuthService/RoomRegistry 为当前进程提供稳定 id 和密码检查。
-            // 它们不是聊天明文数据库。
-            account = mAuth.registerOrLogin(username, "local-account");
-            mRegistry.createRoom(roomId, account, password);
-            ws = client->ws;
-            mRooms[roomId] = Room{};
-            mRooms[roomId].host = ws;
-            client->roomId = roomId;
-            client->role = "host";
-            client->clientId = "host";
-            client->userId = account.userId;
-            client->username = account.username;
-            client->publicKey = publicKey;
-            client->identity = data["identity"];
+            if (mRoomStore.roomState(roomId) == "closed") {
+                ws = client->ws;
+                roomClosed = true;
+            }
+            if (roomClosed) {
+                // 显式关闭的 room instance 不能被同一 token 重新打开。
+                // 重新开房需要生成新的 room instance token。
+            }
+            else {
+                // 本地 AuthService/RoomRegistry 为当前进程提供稳定 id 和成员关系。
+                // 它们不是聊天明文数据库。
+                account = mAuth.registerOrLogin(username, "local-account");
+                mRegistry.createRoom(roomId, account);
+                ws = client->ws;
+                mRooms[roomId] = Room{};
+                mRooms[roomId].host = ws;
+                client->roomId = roomId;
+                client->role = "host";
+                client->clientId = "host";
+                client->userId = account.userId;
+                client->username = account.username;
+                client->publicKey = publicKey;
+                client->identity = data["identity"];
+                mRoomStore.markRoomOpen(roomId);
+            }
         }
     }
 
@@ -522,8 +653,12 @@ void SignalingServer::handleCreateRoom(rtc::WebSocket* key, const json& data) {
         safeSend(ws, {{"type", "error"}, {"message", "room already exists"}});
         return;
     }
+    if (roomClosed) {
+        safeSend(ws, {{"type", "error"}, {"message", "room closed"}});
+        return;
+    }
 
-    std::cout << "[signal] room created: " << roomId << std::endl;
+    std::cout << "[signal] room " << (hostReattached ? "reattached: " : "created: ") << roomId << std::endl;
     safeSend(ws, {
         {"type", "room_created"},
         {"roomId", roomId},
@@ -532,23 +667,21 @@ void SignalingServer::handleCreateRoom(rtc::WebSocket* key, const json& data) {
         {"publicKey", publicKey}
     });
     broadcastRoomMembers(roomId);
+    if (hostReattached) {
+        flushPendingJoinsToHost(roomId);
+    }
 }
 
 void SignalingServer::handleJoinRoom(rtc::WebSocket* key, const json& data) {
-    // Client 发布临时 X25519 公钥和应用身份。
-    // Server 保存公钥用于路由，然后转发给 Host。
-    // Host 判断 PKI 签名是否真正把该密钥绑定到成员。
+    // Client 发布临时 X25519 公钥和应用身份后，只会进入 pending join。
+    // Server 不直接把新连接放进 active member 集合；Host 必须显式 approve。
     const std::string roomId = data.value("roomId", "");
     const std::string username = data.value("username", "");
-    const std::string password = data.value("password", "");
     const std::string publicKey = data.value("publicKey", "");
     std::shared_ptr<rtc::WebSocket> clientWs;
     std::shared_ptr<rtc::WebSocket> hostWs;
-    std::string clientId;
-    std::string hostUsername;
-    std::string hostPublicKey;
-    json hostIdentity;
-    UserAccount account;
+    std::string pendingRequestId;
+    std::string errorMessage;
 
     if (!validName(roomId, 64) || !validName(username, 64) || publicKey.empty()) {
         sendToClient(key, {{"type", "error"}, {"message", "invalid room or username"}});
@@ -559,86 +692,197 @@ void SignalingServer::handleJoinRoom(rtc::WebSocket* key, const json& data) {
         std::lock_guard<std::mutex> lock(mMutex);
         auto client = findClient(key);
         auto roomIt = mRooms.find(roomId);
-        if (!client || roomIt == mRooms.end() || !roomIt->second.host) {
+        if (!client || roomIt == mRooms.end()) {
             clientWs = client ? client->ws : nullptr;
+            errorMessage = mRoomStore.roomState(roomId) == "closed" ? "room closed" : "room not found";
         }
         else {
             auto& room = roomIt->second;
+            clientWs = client->ws;
+            hostWs = room.host;
             if (clientNameInRoomLocked(roomId, username)) {
-                clientWs = client->ws;
-                clientId = "__duplicate_username__";
-            }
-            else if (!mRegistry.passwordMatches(roomId, password)) {
-                clientWs = client->ws;
-                clientId = "__invalid_room_password__";
+                errorMessage = "username already in room";
             }
             else if (room.clients.size() >= maxRoomClients) {
-                clientWs = client->ws;
-                clientId = "__room_full__";
+                errorMessage = "room is full";
+            }
+            else if (room.pendingJoins.size() >= maxPendingJoinsPerRoom) {
+                errorMessage = "too many pending join requests";
             }
             else {
-                // clientId 是 Server 为该房间分配的稳定路由 id。
-                // 它会暴露给成员，使私发中继可以寻址。
-                account = mAuth.registerOrLogin(username, "local-account");
-                mRegistry.joinClient(roomId, account);
-                clientId = account.userId;
-                clientWs = client->ws;
-                hostWs = room.host;
-                for (const auto& [_, state] : mClients) {
-                    if (state.ws == hostWs && state.role == "host") {
-                        hostUsername = state.username;
-                        hostPublicKey = state.publicKey;
-                        hostIdentity = state.identity;
-                        break;
-                    }
-                }
-                room.clients[clientId] = clientWs;
-
+                // requestId 只用于该 room 内一次入房申请。Server 可见它，
+                // 但不能从中恢复用户名之外的身份语义。
+                pendingRequestId = sha256HexForLog(
+                    "pending-join:" + roomId + ":" + username + ":" + publicKey + ":" +
+                    std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+                json pending = {
+                    {"type", "pending_join"},
+                    {"roomId", roomId},
+                    {"requestId", pendingRequestId},
+                    {"username", username},
+                    {"publicKey", publicKey}
+                };
+                if (data.contains("identity")) pending["identity"] = data["identity"];
+                if (data.contains("admissionPayload")) pending["admissionPayload"] = data["admissionPayload"];
+                room.pendingJoins[pendingRequestId] = pending;
+                mRoomStore.addPendingJoin(roomId, pendingRequestId, pending);
                 client->roomId = roomId;
-                client->clientId = clientId;
-                client->userId = account.userId;
-                client->username = account.username;
+                client->role = "pending";
+                client->username = username;
                 client->publicKey = publicKey;
-                client->identity = data["identity"];
-                client->role = "client";
+                client->identity = data.contains("identity") ? data["identity"] : json::object();
+                client->pendingRequestId = pendingRequestId;
             }
         }
     }
 
-    if (clientId == "__duplicate_username__") {
-        safeSend(clientWs, {{"type", "error"}, {"message", "username already in room"}});
+    if (!errorMessage.empty()) {
+        safeSend(clientWs, {{"type", "error"}, {"message", errorMessage}});
         return;
     }
 
-    if (clientId == "__invalid_room_password__") {
-        safeSend(clientWs, {{"type", "error"}, {"message", "invalid room password"}});
+    safeSend(clientWs, {
+        {"type", "join_pending"},
+        {"roomId", roomId},
+        {"username", username},
+        {"requestId", pendingRequestId},
+        {"message", hostWs ? "waiting for host approval" : "waiting for host to reconnect and approve"}
+    });
+    if (hostWs) {
+        json pending = {
+            {"type", "pending_join"},
+            {"roomId", roomId},
+            {"requestId", pendingRequestId},
+            {"username", username},
+            {"publicKey", publicKey}
+        };
+        if (data.contains("identity")) pending["identity"] = data["identity"];
+        if (data.contains("admissionPayload")) pending["admissionPayload"] = data["admissionPayload"];
+        safeSend(hostWs, pending);
+    }
+    std::cout << "[signal] pending join " << roomId
+              << " request=" << pendingRequestId.substr(0, 12)
+              << " hostOnline=" << (hostWs ? "yes" : "no") << std::endl;
+}
+
+void SignalingServer::handleApproveJoin(rtc::WebSocket* key, const json& data) {
+    // Server 只认“当前 Host socket 发来的 approve_join”这一事实。
+    // control 签名会被 Client 重新验证，Server 不解释证书链语义。
+    const std::string requestId = data.value("requestId", "");
+    std::shared_ptr<rtc::WebSocket> hostWs;
+    std::shared_ptr<rtc::WebSocket> clientWs;
+    std::string roomId;
+    std::string clientId;
+    std::string hostUsername;
+    std::string hostPublicKey;
+    std::string errorMessage;
+    json pending;
+    json hostIdentity;
+    UserAccount account;
+
+    {
+        std::lock_guard<std::mutex> lock(mMutex);
+        auto sender = findClient(key);
+        hostWs = sender ? sender->ws : nullptr;
+        if (!sender || sender->role != "host" || sender->roomId.empty() || sender->roomId != data.value("roomId", "")) {
+            errorMessage = "invalid approve_join sender";
+        }
+        else {
+            roomId = sender->roomId;
+            auto roomIt = mRooms.find(roomId);
+            if (roomIt == mRooms.end() || !roomIt->second.host || roomIt->second.host.get() != key) {
+                errorMessage = "room not found";
+            }
+            else {
+                auto pendingIt = roomIt->second.pendingJoins.find(requestId);
+                if (pendingIt == roomIt->second.pendingJoins.end()) {
+                    errorMessage = "pending join not found";
+                }
+                else {
+                    pending = pendingIt->second;
+                    const auto username = pending.value("username", "");
+                    const auto publicKey = pending.value("publicKey", "");
+                    ClientState* pendingClient = nullptr;
+                    for (auto& [_, state] : mClients) {
+                        if (state.roomId == roomId && state.role == "pending" && state.pendingRequestId == requestId) {
+                            pendingClient = &state;
+                            break;
+                        }
+                    }
+                    if (!pendingClient || !pendingClient->ws || pendingClient->ws->isClosed()) {
+                        errorMessage = "pending client is no longer connected";
+                        roomIt->second.pendingJoins.erase(pendingIt);
+                        mRoomStore.removePendingJoin(roomId, requestId);
+                    }
+                    else {
+                        bool duplicateActiveName = false;
+                        for (const auto& [_, state] : mClients) {
+                            if (state.roomId == roomId &&
+                                state.role != "pending" &&
+                                state.username == username) {
+                                duplicateActiveName = true;
+                                break;
+                            }
+                        }
+                        if (duplicateActiveName) {
+                            errorMessage = "username already in room";
+                        }
+                        else if (roomIt->second.clients.size() >= maxRoomClients) {
+                            errorMessage = "room is full";
+                        }
+                        else {
+                            account = mAuth.registerOrLogin(username, "local-account");
+                            mRegistry.joinClient(roomId, account);
+                            clientId = account.userId;
+                            clientWs = pendingClient->ws;
+                            hostUsername = sender->username;
+                            hostPublicKey = sender->publicKey;
+                            hostIdentity = sender->identity;
+
+                            roomIt->second.clients[clientId] = clientWs;
+                            pendingClient->clientId = clientId;
+                            pendingClient->userId = account.userId;
+                            pendingClient->username = account.username;
+                            pendingClient->publicKey = publicKey;
+                            if (pending.contains("identity")) pendingClient->identity = pending["identity"];
+                            pendingClient->role = "client";
+                            pendingClient->pendingRequestId.clear();
+
+                            roomIt->second.pendingJoins.erase(pendingIt);
+                            mRoomStore.removePendingJoin(roomId, requestId);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (!errorMessage.empty()) {
+        safeSend(hostWs, {{"type", "error"}, {"message", errorMessage}});
         return;
     }
 
-    if (clientId == "__room_full__") {
-        safeSend(clientWs, {{"type", "error"}, {"message", "room is full"}});
-        return;
-    }
+    std::cout << "[signal] member approved " << roomId
+              << " request=" << requestId.substr(0, 12)
+              << " as " << logActorId(clientId) << std::endl;
 
-    if (clientId.empty()) {
-        safeSend(clientWs, {{"type", "error"}, {"message", "room not found"}});
-        return;
-    }
-
-    std::cout << "[signal] member joined " << roomId << " as " << logActorId(clientId) << std::endl;
     json joined = {
         {"type", "joined"},
         {"roomId", roomId},
         {"clientId", clientId},
         {"userId", account.userId},
         {"username", account.username},
-        {"publicKey", publicKey},
+        {"publicKey", pending.value("publicKey", "")},
         {"hostUsername", hostUsername},
-        {"hostPublicKey", hostPublicKey}
+        {"hostPublicKey", hostPublicKey},
+        {"approvalRequestId", requestId},
+        {"approvalEpoch", data.value("epoch", 0ULL)},
+        {"approvalPayloadDigest", data.value("payloadDigest", "")},
+        {"approvalControl", data["control"]}
     };
-    if (data.contains("identity")) joined["identity"] = data["identity"];
+    if (data.contains("admissionSignResponse")) joined["admissionSignResponse"] = data["admissionSignResponse"];
+    if (pending.contains("identity")) joined["identity"] = pending["identity"];
     if (hostIdentity.is_object()) joined["hostIdentity"] = hostIdentity;
-    // 回显 Client 自己的 identity，使 Client 看到 Server schema 校验接受的精确字段。
     safeSend(clientWs, joined);
 
     json newClient = {
@@ -646,13 +890,76 @@ void SignalingServer::handleJoinRoom(rtc::WebSocket* key, const json& data) {
         {"clientId", clientId},
         {"userId", account.userId},
         {"username", account.username},
-        {"publicKey", publicKey}
+        {"publicKey", pending.value("publicKey", "")}
     };
-    if (data.contains("identity")) newClient["identity"] = data["identity"];
-    // Host 接收 identity 对象和公钥，验证 PKI 绑定，
-    // 然后发送 group_key 或拒绝该 Client。
+    if (pending.contains("identity")) newClient["identity"] = pending["identity"];
+    if (data.contains("admissionSignResponse")) newClient["admissionSignResponse"] = data["admissionSignResponse"];
     safeSend(hostWs, newClient);
     broadcastRoomMembers(roomId);
+}
+
+void SignalingServer::handleRejectPendingJoin(rtc::WebSocket* key, const json& data) {
+    const std::string requestId = data.value("requestId", "");
+    const std::string reason = data.value("reason", "join request rejected by host");
+    std::shared_ptr<rtc::WebSocket> hostWs;
+    std::shared_ptr<rtc::WebSocket> clientWs;
+    std::string roomId;
+    std::string errorMessage;
+
+    {
+        std::lock_guard<std::mutex> lock(mMutex);
+        auto sender = findClient(key);
+        hostWs = sender ? sender->ws : nullptr;
+        if (!sender || sender->role != "host" || sender->roomId.empty() || sender->roomId != data.value("roomId", "")) {
+            errorMessage = "invalid reject_pending_join sender";
+        }
+        else {
+            roomId = sender->roomId;
+            auto roomIt = mRooms.find(roomId);
+            if (roomIt == mRooms.end() || !roomIt->second.host || roomIt->second.host.get() != key) {
+                errorMessage = "room not found";
+            }
+            else {
+                auto pendingIt = roomIt->second.pendingJoins.find(requestId);
+                if (pendingIt == roomIt->second.pendingJoins.end()) {
+                    errorMessage = "pending join not found";
+                }
+                else {
+                    for (auto it = mClients.begin(); it != mClients.end(); ++it) {
+                        if (it->second.roomId == roomId &&
+                            it->second.role == "pending" &&
+                            it->second.pendingRequestId == requestId) {
+                            clientWs = it->second.ws;
+                            mClients.erase(it);
+                            break;
+                        }
+                    }
+                    roomIt->second.pendingJoins.erase(pendingIt);
+                    mRoomStore.removePendingJoin(roomId, requestId);
+                }
+            }
+        }
+    }
+
+    if (!errorMessage.empty()) {
+        safeSend(hostWs, {{"type", "error"}, {"message", errorMessage}});
+        return;
+    }
+
+    if (clientWs) {
+        safeSend(clientWs, {
+            {"type", "join_rejected"},
+            {"roomId", roomId},
+            {"requestId", requestId},
+            {"reason", reason},
+            {"epoch", data.value("epoch", 0ULL)},
+            {"payloadDigest", data.value("payloadDigest", "")},
+            {"control", data["control"]}
+        });
+        closeAfterTerminalError(clientWs);
+    }
+    std::cout << "[signal] pending join rejected " << roomId
+              << " request=" << requestId.substr(0, 12) << std::endl;
 }
 
 void SignalingServer::handleRejectClient(rtc::WebSocket* key, const json& data) {
@@ -762,6 +1069,69 @@ void SignalingServer::handleClientSilence(rtc::WebSocket* key, const json& data,
     safeSend(targetWs, {{"type", "moderation"}, {"state", state}, {"message", message}});
     std::cout << "[signal] host " << (silenced ? "silenced " : "unsilenced ")
               << logActorId(targetId) << " in " << roomId << std::endl;
+}
+
+void SignalingServer::handleCloseRoom(rtc::WebSocket* key, const json& data) {
+    // 阶段 15：Host 断线只表示暂离；真正销毁房间必须由在线 Host
+    // 显式发送 close_room。Server 只验证发送连接是否为当前 Host。
+    std::string roomId;
+    std::string errorMessage;
+    std::vector<std::shared_ptr<rtc::WebSocket>> recipients;
+    {
+        std::lock_guard<std::mutex> lock(mMutex);
+        auto sender = findClient(key);
+        if (!sender || sender->role != "host" || sender->roomId.empty() || sender->roomId != data.value("roomId", "")) {
+            errorMessage = "invalid close_room sender";
+        }
+        else {
+            roomId = sender->roomId;
+            auto roomIt = mRooms.find(roomId);
+            if (roomIt == mRooms.end()) {
+                errorMessage = "room not found";
+            }
+            else {
+                if (roomIt->second.host) recipients.push_back(roomIt->second.host);
+                for (const auto& [_, ws] : roomIt->second.clients) {
+                    if (ws) recipients.push_back(ws);
+                }
+                for (const auto& [_, state] : mClients) {
+                    if (state.roomId == roomId && state.role == "pending" && state.ws) {
+                        recipients.push_back(state.ws);
+                    }
+                }
+                mRooms.erase(roomIt);
+                mRegistry.closeRoom(roomId);
+                mRoomStore.markRoomClosed(roomId);
+                for (auto it = mClients.begin(); it != mClients.end();) {
+                    if (it->second.roomId == roomId) {
+                        it = mClients.erase(it);
+                    }
+                    else {
+                        ++it;
+                    }
+                }
+            }
+        }
+    }
+
+    if (!errorMessage.empty()) {
+        sendToClient(key, {{"type", "error"}, {"message", errorMessage}});
+        return;
+    }
+
+    json closed = {
+        {"type", "room_closed"},
+        {"roomId", roomId},
+        {"reason", data.value("reason", "host closed room")},
+        {"epoch", data.value("epoch", 0ULL)},
+        {"payloadDigest", data.value("payloadDigest", "")},
+        {"control", data["control"]}
+    };
+    for (auto& ws : recipients) {
+        safeSend(ws, closed);
+        closeAfterTerminalError(ws);
+    }
+    std::cout << "[signal] room explicitly closed: " << roomId << std::endl;
 }
 
 void SignalingServer::relayGkaRequest(rtc::WebSocket* key, const json& data) {
@@ -970,6 +1340,7 @@ void SignalingServer::cleanup(rtc::WebSocket* key) {
     std::string roomId;
     std::string role;
     std::string clientId;
+    std::string pendingRequestId;
     std::vector<std::shared_ptr<rtc::WebSocket>> notifyClients;
     std::shared_ptr<rtc::WebSocket> notifyHost;
     bool shouldBroadcastMembers = false;
@@ -982,16 +1353,18 @@ void SignalingServer::cleanup(rtc::WebSocket* key) {
         roomId = clientIt->second.roomId;
         role = clientIt->second.role;
         clientId = clientIt->second.clientId;
+        pendingRequestId = clientIt->second.pendingRequestId;
 
         auto roomIt = mRooms.find(roomId);
         if (roomIt != mRooms.end()) {
             auto& room = roomIt->second;
             if (role == "host" && room.host.get() == key) {
-                // 当前房间生命周期策略是 Host 离开即关闭房间。
-                // 持久房间需要保存成员关系并支持密钥恢复。
+                // 阶段 15：Host 连接断开不再关闭房间。
+                // Server 只移除当前 Host socket，并等待 Host 显式 close_room
+                // 或使用同一 room token 重新接管该 room instance。
                 for (auto& item : room.clients) notifyClients.push_back(item.second);
-                mRooms.erase(roomIt);
-                mRegistry.closeRoom(roomId);
+                room.host.reset();
+                shouldBroadcastMembers = true;
             }
             else if (role == "client" && !clientId.empty()) {
                 auto clientIt = room.clients.find(clientId);
@@ -1002,16 +1375,22 @@ void SignalingServer::cleanup(rtc::WebSocket* key) {
                     shouldBroadcastMembers = true;
                 }
             }
+            else if (role == "pending" && !pendingRequestId.empty()) {
+                room.pendingJoins.erase(pendingRequestId);
+                mRoomStore.removePendingJoin(roomId, pendingRequestId);
+                notifyHost = room.host;
+            }
         }
 
         mClients.erase(clientIt);
     }
 
     if (role == "host" && !roomId.empty()) {
-        std::cout << "[signal] host left, closing room " << roomId << std::endl;
+        std::cout << "[signal] host disconnected, room kept open " << roomId << std::endl;
         for (auto& ws : notifyClients) {
-            safeSend(ws, {{"type", "error"}, {"message", "host disconnected"}});
+            safeSend(ws, {{"type", "host_disconnected"}, {"roomId", roomId}});
         }
+        if (shouldBroadcastMembers) broadcastRoomMembers(roomId);
         return;
     }
 
@@ -1019,6 +1398,15 @@ void SignalingServer::cleanup(rtc::WebSocket* key) {
         std::cout << "[signal] " << logActorId(clientId) << " left " << roomId << std::endl;
         safeSend(notifyHost, {{"type", "client_left"}, {"clientId", clientId}});
         if (shouldBroadcastMembers) broadcastRoomMembers(roomId);
+    }
+    else if (role == "pending" && !pendingRequestId.empty()) {
+        std::cout << "[signal] pending join disconnected " << roomId
+                  << " request=" << pendingRequestId.substr(0, 12) << std::endl;
+        safeSend(notifyHost, {
+            {"type", "pending_join_cancelled"},
+            {"roomId", roomId},
+            {"requestId", pendingRequestId}
+        });
     }
 }
 
@@ -1236,5 +1624,28 @@ void SignalingServer::safeSend(const std::shared_ptr<rtc::WebSocket>& ws, const 
     }
     catch (const std::exception& e) {
         std::cout << "[signal] send failed type=" << type << " error=" << e.what() << std::endl;
+    }
+}
+
+void SignalingServer::flushPendingJoinsToHost(const std::string& roomId) {
+    std::shared_ptr<rtc::WebSocket> hostWs;
+    std::vector<json> pending;
+    {
+        std::lock_guard<std::mutex> lock(mMutex);
+        auto roomIt = mRooms.find(roomId);
+        if (roomIt == mRooms.end() || !roomIt->second.host) return;
+        hostWs = roomIt->second.host;
+        pending.reserve(roomIt->second.pendingJoins.size());
+        for (const auto& [_, payload] : roomIt->second.pendingJoins) {
+            pending.push_back(payload);
+        }
+    }
+
+    for (const auto& payload : pending) {
+        safeSend(hostWs, payload);
+    }
+    if (!pending.empty()) {
+        std::cout << "[signal] flushed pending joins room " << roomId
+                  << " count=" << pending.size() << std::endl;
     }
 }

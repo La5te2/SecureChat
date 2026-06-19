@@ -9,8 +9,10 @@
 
 #include "native_api.h"
 
+#include "cert_generation.hpp"
 #include "host_session_core.hpp"
 #include "client_session_core.hpp"
+#include "pki_application.hpp"
 
 #include <rtc/rtc.hpp>
 
@@ -49,6 +51,13 @@ std::once_flag gCrashHandlerOnce;
 // 将可空 C API 字符串转换为安全的 std::string。
 std::string safeString(const char* value) {
     return value ? value : "";
+}
+
+std::string trimCopy(std::string value) {
+    const auto first = value.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) return "";
+    const auto last = value.find_last_not_of(" \t\r\n");
+    return value.substr(first, last - first + 1);
 }
 
 // 向 WinUI 注册的托管回调发送一个事件。
@@ -296,9 +305,12 @@ int CHAT_CALL chat_set_environment_variable(const char* name, const char* value)
 #endif
 }
 
-// 针对已经运行的 Server 启动一个 Host 参与者。
-// Server 是唯一长期监听者；Host 仍是房间成员，不打开自己的信令监听端口。
-int CHAT_CALL chat_host_start(const char* server_url, const char* room_id, const char* username, const char* password) {
+// 从 room-dir 读取 room token 和房间级 Host PKI，然后创建 Host 会话。
+int CHAT_CALL chat_host_start(
+    const char* server_url,
+    const char* room_dir,
+    const char* username,
+    const char* key_pass) {
     installNativeCrashHandlersOnce();
 
     try {
@@ -309,23 +321,33 @@ int CHAT_CALL chat_host_start(const char* server_url, const char* room_id, const
         }
 
         const std::string serverUrl = safeString(server_url);
-        const std::string roomId = safeString(room_id);
-        const std::string hostName = safeString(username).empty() ? "host" : safeString(username);
-        const std::string roomPassword = safeString(password);
+        const std::string roomDir = safeString(room_dir);
         if (serverUrl.empty()) {
             emitEvent("error", "Server URL is required");
             return 0;
         }
-        if (roomPassword.empty()) {
-            emitEvent("error", "Room password is required");
+        if (roomDir.empty()) {
+            emitEvent("error", "Room certificate directory is required");
             return 0;
         }
 
+        const auto material = chat::certs::loadRoomRuntimeMaterial(
+            roomDir,
+            safeString(username),
+            true);
+        auto identity = chat::pki_application::loadFromFiles(
+            material.trustStoreFile,
+            material.identityCertFile,
+            material.identityKeyFile,
+            safeString(key_pass));
+
         auto hostSession = std::make_shared<HostSessionCore>(
             serverUrl,
-            roomId,
-            hostName,
-            roomPassword);
+            material.roomName,
+            material.username,
+            std::move(identity),
+            material.roomInstanceToken,
+            roomDir);
         {
             std::lock_guard<std::recursive_mutex> lock(gMutex);
             gHostSession = hostSession;
@@ -344,8 +366,72 @@ int CHAT_CALL chat_host_start(const char* server_url, const char* room_id, const
     }
 }
 
-// 连接已有信令服务器并启动一个 Client 会话。
-int CHAT_CALL chat_join_start(const char* url, const char* room_id, const char* username, const char* password) {
+// WinUI 自动创建房间级证书材料。用户只输入房间名；
+// room-dir 和 entrance.scp 路径作为内部实现细节写入 logs/certs/<digest>/。
+int CHAT_CALL chat_host_start_auto(
+    const char* server_url,
+    const char* room_name,
+    const char* username,
+    const char* key_pass) {
+    installNativeCrashHandlersOnce();
+    try {
+        const auto roomName = trimCopy(safeString(room_name));
+        const auto user = trimCopy(safeString(username));
+        if (roomName.empty()) {
+            emitEvent("error", "Room name is required");
+            return 0;
+        }
+        if (user.empty()) {
+            emitEvent("error", "User name is required");
+            return 0;
+        }
+
+        chat::certs::RoomEntranceCreateOptions options;
+        options.roomName = roomName;
+        options.roomPhrase = roomName;
+        options.hostName = user;
+        options.outputRoot = "logs/certs";
+        options.memberKeyPassword = safeString(key_pass);
+        const auto created = chat::certs::createRoomEntrance(options);
+        emitEvent("status", "Entrance created: " + created.entranceFile);
+        return chat_host_start(server_url, created.roomDir.c_str(), user.c_str(), key_pass);
+    }
+    catch (const std::exception& e) {
+        emitEvent("error", e.what());
+        return 0;
+    }
+}
+
+// WinUI Host 页“加入房间”：只复用本机已有 Host room-dir。
+// 它不会重新创建 entrance.scp，也不会覆盖房间级 Root/Intermediate。
+int CHAT_CALL chat_host_join_existing(
+    const char* server_url,
+    const char* room_name,
+    const char* username,
+    const char* key_pass) {
+    installNativeCrashHandlersOnce();
+    try {
+        const auto roomDir = chat::certs::findLocalRoomDir(
+            safeString(room_name),
+            safeString(username),
+            "host",
+            "logs/certs");
+        emitEvent("status", "Local host room loaded: " + roomDir);
+        return chat_host_start(server_url, roomDir.c_str(), username, key_pass);
+    }
+    catch (const std::exception& e) {
+        emitEvent("error", e.what());
+        return 0;
+    }
+}
+
+// 从 room-dir 读取 room token 和房间级 Client PKI，
+// 然后创建 Client 会话。未安装 Host 签发响应时会明确报缺少链证书。
+int CHAT_CALL chat_join_start(
+    const char* url,
+    const char* room_dir,
+    const char* username,
+    const char* key_pass) {
     installNativeCrashHandlersOnce();
     try {
         initLoggerOnce();
@@ -354,17 +440,39 @@ int CHAT_CALL chat_join_start(const char* url, const char* room_id, const char* 
             retireActiveObjects();
         }
 
-        const std::string roomPassword = safeString(password);
-        if (roomPassword.empty()) {
-            emitEvent("error", "Room password is required");
+        const std::string serverUrl = safeString(url);
+        const std::string roomDir = safeString(room_dir);
+        if (serverUrl.empty()) {
+            emitEvent("error", "Server URL is required");
+            return 0;
+        }
+        if (roomDir.empty()) {
+            emitEvent("error", "Room certificate directory is required");
             return 0;
         }
 
-        auto plSession = std::make_shared<ClientSessionCore>(
-            safeString(url),
-            safeString(room_id),
+        const auto material = chat::certs::loadRoomRuntimeMaterial(
+            roomDir,
             safeString(username),
-            roomPassword);
+            false,
+            false);
+        chat::pki_application::IdentityContext identity;
+        if (material.identityCertReady) {
+            identity = chat::pki_application::loadFromFiles(
+                material.trustStoreFile,
+                material.identityCertFile,
+                material.identityKeyFile,
+                safeString(key_pass));
+        }
+
+        auto plSession = std::make_shared<ClientSessionCore>(
+            serverUrl,
+            material.roomName,
+            material.username,
+            std::move(identity),
+            material.roomInstanceToken,
+            roomDir,
+            safeString(key_pass));
         {
             std::lock_guard<std::recursive_mutex> lock(gMutex);
             gPlSession = plSession;
@@ -376,6 +484,77 @@ int CHAT_CALL chat_join_start(const char* url, const char* room_id, const char* 
     catch (const std::exception& e) {
         std::lock_guard<std::recursive_mutex> lock(gMutex);
         retireActiveObjects();
+        emitEvent("error", e.what());
+        return 0;
+    }
+}
+
+// WinUI 自动导入 Host 分发的 entrance.scp。导入后 Client 先进入
+// pending join，Host 审批时才收到成员证书链和当前 group key。
+int CHAT_CALL chat_join_start_auto(
+    const char* url,
+    const char* room_name,
+    const char* username,
+    const char* entrance_file,
+    const char* key_pass) {
+    installNativeCrashHandlersOnce();
+    try {
+        const auto roomName = trimCopy(safeString(room_name));
+        const auto user = trimCopy(safeString(username));
+        const auto entrance = trimCopy(safeString(entrance_file));
+        if (roomName.empty()) {
+            emitEvent("error", "Room name is required");
+            return 0;
+        }
+        if (user.empty()) {
+            emitEvent("error", "User name is required");
+            return 0;
+        }
+        if (entrance.empty()) {
+            emitEvent("error", "Entrance file is required");
+            return 0;
+        }
+
+        const auto roomDir = chat::certs::roomDirForEntrance(entrance, roomName, "logs/certs");
+        const auto localRoomDir = std::filesystem::path(roomDir);
+        const auto userKeyPath = localRoomDir / (user + "-key.pem");
+        if (!std::filesystem::exists(localRoomDir / "room-runtime.json") ||
+            !std::filesystem::exists(userKeyPath)) {
+            chat::certs::RoomEntranceImportOptions options;
+            options.entranceFile = entrance;
+            options.roomPhrase = roomName;
+            options.username = user;
+            options.outputRoot = "logs/certs";
+            options.memberKeyPassword = safeString(key_pass);
+            const auto imported = chat::certs::importRoomEntrance(options);
+            emitEvent("status", "Entrance imported: " + imported.roomDir);
+        }
+        return chat_join_start(url, roomDir.c_str(), user.c_str(), key_pass);
+    }
+    catch (const std::exception& e) {
+        emitEvent("error", e.what());
+        return 0;
+    }
+}
+
+// WinUI Join 页“加入房间”：只复用本机已有 Client room-dir。
+// 如果本机还没有导入 entrance.scp，会明确报错，让用户改点“导入房间”。
+int CHAT_CALL chat_join_existing(
+    const char* url,
+    const char* room_name,
+    const char* username,
+    const char* key_pass) {
+    installNativeCrashHandlersOnce();
+    try {
+        const auto roomDir = chat::certs::findLocalRoomDir(
+            safeString(room_name),
+            safeString(username),
+            "client",
+            "logs/certs");
+        emitEvent("status", "Local client room loaded: " + roomDir);
+        return chat_join_start(url, roomDir.c_str(), username, key_pass);
+    }
+    catch (const std::exception& e) {
         emitEvent("error", e.what());
         return 0;
     }
@@ -611,6 +790,31 @@ void CHAT_CALL chat_stop() {
     std::lock_guard<std::recursive_mutex> lock(gMutex);
     retireActiveObjects();
     emitEvent("status", "Session stopped");
+}
+
+void CHAT_CALL chat_close_room() {
+    installNativeCrashHandlersOnce();
+    std::shared_ptr<HostSessionCore> hostSession;
+    std::shared_ptr<ClientSessionCore> clientSession;
+    {
+        std::lock_guard<std::recursive_mutex> lock(gMutex);
+        hostSession = gHostSession;
+        clientSession = gPlSession;
+    }
+
+    if (hostSession && !hostSession->shouldStop()) {
+        hostSession->closeRoom();
+        return;
+    }
+
+    if (clientSession) {
+        std::lock_guard<std::recursive_mutex> lock(gMutex);
+        retireActiveObjects();
+        emitEvent("status", "Session stopped");
+        return;
+    }
+
+    emitEvent("status", "No active room to close");
 }
 
 // GUI 进程关闭时执行最终清理。

@@ -62,6 +62,7 @@ for %%F in (
     "%BUILD_DIR%\host.exe"
     "%BUILD_DIR%\client.exe"
     "%BUILD_DIR%\server.exe"
+    "%BUILD_DIR%\cert.exe"
     "%BUILD_DIR%\native.dll"
     "%BUILD_DIR%\datachannel.dll"
     "%BUILD_DIR%\juice.dll"
@@ -79,5 +80,6 @@ echo Outputs:
 echo   %BUILD_DIR%\host.exe
 echo   %BUILD_DIR%\client.exe
 echo   %BUILD_DIR%\server.exe
+echo   %BUILD_DIR%\cert.exe
 echo   %BUILD_DIR%\native.dll
 endlocal

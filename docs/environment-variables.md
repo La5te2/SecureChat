@@ -1,22 +1,17 @@
 # SecureChat 环境变量参考
 
-本文档列出当前仍可配置的 `SECURECHAT_*` 环境变量。不是每个运行角色都需要配置所有变量；Server、Host、Client 和 Nginx TLS 反向代理 backend 场景各自使用其中一部分。交互使用时优先通过命令参数和隐藏输入完成，不建议把秘密长期写入 shell 启动文件。当前 Host/Client 必须配置 PKI 成员身份变量，否则会启动失败。
+本文档列出当前仍可配置的 `SECURECHAT_*` 环境变量。不是每个运行角色都需要配置所有变量；Server、Host、Client 和 Nginx TLS 反向代理 backend 场景各自使用其中一部分。CLI Host/Client 的成员 PKI 和 room instance token 从 `--room-dir` 指向的房间证书目录读取；WinUI 会自动创建或导入该目录，不要求用户手工填写路径。
 
 ## 总览
 
-当前共有 18 个 `SECURECHAT_*` 变量：
+当前共有 13 个 `SECURECHAT_*` 变量：
 
 ```text
 SECURECHAT_ALLOW_ROOT
 SECURECHAT_ATTACHMENT_MAX_BYTES
 SECURECHAT_BIND_ADDRESS
-SECURECHAT_IDENTITY_CERT_FILE
-SECURECHAT_IDENTITY_KEY_FILE
-SECURECHAT_IDENTITY_KEY_PASS
 SECURECHAT_LOGS_MAX_BYTES
-SECURECHAT_PKI_TRUST_STORE
 SECURECHAT_PORT
-SECURECHAT_ROOM_PASSWORD
 SECURECHAT_SERVER_BIN
 SECURECHAT_SERVER_LOG_FILE
 SECURECHAT_SERVER_PID_FILE
@@ -50,34 +45,9 @@ SECURECHAT_TLS_KEY_PASS
 
 `ws://` 明文 WebSocket 已禁用；Host/Client/WinUI 的 Server URL 必须使用 `wss://`。
 
-## PKI 成员身份认证
+## 房间级成员身份
 
-PKI 是 Host/Client 必需配置。不配置完整变量时，Host/Client 启动失败；Server 不使用这些变量，仍只负责监听、房间注册、成员状态和密文 relay。
-
-| 变量 | 默认值 | 用途 |
-| --- | --- | --- |
-| `SECURECHAT_PKI_TRUST_STORE` | 空 | 受信任 CA bundle PEM 路径，用于验证 Host/Client 成员身份签名证书链。 |
-| `SECURECHAT_IDENTITY_CERT_FILE` | 空 | 本机成员身份 PEM 证书链路径；Client 用它签名 `join_room`，Host 用它签名 `group_key`。 |
-| `SECURECHAT_IDENTITY_KEY_FILE` | 空 | 本机成员身份私钥 PEM 路径。 |
-| `SECURECHAT_IDENTITY_KEY_PASS` | 空 | 成员身份私钥密码；只有私钥加密时需要。 |
-
-示例：
-
-```bash
-export SECURECHAT_PKI_TRUST_STORE=certs/pki/root-ca.pem
-export SECURECHAT_IDENTITY_CERT_FILE=certs/pki/member-chain.pem
-export SECURECHAT_IDENTITY_KEY_FILE=certs/pki/member-key.pem
-```
-
-成员身份 PKI 的证书生成、字段边界和验证流程见 `docs/certificate-methods.md`。
-
-## 房间密码
-
-| 变量 | 默认值 | 用途 |
-| --- | --- | --- |
-| `SECURECHAT_ROOM_PASSWORD` | 空 | Host/Client 非交互自动化时的房间密码来源。 |
-
-交互使用时不推荐设置 `SECURECHAT_ROOM_PASSWORD`。Host/Client CLI 会优先使用隐藏输入。非交互自动化可临时设置该变量，CLI 读取后会尽量从当前进程环境中清理。
+Host/Client 不再读取全局成员 PKI 环境变量。CLI 的成员 trust store、成员证书链、成员私钥和 room instance token 都来自 `cert.exe` 生成或导入的房间证书目录，并通过 Host/Client 的 `--room-dir <dir>` 参数传入。WinUI 隐藏该路径，Host 启动时自动生成 `entrance.scp`，Client 加入时通过文件选择器导入 `entrance.scp`。成员私钥带口令时使用 CLI `--key-pass <pass>` 或 WinUI 设置面板中的成员私钥口令。
 
 ## 附件
 

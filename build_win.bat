@@ -62,6 +62,7 @@ cmake --build "%BUILD_DIR%" --config %CONFIG%
 if errorlevel 1 exit /b 1
 
 for %%F in (
+    "%BUILD_DIR%\cert.exe"
     "%BUILD_DIR%\native.dll"
     "%BUILD_DIR%\datachannel.dll"
     "%BUILD_DIR%\juice.dll"
