@@ -6,6 +6,7 @@
 #include "secure_relay.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -14,6 +15,24 @@
 
 namespace {
 namespace attachment = chat::attachment;
+
+bool startsWithIgnoreCase(const std::string& value, const std::string& prefix) {
+    if (value.size() < prefix.size()) return false;
+    for (std::size_t i = 0; i < prefix.size(); ++i) {
+        const auto a = static_cast<unsigned char>(value[i]);
+        const auto b = static_cast<unsigned char>(prefix[i]);
+        if (std::tolower(a) != std::tolower(b)) return false;
+    }
+    return true;
+}
+
+void requireWssServerUrl(const std::string& url) {
+    // Client 和 Host 使用同一条 WSS 入口规则。
+    // 不允许 ws://，避免用户误把明文信令当成正式部署路径。
+    if (!startsWithIgnoreCase(url, "wss://")) {
+        throw std::runtime_error("Server URL must start with wss://; ws:// signaling is disabled");
+    }
+}
 
 // 返回去除首尾 ASCII 空白后的副本。
 std::string trimCopy(std::string value) {
@@ -96,6 +115,7 @@ ClientSessionCore::ClientSessionCore(
       mUsername(std::move(username)),
       mPassword(std::move(password)),
       mWsConfig(std::move(wsConfig)) {
+    requireWssServerUrl(mWsUrl);
     // Server 使用该不透明 token 注册和路由。
     // 用户输入的 room id 保留在本地，并作为 PKI 签名绑定对象。
     mRoomToken = chat::secure_relay::deriveRoomToken(mRoomId, mPassword);

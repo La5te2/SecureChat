@@ -35,7 +35,7 @@ ChatCallbacks consoleCallbacks() {
 }
 
 void printUsage() {
-    std::cerr << "Usage: client <ws-url> <room> <username> [--daemon]\n";
+    std::cerr << "Usage: client <wss-url> <room> <username> [--daemon]\n";
     std::cerr << "Password source: SECURECHAT_ROOM_PASSWORD, hidden prompt, or stdin.\n";
     std::cerr << "Commands: /image <path>, /file <path>, /voice <path>, /to <member-name> <text|attachment-command>, /quit\n";
     std::cerr << "Options:\n";

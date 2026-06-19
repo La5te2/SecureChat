@@ -2,8 +2,10 @@
 // 并转发加密中继和 group-key 封装。
 #include "signaling_server.hpp"
 
+#include "cert_generation.hpp"
 #include "secure_relay.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <iomanip>
@@ -13,7 +15,9 @@
 #include <openssl/evp.h>
 #include <sstream>
 #include <stdexcept>
+#include <string>
 #include <utility>
+#include <vector>
 
 namespace {
 constexpr std::size_t maxSignalingClients = 32;
@@ -36,11 +40,6 @@ constexpr const char* serverBuildMarker = "securechat-server-20260614-ws-frame-b
 std::string envValue(const char* name) {
     const char* value = std::getenv(name);
     return value == nullptr ? std::string() : std::string(value);
-}
-
-bool envEnabled(const char* name) {
-    const auto value = envValue(name);
-    return value == "1" || value == "true" || value == "TRUE" || value == "yes" || value == "on";
 }
 
 std::string sha256HexForLog(const std::string& value) {
@@ -301,9 +300,8 @@ void validateIncomingSignaling(const json& data) {
 SignalingServer::SignalingServer(uint16_t port) {
     rtc::WebSocketServer::Configuration config;
     config.port = port;
-    // 普通独立模式监听所有网卡。
-    // 反向代理 TLS 部署可设置 SECURECHAT_BIND_ADDRESS=127.0.0.1，
-    // 使只有 Nginx/Caddy 能访问明文后端 WebSocket。
+    // 独立模式监听所有网卡。反向代理部署可设置
+    // SECURECHAT_BIND_ADDRESS=127.0.0.1，使只有 Nginx/Caddy 能访问后端 WSS。
     const auto bindAddress = envValue("SECURECHAT_BIND_ADDRESS");
     config.bindAddress = bindAddress.empty() ? "0.0.0.0" : bindAddress;
     // 避免半开或被遗弃的 WebSocket 握手占住公网信令端口，
@@ -314,21 +312,15 @@ SignalingServer::SignalingServer(uint16_t port) {
     // 公网 WSS 场景尤其明显。
     config.maxMessageSize = chat::protocol::MaxSignalingMessageBytes;
 
-    if (envEnabled("SECURECHAT_SIGNALING_TLS")) {
-        const auto certFile = envValue("SECURECHAT_TLS_CERT_FILE");
-        const auto keyFile = envValue("SECURECHAT_TLS_KEY_FILE");
-        const auto keyPass = envValue("SECURECHAT_TLS_KEY_PASS");
-        if (certFile.empty() || keyFile.empty()) {
-            throw std::runtime_error("SECURECHAT_TLS_CERT_FILE and SECURECHAT_TLS_KEY_FILE are required when SECURECHAT_SIGNALING_TLS=1");
-        }
-        // WSS 保护传输中的房间密码和 relay 封装，
-        // 但不能替代应用层端到端加密。
-        config.enableTls = true;
-        config.certificatePemFile = certFile;
-        config.keyPemFile = keyFile;
-        if (!keyPass.empty()) config.keyPemPass = keyPass;
-        mUrlScheme = "wss";
-    }
+    const auto tlsMaterial = chat::certs::resolveServerTlsMaterial();
+    const auto keyPass = envValue("SECURECHAT_TLS_KEY_PASS");
+    // WSS 是唯一对外信令模式。环境变量存在时使用用户提供的正式证书；
+    // 环境变量为空时生成本地/局域网开发证书，避免 Windows 手动启动还要先准备证书。
+    config.enableTls = true;
+    config.certificatePemFile = tlsMaterial.certFile;
+    config.keyPemFile = tlsMaterial.keyFile;
+    if (!keyPass.empty()) config.keyPemPass = keyPass;
+    mUrlScheme = "wss";
 
     mServer = std::make_unique<rtc::WebSocketServer>(config);
     mServer->onClient([this](std::shared_ptr<rtc::WebSocket> ws) {
@@ -337,6 +329,16 @@ SignalingServer::SignalingServer(uint16_t port) {
 
     std::cout << "[signal] server running on " << mUrlScheme << "://"
               << *config.bindAddress << ":" << mServer->port() << std::endl;
+    if (tlsMaterial.generatedLocal) {
+        std::cout << "[signal] generated local WSS certificate cert=" << tlsMaterial.certFile
+                  << " key=" << tlsMaterial.keyFile
+                  << " ca=" << tlsMaterial.caFile << std::endl;
+    }
+    else if (tlsMaterial.reusedLocal) {
+        std::cout << "[signal] using local WSS certificate cert=" << tlsMaterial.certFile
+                  << " key=" << tlsMaterial.keyFile
+                  << " ca=" << tlsMaterial.caFile << std::endl;
+    }
     std::cout << "[signal] build marker: " << serverBuildMarker
               << " maxMessageSize=" << chat::protocol::MaxSignalingMessageBytes
               << std::endl;

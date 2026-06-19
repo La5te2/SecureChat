@@ -19,6 +19,7 @@ add_library(core STATIC
     src/attachment_transfer.cpp
     src/auth_service.cpp
     src/console_utils.cpp
+    src/cert_generation.cpp
     src/identity_pki.cpp
     src/host_session_core.cpp
     src/client_session_core.cpp

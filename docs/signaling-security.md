@@ -18,20 +18,15 @@
 
 创建/加入房间和成员状态不是聊天消息，但仍然敏感。Host/Client 会先把 roomId 和房间密码派生为 opaque room token，Server 用该 token 注册和路由房间；加密中继 envelope 的连接 id、大小和时序仍可能暴露通信模式。`encrypted_relay` envelope 是应用层密文，Server 只负责转发。
 
-## WS 模式
+## WSS 信令模式
 
-`ws://` 是基于 TCP 的明文 WebSocket。HTTP upgrade 握手以及之后的 WebSocket frame 都不会经过 TLS 加密。
+当前正式信令入口强制使用 `wss://`。`ws://` 明文 WebSocket 模式不再作为可运行入口保留；Host/Client/WinUI 会拒绝 `ws://` Server URL。
 
-风险：
+原因：
 
-- 能观察网络路径的人可以读取房间密码；
-- room token、username、成员状态和中继 metadata 可见；
-- 路径上的主动攻击者可以篡改信令流量；
-- 抓包可以直接看到 `type`、opaque `roomId` token、`username`、`password` token、`senderId`、`ciphertext` 等 JSON 字段。
-
-SecureChat 保留 WS 作为明确标注的 insecure mode。它运行更简单，不需要证书或域名，但信令流量是明文。真实公网部署如果要求信令保密，不应使用该模式。
-
-## WSS 模式
+- 明文 WebSocket 会暴露 HTTP upgrade、信令 JSON、room token、连接状态和中继 metadata；
+- 路径上的主动攻击者可以篡改未受 TLS 保护的信令；
+- 当前房间准入和成员身份已经依赖 PKI/GKA，继续保留明文信令只会增加误用入口。
 
 `wss://` 是运行在 TLS 之上的 WebSocket。TLS 会保护 HTTP upgrade 以及之后所有 WebSocket frame。在 SecureChat 中，WSS 通过 libdatachannel 原生的 `rtc::WebSocketServer::Configuration` 实现：
 
@@ -58,43 +53,33 @@ SecureChat 保留 WS 作为明确标注的 insecure mode。它运行更简单，
 ## Nginx TLS 反向代理
 
 ```text
-Host/Client -- WSS --> Nginx -- local WS --> SecureChat Server
+Host/Client -- WSS --> Nginx -- local WSS --> SecureChat Server
 ```
 
-Nginx 可以监听公网 `25566`，完成 TLS 终止和 WebSocket upgrade，再把流量转发到本机 `ws://127.0.0.1:25567`。Server 仍只负责房间注册、成员状态和不透明加密中继。反向代理只改变传输入口，不改变应用层 PKI、GKA 和加密中继的安全边界。
+Nginx 可以监听公网 `25566`，完成外部 TLS 和 WebSocket upgrade，再把流量转发到本机 `wss://127.0.0.1:25567`。Server 仍只负责房间注册、成员状态和不透明加密中继。反向代理只改变传输入口，不改变应用层 PKI、GKA 和加密中继的安全边界。
 
-## 为什么 WS 和 WSS 不在同一个端口
+## 证书配置
 
-明文 WS 和 WSS 使用不同握手。当前 C++ server 的单个监听端口只能是明文 WebSocket 或 TLS WebSocket。要同时保留两种模式，可以：
-
-- 在一个端口运行 WS insecure mode，例如 `25566`；
-- 在另一个端口运行 WSS secure mode，例如 `25567`；
-- 或停止当前模式后切换配置并重启 Server。
-
-## 部署变量
-
-WS mode 是默认值，便于保留本地和无证书环境的简单用法，但它已经明确标注为 insecure mode。
-
-启用 WSS mode：
-
-```bash
-export SECURECHAT_SIGNALING_TLS=1
-export SECURECHAT_TLS_CERT_FILE=certs/fullchain.pem
-export SECURECHAT_TLS_KEY_FILE=certs/privkey.pem
-./start_server.sh --mode wss
-```
-
-客户端随后使用：
+手动运行 `server` 时必须设置：
 
 ```text
-wss://chat.la5te2.online:25566
+export SECURECHAT_TLS_CERT_FILE=certs/fullchain.pem
+export SECURECHAT_TLS_KEY_FILE=certs/privkey.pem
 ```
 
-应使用与证书匹配的域名。像 `124.70.71.65` 这样的公网 IP 通常无法通过正常证书校验，除非证书明确覆盖该 IP。
+使用 `start_server.sh` 时，如果上述两个变量都没有设置，脚本会直接把它们设置为 `certs/fullchain.pem` 和 `certs/privkey.pem`。这组默认文件适合放 Certbot 签发的域名证书。手动运行 `server` 且 TLS 路径环境变量为空时，C++ Server 会在 `certs/` 自动生成本地/局域网开发证书，并输出生成的证书、私钥和 CA 路径；CLI Host/Client 使用该开发 CA 时需要设置 `SECURECHAT_LOCAL_TLS_CA=certs/local-root-ca.pem`，WinUI 可在设置面板的 `Local Server TLS CA / 本地服务器 TLS 信任根` 中选择同一个 CA 文件。
+
+客户端随后使用与证书 SAN 匹配的 URL：
+
+```text
+wss://chat.example.com:25566
+```
+
+应使用与证书匹配的域名、主机名或 IP。连接 `wss://127.0.0.1:25566`、`wss://localhost:25566` 或局域网 IP 时，Server 证书的 Subject Alternative Name 必须覆盖对应名称。
 
 ## 密码处理
 
-`start_server.sh` 不需要房间密码，默认把不可信 Server 作为 daemon 常驻。`start_host.sh` 和 `start_client.sh` 默认前台运行，由底层 CLI 隐藏提示房间密码；只有显式 `--daemon` 时，脚本才通过短生命周期本地管道传递房间密码，避免密码暴露在 argv 中，也避免子进程环境变量长期保留 `SECURECHAT_ROOM_PASSWORD`。`SECURECHAT_ROOM_PASSWORD` 仍可用于非交互自动化，但不是首选交互路径。
+`start_server.sh` 不需要房间密码，默认把不可信 Server 作为 daemon 常驻。Host/Client CLI 默认使用隐藏输入读取房间密码。`SECURECHAT_ROOM_PASSWORD` 仍可用于非交互自动化，但交互运行时不建议长期保存在 shell 环境中。
 
 GKA v3 不再要求成员手工配置共享 E2EE 口令。Client 加入时提交临时 X25519 public key；Host 在成员变化时发起 GKA epoch；当前成员提交签名随机 contribution；Host 汇总贡献集合后通过 `group_key`/group-state envelope 分别封装给当前成员。Client 解封装 group state、验证贡献签名后本地导出 room group key。Server 负责转发这些 envelope，群密钥生成和密钥协商状态由 Host/Client 本地维护。Host 维护 GKA watchdog；如果某个 Client 在 10 秒内没有提交当前 epoch 的有效 contribution，Host 会驱逐该成员、封当前房间内的证书指纹，并用剩余成员重新发起 epoch。
 
@@ -131,3 +116,4 @@ Server 可以断开连接、丢弃消息或伪造成员离线，这属于可用�
 - Client 检查递增 `group_key.epoch`，拒绝旧 group state 回滚；
 - Client 只把入房失败和 `host disconnected` 等明确终止事件作为 shutdown；非终止类中继错误只提示，不主动离开房间；
 - Server 仍能对已知成员伪造断线通知或直接断开连接，这会导致 Host 移除该成员并轮换 group key；这是可用性攻击，不能由应用层密码学完全阻止。
+

@@ -6,6 +6,7 @@
 #include "secure_relay.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstddef>
 #include <sstream>
@@ -20,6 +21,24 @@ namespace {
 namespace attachment = chat::attachment;
 
 constexpr auto GkaContributionTimeout = std::chrono::seconds(10);
+
+bool startsWithIgnoreCase(const std::string& value, const std::string& prefix) {
+    if (value.size() < prefix.size()) return false;
+    for (std::size_t i = 0; i < prefix.size(); ++i) {
+        const auto a = static_cast<unsigned char>(value[i]);
+        const auto b = static_cast<unsigned char>(prefix[i]);
+        if (std::tolower(a) != std::tolower(b)) return false;
+    }
+    return true;
+}
+
+void requireWssServerUrl(const std::string& url) {
+    // WSS 是唯一支持的对外信令入口。应用层 E2EE 仍保护消息内容，
+    // 但明文 WS 会暴露握手、信令 metadata 和流量形态，因此产品入口禁用。
+    if (!startsWithIgnoreCase(url, "wss://")) {
+        throw std::runtime_error("Server URL must start with wss://; ws:// signaling is disabled");
+    }
+}
 
 // 返回去除首尾 ASCII 空白后的副本。
 std::string trimCopy(std::string value) {
@@ -101,6 +120,7 @@ HostSessionCore::HostSessionCore(
       mUsername(std::move(username)),
       mPassword(std::move(password)),
       mWsConfig(std::move(wsConfig)) {
+    requireWssServerUrl(mWsUrl);
     // Server 只注册该不透明 token。没有房间密码时无法恢复房间名，
     // 同时本地 PKI 签名仍绑定 mRoomId。
     mRoomToken = chat::secure_relay::deriveRoomToken(mRoomId, mPassword);

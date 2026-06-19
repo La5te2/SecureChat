@@ -22,7 +22,6 @@ app/**/uploads/
 # Local Files
 todolist.md
 artifacts/
-docs/report/*
 dist/
 
 # Secret Certs

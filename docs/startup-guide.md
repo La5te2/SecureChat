@@ -1,32 +1,52 @@
 # SecureChat 启动手册
 
-本文档回答：在 Windows 和 Linux 上怎样启动 Server、Host、Client。
+本文档说明 Windows 和 Linux 上启动 Server、Host、Client 的最小流程。当前信令入口使用 WSS，也就是 WebSocket over TLS；Host、Client 和 WinUI 的 Server URL 都必须以 `wss://` 开头。
 
-## 角色说明
+## 共同前提
 
-- Server：监听端口、注册房间、转发密文，只配置监听和传输层相关参数。
-- Host：创建房间，是第一个群成员。Host 必须配置成员 PKI，启动后输入房间密码。
-- Client：加入房间，是普通群成员。Client 必须配置成员 PKI，启动后输入房间密码。
+同一个房间的 Host 和 Client 需要使用相同的：
 
-同一个房间的 Host 和 Client 必须使用相同的：
-
-- Server URL，例如 `ws://127.0.0.1:25566`；
+- Server URL，例如 `wss://127.0.0.1:25566` 或 `wss://chat.example.com:25566`；
 - Room，例如 `secure-room`；
 - Room password，在程序提示 `Room password:` 时输入；
-- PKI 信任根，也就是同一个 `root-ca.pem`。证书生成步骤见 `docs/pki-identity.md`，其中已经分别给出 Windows PowerShell 和 Linux Bash 命令，并使用 Intermediate CA 签发成员证书。
+- 成员 PKI 信任根，也就是同一个 `root-ca.pem`。
 
-## Windows：准备工作
+Server 只需要 TLS 证书和监听参数，不需要成员 PKI。Host 和 Client 必须配置成员 PKI，否则会启动失败。
+
+## Server TLS 证书选择
+
+C++ `server` 不写死证书路径。手动启动 Server 时可以设置：
+
+```bash
+SECURECHAT_TLS_CERT_FILE
+SECURECHAT_TLS_KEY_FILE
+```
+
+TLS 证书选择分为两种入口：
+
+1. 手动运行 `server` 或 `server.exe` 时，可以不设置 `SECURECHAT_TLS_CERT_FILE` 和 `SECURECHAT_TLS_KEY_FILE`。C++ Server 会自动生成本地/局域网开发证书。
+2. Linux `start_server.sh` 用于云端或长期部署。如果环境变量没设置，脚本会直接使用 `certs/fullchain.pem` 和 `certs/privkey.pem`。
+
+`certs/fullchain.pem` 和 `certs/privkey.pem` 适合放 Certbot 签发的正式域名证书。它们通常只适合证书覆盖的域名，例如 `wss://chat.example.com:25566`，不能直接用于 `wss://127.0.0.1:25566` 或局域网 IP。
+
+自动生成的开发证书会产生类似这些文件：
+
+```text
+certs/local-root-ca.pem
+certs/local-root-ca-key.pem
+certs/server-chain.pem
+certs/server-key.pem
+```
+
+CLI Host/Client 连接自动生成的开发证书时，需要设置 `SECURECHAT_LOCAL_TLS_CA=certs/local-root-ca.pem`。WinUI 连接自动生成的开发证书时，在设置面板的 `Local Server TLS CA / 本地服务器 TLS 信任根` 中选择 `local-root-ca.pem`。
+
+## Windows：构建
 
 在 PowerShell 进入项目根目录：
 
 ```powershell
 D:
 cd D:\Programming\CyberSecurity\Lessons\Experiment\SecureChat
-```
-
-构建 C++/WinUI：
-
-```powershell
 cmd /c build_win.bat
 ```
 
@@ -44,150 +64,91 @@ WinUI 可执行文件位置：
 app\chat\bin\x64\Release\net10.0-windows10.0.19041.0\win-x64\SecureChat.exe
 ```
 
-## Windows：配置 Host/Client PKI
+## Windows：启动 Server
 
-Server 不需要下面这些变量。每一个要运行 Host 或 Client 的 PowerShell 窗口都要设置：
-
-```powershell
-$env:SECURECHAT_PKI_TRUST_STORE="certs\pki\root-ca.pem"
-$env:SECURECHAT_IDENTITY_CERT_FILE="certs\pki\alice-chain.pem"
-$env:SECURECHAT_IDENTITY_KEY_FILE="certs\pki\alice-key.pem"
-```
-
-换另一个成员时，把 `alice-chain.pem` 和 `alice-key.pem` 换成该成员自己的证书和私钥，例如 `bob-chain.pem`、`bob-key.pem`。
-
-## Windows：本机 WS 测试
-
-本机测试不使用 TLS，URL 是 `ws://127.0.0.1:25566`。需要开三个 PowerShell 窗口。
-
-窗口 1：启动 Server。
+Windows 手动启动 Server 时，如果要做本机/局域网测试，保持 TLS 路径环境变量为空：
 
 ```powershell
+Remove-Item Env:SECURECHAT_TLS_CERT_FILE -ErrorAction SilentlyContinue
+Remove-Item Env:SECURECHAT_TLS_KEY_FILE -ErrorAction SilentlyContinue
 .\out\build\x64-release\server.exe 25566
 ```
 
-窗口 2：配置 Host 的 PKI，然后创建房间。
+Server 会自动生成 `certs/server-chain.pem`、`certs/server-key.pem` 和 `certs/local-root-ca.pem`。如果要使用正式域名证书，可以显式设置 `SECURECHAT_TLS_CERT_FILE` 和 `SECURECHAT_TLS_KEY_FILE`。
+
+## Windows：启动 Host
+
+新开一个 PowerShell 窗口，配置 Host 的成员 PKI：
 
 ```powershell
 $env:SECURECHAT_PKI_TRUST_STORE="certs\pki\root-ca.pem"
 $env:SECURECHAT_IDENTITY_CERT_FILE="certs\pki\alice-chain.pem"
 $env:SECURECHAT_IDENTITY_KEY_FILE="certs\pki\alice-key.pem"
+```
 
-.\out\build\x64-release\host.exe --server ws://127.0.0.1:25566 secure-room alice
+如果 Server 使用私有 CA 或自动生成的开发 TLS 证书，CLI 还需要信任对应 Server CA：
+
+```powershell
+$env:SECURECHAT_LOCAL_TLS_CA="certs\local-root-ca.pem"
+```
+
+创建房间：
+
+```powershell
+.\out\build\x64-release\host.exe --server wss://127.0.0.1:25566 secure-room alice
 ```
 
 看到 `Room password:` 后输入房间密码。输入时不会显示字符。
 
-窗口 3：配置 Client 的 PKI，然后加入同一个房间。
+## Windows：启动 Client
+
+新开一个 PowerShell 窗口，配置 Client 的成员 PKI：
 
 ```powershell
 $env:SECURECHAT_PKI_TRUST_STORE="certs\pki\root-ca.pem"
 $env:SECURECHAT_IDENTITY_CERT_FILE="certs\pki\bob-chain.pem"
 $env:SECURECHAT_IDENTITY_KEY_FILE="certs\pki\bob-key.pem"
+```
 
-.\out\build\x64-release\client.exe ws://127.0.0.1:25566 secure-room bob
+如果 Server 使用私有 CA 或自动生成的开发 TLS 证书，同样设置：
+
+```powershell
+$env:SECURECHAT_LOCAL_TLS_CA="certs\local-root-ca.pem"
+```
+
+加入房间：
+
+```powershell
+.\out\build\x64-release\client.exe wss://127.0.0.1:25566 secure-room bob
 ```
 
 看到 `Room password:` 后输入和 Host 相同的房间密码。
 
-## Windows：局域网 WS 测试
-
-Server 所在机器启动：
-
-```powershell
-out\build\x64-release\server.exe 25566
-```
-
-其他电脑连接时，把 `127.0.0.1` 改成 Server 电脑的局域网 IP。例如 Server 电脑 IP 是 `192.168.1.20`：
-
-```powershell
-out\build\x64-release\host.exe --server ws://192.168.1.20:25566 secure-room alice
-out\build\x64-release\client.exe ws://192.168.1.20:25566 secure-room bob
-```
-
-Windows 防火墙需要允许 Server 机器入站 TCP `25566`。
-
-## Windows：WSS 测试
-
-WSS 需要服务器 TLS 证书：
-
-```text
-certs\fullchain.pem
-certs\privkey.pem
-```
-
-Server 窗口：
-
-```powershell
-$env:SECURECHAT_SIGNALING_TLS="1"
-$env:SECURECHAT_TLS_CERT_FILE="certs\fullchain.pem"
-$env:SECURECHAT_TLS_KEY_FILE="certs\privkey.pem"
-out\build\x64-release\server.exe 25566
-```
-
-Host/Client 连接时使用 `wss://`：
-
-```powershell
-out\build\x64-release\host.exe --server wss://chat.la5te2.online:25566 secure-room alice
-out\build\x64-release\client.exe wss://chat.la5te2.online:25566 secure-room bob
-```
-
-证书通常签给域名，所以 WSS 推荐用 `chat.la5te2.online`，不要用公网 IP 直接连。
-
 ## Windows：WinUI
 
-WinUI 是桌面客户端，普通用户直接双击运行即可。可执行文件位置：
+WinUI 不启动 Server，也不配置 Server 私钥。使用 WinUI 前，需要先启动一个正在监听的 WSS Server。
+
+双击运行：
 
 ```text
 app\chat\bin\x64\Release\net10.0-windows10.0.19041.0\win-x64\SecureChat.exe
 ```
 
-WinUI 不启动 Server。使用 WinUI 前，必须先有一个正在监听的 Server，例如在 PowerShell 中启动本机 Server：
+第一次使用时，点击设置面板，选择当前成员的应用层 PKI 文件：
 
-```powershell
-out\build\x64-release\server.exe 25566
-```
+- Trust store / 信任根：`root-ca.pem`；
+- Identity cert chain / 成员证书链：例如 `alice-chain.pem` 或 `bob-chain.pem`；
+- Identity private key / 成员私钥：例如 `alice-key.pem` 或 `bob-key.pem`；
+- Identity key passphrase / 成员私钥口令：只有私钥加密时填写，且不会保存到配置文件。
 
-第一次使用 WinUI 时，先点右侧齿轮进入设置面板，在“成员 PKI”区域选择当前成员的身份文件：
+WinUI 的 Server URL 必须填写 `wss://...`。如果 Server 使用 Certbot 等系统信任 CA 签发的证书，WinUI 不需要额外配置 Server CA。如果 Server 使用自动生成的开发证书，在设置面板的 `Local Server TLS CA / 本地服务器 TLS 信任根` 中选择 `certs/local-root-ca.pem`。
 
-- Trust store / 信任根：选择 `root-ca.pem`；
-- Identity cert chain / 成员证书链：Host 选择 `alice-chain.pem`，Client 选择 `bob-chain.pem`；
-- Identity private key / 成员私钥：Host 选择 `alice-key.pem`，Client 选择 `bob-key.pem`；
-- Identity key passphrase / 成员私钥口令：如果私钥加密，启动本次会话前填写；这个口令不会保存到配置文件。
+Host 页填写 Room、User、Server URL、Password 后点击 Host/Create。Join 页填写同一个 Room、当前 User、同一个 Server URL、同一个 Password 后点击 Join。
 
-这些路径会保存到 WinUI 同目录的 `config.yml`。Host 和 Join 启动前，WinUI 会把这些设置写入当前进程的 `SECURECHAT_PKI_TRUST_STORE`、`SECURECHAT_IDENTITY_CERT_FILE` 和 `SECURECHAT_IDENTITY_KEY_FILE`，因此不需要为了普通双击启动而提前打开 PowerShell 设置临时环境变量。
-
-WinUI 不配置 Server 端 TLS 证书。是否使用 TLS 由 Server URL 决定：本地可填 `ws://127.0.0.1:25566`，公网 TLS 入口填 `wss://chat.la5te2.online:25566`。如果入口证书是系统已信任 CA 签发，WinUI 不需要额外证书设置；自签证书场景建议先把 CA 导入操作系统信任存储。
-
-Host 页：
-
-- Room：填写房间名，例如 `secure-room`；
-- User：填写用户名，例如 `alice`；
-- Server URL：填写 `ws://127.0.0.1:25566` 或 `wss://chat.la5te2.online:25566`；
-- Password：填写房间密码；
-- 点击 Host/Create。
-
-Join 页：
-
-- Room：填写 Host 创建的同一个房间名；
-- User：填写当前成员名，例如 `bob`；
-- Server URL：填写同一个 Server URL；
-- Password：填写同一个房间密码；
-- 点击 Join。
-
-如果要在同一台 Windows 机器上测试两个 WinUI 成员，可以复制一份 WinUI 输出目录，或者分别在两份运行目录的设置面板里选择不同的成员证书和私钥。单个 WinUI 进程一次只代表一个成员身份。
-
-## Linux：准备工作
-
-进入项目根目录：
+## Linux：构建
 
 ```bash
 cd ~/SecureChat
-```
-
-构建：
-
-```bash
 export VCPKG_ROOT="$HOME/vcpkg"
 chmod +x build.sh
 ./build.sh
@@ -201,155 +162,152 @@ out/build/x64-linux-release/host
 out/build/x64-linux-release/client
 ```
 
-## Linux：配置 Host/Client PKI
+## Linux：启动 Server
 
-Server 不需要下面这些变量。每一个要运行 Host 或 Client 的终端都要设置：
-
-```bash
-export SECURECHAT_PKI_TRUST_STORE=certs/pki/root-ca.pem
-export SECURECHAT_IDENTITY_CERT_FILE=certs/pki/alice-chain.pem
-export SECURECHAT_IDENTITY_KEY_FILE=certs/pki/alice-key.pem
-```
-
-换另一个成员时，把证书和私钥换成该成员自己的文件。
-
-## Linux：本机 WS 测试
-
-需要开三个终端。
-
-终端 1：启动 Server。
+本机/局域网测试推荐直接运行 Server 可执行文件，并保持 TLS 路径环境变量为空：
 
 ```bash
 cd ~/SecureChat
+unset SECURECHAT_TLS_CERT_FILE SECURECHAT_TLS_KEY_FILE
 ./out/build/x64-linux-release/server 25566
 ```
 
-终端 2：配置 Host 的 PKI，然后创建房间。
+Server 会自动生成本地/局域网开发证书，并输出类似：
 
-```bash
-cd ~/SecureChat
-export SECURECHAT_PKI_TRUST_STORE=certs/pki/root-ca.pem
-export SECURECHAT_IDENTITY_CERT_FILE=certs/pki/alice-chain.pem
-export SECURECHAT_IDENTITY_KEY_FILE=certs/pki/alice-key.pem
-
-./out/build/x64-linux-release/host --server ws://127.0.0.1:25566 secure-room alice
+```text
+generated local WSS certificate:
+  cert: certs/server-chain.pem
+  key:  certs/server-key.pem
+  CA:   certs/local-root-ca.pem
 ```
 
-看到 `Room password:` 后输入房间密码。
-
-终端 3：配置 Client 的 PKI，然后加入同一个房间。
-
-```bash
-cd ~/SecureChat
-export SECURECHAT_PKI_TRUST_STORE=certs/pki/root-ca.pem
-export SECURECHAT_IDENTITY_CERT_FILE=certs/pki/bob-chain.pem
-export SECURECHAT_IDENTITY_KEY_FILE=certs/pki/bob-key.pem
-
-./out/build/x64-linux-release/client ws://127.0.0.1:25566 secure-room bob
-```
-
-看到 `Room password:` 后输入和 Host 相同的房间密码。
-
-## Linux：脚本启动
-
-脚本会使用环境变量里的默认房间名和用户名。
-
-Server 默认后台运行：
+云端或长期部署推荐使用脚本启动：
 
 ```bash
 cd ~/SecureChat
 chmod +x start_server.sh stop_server.sh
-./start_server.sh --mode ws
+./start_server.sh
 ```
 
-Host 默认前台运行：
+脚本会把空的 TLS 路径环境变量设置为 `certs/fullchain.pem` 和 `certs/privkey.pem`。云服务器上可以把 Certbot 证书复制或软链接到这两个路径。
 
-```bash
-cd ~/SecureChat
-export SECURECHAT_ROOM=secure-room
-export SECURECHAT_USER=alice
-export SECURECHAT_PKI_TRUST_STORE=certs/pki/root-ca.pem
-export SECURECHAT_IDENTITY_CERT_FILE=certs/pki/alice-chain.pem
-export SECURECHAT_IDENTITY_KEY_FILE=certs/pki/alice-key.pem
-
-./start_host.sh --server ws://127.0.0.1:25566
-```
-
-Client 默认前台运行：
-
-```bash
-cd ~/SecureChat
-export SECURECHAT_ROOM=secure-room
-export SECURECHAT_USER=bob
-export SECURECHAT_PKI_TRUST_STORE=certs/pki/root-ca.pem
-export SECURECHAT_IDENTITY_CERT_FILE=certs/pki/bob-chain.pem
-export SECURECHAT_IDENTITY_KEY_FILE=certs/pki/bob-key.pem
-
-./start_client.sh --server ws://127.0.0.1:25566
-```
-
-停止脚本启动的进程：
+停止脚本启动的 Server：
 
 ```bash
 ./stop_server.sh
-./stop_host.sh
-./stop_client.sh
 ```
 
-## Linux：WSS
+## Linux：启动 Host
 
-Server 使用 WSS：
+新开终端，配置 Host 的成员 PKI：
 
 ```bash
 cd ~/SecureChat
-export SECURECHAT_TLS_CERT_FILE=certs/fullchain.pem
-export SECURECHAT_TLS_KEY_FILE=certs/privkey.pem
-./start_server.sh --mode wss
+export SECURECHAT_PKI_TRUST_STORE=certs/pki/root-ca.pem
+export SECURECHAT_IDENTITY_CERT_FILE=certs/pki/alice-chain.pem
+export SECURECHAT_IDENTITY_KEY_FILE=certs/pki/alice-key.pem
 ```
 
-Host/Client 连接：
+如果 Server 使用自动生成的开发证书，设置：
 
 ```bash
-./start_host.sh --server wss://chat.la5te2.online:25566
-./start_client.sh --server wss://chat.la5te2.online:25566
+export SECURECHAT_LOCAL_TLS_CA=certs/local-root-ca.pem
 ```
 
-如果证书是自签名或私有 CA 签发，Host/Client 还要设置：
+创建房间：
 
 ```bash
-export SECURECHAT_TLS_CA_FILE=certs/pki/root-ca.pem
+./out/build/x64-linux-release/host --server wss://127.0.0.1:25566 secure-room alice
 ```
+
+看到 `Room password:` 后输入房间密码。
+
+## Linux：启动 Client
+
+新开终端，配置 Client 的成员 PKI：
+
+```bash
+cd ~/SecureChat
+export SECURECHAT_PKI_TRUST_STORE=certs/pki/root-ca.pem
+export SECURECHAT_IDENTITY_CERT_FILE=certs/pki/bob-chain.pem
+export SECURECHAT_IDENTITY_KEY_FILE=certs/pki/bob-key.pem
+```
+
+如果 Server 使用自动生成的开发证书，设置：
+
+```bash
+export SECURECHAT_LOCAL_TLS_CA=certs/local-root-ca.pem
+```
+
+加入房间：
+
+```bash
+./out/build/x64-linux-release/client wss://127.0.0.1:25566 secure-room bob
+```
+
+看到 `Room password:` 后输入和 Host 相同的房间密码。
+
+## Linux：局域网
+
+Server 机器运行：
+
+```bash
+unset SECURECHAT_TLS_CERT_FILE SECURECHAT_TLS_KEY_FILE
+./out/build/x64-linux-release/server 25566
+```
+
+自动生成开发证书时，Server 会把当前主机名、`localhost`、`127.0.0.1` 和探测到的局域网 IP 写入证书的 Subject Alternative Name。自动生成路径只用于本机和局域网测试，不生成公网域名证书；公网域名证书应使用 Certbot 等外部工具获取，并通过 `SECURECHAT_TLS_CERT_FILE` 和 `SECURECHAT_TLS_KEY_FILE` 显式传入。
+
+其他机器连接时使用证书覆盖的名称或 IP，并把 `certs/local-root-ca.pem` 通过可信渠道复制到客户端机器。CLI 设置 `SECURECHAT_LOCAL_TLS_CA`，WinUI 在设置面板选择该 CA 文件。
 
 ## Linux：Nginx TLS 反向代理
 
-Nginx 对外提供普通 `wss://` TLS 入口，SecureChat Server 只做本机 backend。
+公网可使用 Nginx 监听 WSS 入口，SecureChat Server 只监听本机 backend。
 
 拓扑：
 
 ```text
-Host/Client -- wss --> Nginx:25566 -- ws --> SecureChat Server 127.0.0.1:25567
+Host/Client -- wss --> Nginx:25566 -- wss --> SecureChat Server 127.0.0.1:25567
 ```
 
 安装 Nginx：
 
 ```bash
 sudo apt update
-sudo apt install -y nginx openssl
-sudo nginx -v
+sudo apt install -y nginx openssl certbot python3-certbot-nginx
 ```
 
-创建 Nginx 配置 `/etc/nginx/conf.d/securechat-tls.conf`：
+申请域名证书：
+
+```bash
+sudo certbot certonly --nginx -d chat.example.com
+```
+
+启动本机 backend：
+
+```bash
+cd /opt/SecureChat
+export SECURECHAT_BIND_ADDRESS=127.0.0.1
+export SECURECHAT_PORT=25567
+export SECURECHAT_SERVER_PID_FILE=server-backend.pid
+export SECURECHAT_SERVER_LOG_FILE=server-backend.log
+./start_server.sh
+```
+
+Nginx 配置示例：
 
 ```nginx
 server {
     listen 25566 ssl;
-    server_name chat.la5te2.online;
+    server_name chat.example.com;
 
-    ssl_certificate     /etc/letsencrypt/live/chat.la5te2.online/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/chat.la5te2.online/privkey.pem;
+    ssl_certificate     /etc/letsencrypt/live/chat.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/chat.example.com/privkey.pem;
 
     location / {
-        proxy_pass http://127.0.0.1:25567;
+        proxy_pass https://127.0.0.1:25567;
+        proxy_ssl_verify off;
+
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
@@ -361,38 +319,18 @@ server {
 }
 ```
 
-检查并加载 Nginx 配置：
+检查并加载配置：
 
 ```bash
 sudo nginx -t
 sudo nginx -s reload
 ```
 
-启动 SecureChat backend。注意这里是 `ws`，因为它只监听本机 `127.0.0.1:25567`，外部 TLS 已由 Nginx 处理：
+Host/Client 连接 Nginx 入口：
 
 ```bash
-sudo -u securechat -H bash -lc 'cd /opt/SecureChat && \
-  SECURECHAT_BIND_ADDRESS=127.0.0.1 \
-  SECURECHAT_PORT=25567 \
-  SECURECHAT_SERVER_PID_FILE=server-backend.pid \
-  ./start_server.sh --mode ws'
-```
-
-Host/Client 直接连接 Nginx 的 `wss://` 入口，仍然只需要应用层成员 PKI：
-
-```bash
-./start_host.sh --server wss://chat.la5te2.online:25566
-```
-
-Client 同理，使用自己的成员 PKI 后连接同一个 `wss://` URL。
-
-停止 backend：
-
-```bash
-sudo -u securechat -H bash -lc 'cd /opt/SecureChat && \
-  SECURECHAT_PORT=25567 \
-  SECURECHAT_SERVER_PID_FILE=server-backend.pid \
-  ./stop_server.sh'
+./out/build/x64-linux-release/host --server wss://chat.example.com:25566 secure-room alice
+./out/build/x64-linux-release/client wss://chat.example.com:25566 secure-room bob
 ```
 
 ## 常用聊天命令
@@ -402,7 +340,7 @@ sudo -u securechat -H bash -lc 'cd /opt/SecureChat && \
 私发文本：
 
 ```text
-/to <成员名或成员id> <消息>
+/to <成员名> <消息>
 ```
 
 发送附件：
@@ -416,16 +354,17 @@ sudo -u securechat -H bash -lc 'cd /opt/SecureChat && \
 私发附件：
 
 ```text
-/to <成员名或成员id> /image <path>
-/to <成员名或成员id> /voice <path>
-/to <成员名或成员id> /file <path>
+/to <成员名> /image <path>
+/to <成员名> /voice <path>
+/to <成员名> /file <path>
 ```
 
 Host 管理命令：
 
 ```text
-/silence <成员名或成员id>
-/unsilence <成员名或成员id>
-/evict <成员名或成员id>
-/ban <成员名或成员id>
+/silence <成员名>
+/unsilence <成员名>
+/evict <成员名>
+/ban <成员名>
 ```
+

@@ -45,7 +45,7 @@ rg -n "PeerConnection|DataChannel|offer|answer|ice|ICE|STUN|TURN|legacy|compat|S
 仓库已提供：
 
 - `SECURECHAT_BIND_ADDRESS`；
-- `SECURECHAT_TLS_CA_FILE`。
+- `SECURECHAT_LOCAL_TLS_CA`。
 
 ## 手动实验 1：WS 明文信令抓包
 
@@ -230,7 +230,7 @@ SecureChat Host/Client 连接 TLS 入口：
 ./start_client.sh --server wss://chat.la5te2.online:25566
 ```
 
-如果入口服务器证书由私有 CA 或自签名证书签发，再设置 `SECURECHAT_TLS_CA_FILE=certs/pki/root-ca.pem`。
+如果入口服务器证书由本地自动生成的 CA 签发，再设置 `SECURECHAT_LOCAL_TLS_CA=certs/local-root-ca.pem`。
 
 截图建议：
 
@@ -422,3 +422,4 @@ watch -n 1 "ss -ant state syn-recv | wc -l"
 5. 实际现象；
 6. 安全结论；
 7. 剩余风险。
+

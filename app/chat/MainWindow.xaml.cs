@@ -193,12 +193,18 @@ public sealed partial class MainWindow : Window
         });
     }
 
+    private static bool IsWssServerUrl(string value)
+    {
+        return Uri.TryCreate(value, UriKind.Absolute, out var uri) &&
+            uri.Scheme.Equals("wss", StringComparison.OrdinalIgnoreCase);
+    }
+
     private void Host_Click(object sender, RoutedEventArgs e)
     {
         var serverUrl = HostServerUrlBox.Text.Trim();
-        if (serverUrl.Length == 0)
+        if (!IsWssServerUrl(serverUrl))
         {
-            AddLine("error", "Server URL is required.");
+            AddLine("error", "Server URL must start with wss://.");
             return;
         }
 
@@ -225,6 +231,13 @@ public sealed partial class MainWindow : Window
 
     private void Join_Click(object sender, RoutedEventArgs e)
     {
+        var serverUrl = JoinUrlBox.Text.Trim();
+        if (!IsWssServerUrl(serverUrl))
+        {
+            AddLine("error", "Server URL must start with wss://.");
+            return;
+        }
+
         if (!ApplySessionEnvironment())
         {
             return;
@@ -234,7 +247,7 @@ public sealed partial class MainWindow : Window
         // Join 和 Host 都调用 native.dll。C# 只负责收集 UI 输入，
         // PKI、GKA、WebSocket 和 encrypted relay 都在 C++ core 中执行。
         var ok = NativeMethods.chat_join_start(
-            JoinUrlBox.Text.Trim(),
+            serverUrl,
             JoinRoomBox.Text.Trim(),
             JoinUserBox.Text.Trim(),
             JoinPasswordBox.Password);
@@ -1658,6 +1671,11 @@ public sealed partial class MainWindow : Window
         await PickPkiFileIntoAsync(PkiIdentityKeyBox);
     }
 
+    private async void BrowseLocalServerTlsCa_Click(object sender, RoutedEventArgs e)
+    {
+        await PickPkiFileIntoAsync(LocalServerTlsCaBox);
+    }
+
     private async System.Threading.Tasks.Task PickPkiFileIntoAsync(TextBox target)
     {
         var picker = new FileOpenPicker();
@@ -1676,7 +1694,14 @@ public sealed partial class MainWindow : Window
 
     private bool ApplySessionEnvironment()
     {
-        return ApplyMemberPkiEnvironment();
+        return ApplyServerTlsEnvironment() && ApplyMemberPkiEnvironment();
+    }
+
+    private bool ApplyServerTlsEnvironment()
+    {
+        // SECURECHAT_LOCAL_TLS_CA 只影响本地/局域网 WSS 服务器证书验证。
+        // 该项是可选项：公网证书通常由系统信任 CA 签发，本地/局域网自签证书才需要填写。
+        return SetProcessEnvironmentFromBox("SECURECHAT_LOCAL_TLS_CA", LocalServerTlsCaBox);
     }
 
     private bool ApplyMemberPkiEnvironment()
@@ -2135,6 +2160,9 @@ public sealed partial class MainWindow : Window
             BrowsePkiTrustStoreButton.Content = UiText("Browse", "选择");
             BrowsePkiIdentityCertButton.Content = UiText("Browse", "选择");
             BrowsePkiIdentityKeyButton.Content = UiText("Browse", "选择");
+            ServerTlsHeaderText.Text = UiText("Server TLS", "服务器 TLS");
+            LocalServerTlsCaBox.Header = UiText("Local Server TLS CA", "本地服务器 TLS 信任根");
+            BrowseLocalServerTlsCaButton.Content = UiText("Browse", "选择");
             ChatBackgroundHeaderText.Text = UiText("Chat Background", "聊天背景");
             ImportChatBackgroundButton.Content = UiText("Import Image", "导入图片");
             ClearChatBackgroundButton.Content = UiText("Clear Image", "清除图片");
@@ -2253,6 +2281,7 @@ public sealed partial class MainWindow : Window
             AppendYaml(builder, "pki_trust_store", PkiTrustStoreBox.Text.Trim());
             AppendYaml(builder, "pki_identity_cert", PkiIdentityCertBox.Text.Trim());
             AppendYaml(builder, "pki_identity_key", PkiIdentityKeyBox.Text.Trim());
+            AppendYaml(builder, "local_server_tls_ca", LocalServerTlsCaBox.Text.Trim());
             AppendYaml(builder, "chat_background_path", chatBackgroundPath ?? "");
             AppendYaml(builder, "chat_background_opacity", NumberString(BackgroundOpacitySlider.Value));
             AppendYaml(builder, "chat_background_crop_x", ComboTag(BackgroundHorizontalComboBox));
@@ -2301,6 +2330,7 @@ public sealed partial class MainWindow : Window
             PkiTrustStoreBox.Text = Value(chatValues, "pki_trust_store", "");
             PkiIdentityCertBox.Text = Value(chatValues, "pki_identity_cert", "");
             PkiIdentityKeyBox.Text = Value(chatValues, "pki_identity_key", "");
+            LocalServerTlsCaBox.Text = Value(chatValues, "local_server_tls_ca", "");
             SetSlider(BackgroundOpacitySlider, Value(chatValues, "chat_background_opacity", "0.28"));
             SetComboByTag(BackgroundHorizontalComboBox, Value(chatValues, "chat_background_crop_x", "Center"));
             SetComboByTag(BackgroundVerticalComboBox, Value(chatValues, "chat_background_crop_y", "Center"));

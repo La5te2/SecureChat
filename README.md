@@ -30,11 +30,11 @@ SecureChat 分为三个运行角色。
 
 SecureChat 有两层保护。
 
-第一层是传输层。`wss://` 使用 TLS 保护 Host/Client 到 Server 或反向代理之间的连接。`ws://` 不提供传输层加密，适合本机或受控局域网场景。
+第一层是传输层。`wss://` 使用 TLS 保护 Host/Client 到 Server 或反向代理之间的连接。当前正式入口强制使用 WSS，不再提供 `ws://` 明文信令模式。
 
 第二层是应用层。文本、附件元数据和附件分片在发送端加密，在接收端解密。Server 只转发 ciphertext、nonce、tag 等 envelope 字段，不能读取聊天明文或附件明文。
 
-因此，公网部署建议使用 `wss://`。即使使用 `ws://`，聊天内容和附件内容仍受应用层 AES-256-GCM 保护，但信令字段、连接时序、密文长度和房间路由信息会更容易被网络路径观察到。
+因此，Host/Client/WinUI 的 Server URL 必须以 `wss://` 开头。手动运行 `server` 且未配置 TLS 路径时，C++ Server 会自动生成本地/局域网开发证书；使用 `start_server.sh` 时，脚本会在未配置证书时使用 `certs/fullchain.pem` 和 `certs/privkey.pem`。
 
 ### 成员 PKI
 
@@ -222,38 +222,44 @@ out/build/x64-linux-release/libnative.so
 
 ## 运行
 
-### 本机 WS
+### 本机 WSS
 
 打开三个终端，先启动 Server，再启动 Host，最后启动 Client。
 
 Windows：
 
 ```powershell
+Remove-Item Env:SECURECHAT_TLS_CERT_FILE -ErrorAction SilentlyContinue
+Remove-Item Env:SECURECHAT_TLS_KEY_FILE -ErrorAction SilentlyContinue
 .\out\build\x64-release\server.exe 25566
-.\out\build\x64-release\host.exe --server ws://127.0.0.1:25566 secure-room alice
-.\out\build\x64-release\client.exe ws://127.0.0.1:25566 secure-room bob
+$env:SECURECHAT_LOCAL_TLS_CA="certs\local-root-ca.pem"
+.\out\build\x64-release\host.exe --server wss://127.0.0.1:25566 secure-room alice
+.\out\build\x64-release\client.exe wss://127.0.0.1:25566 secure-room bob
 ```
 
 Linux：
 
 ```bash
+unset SECURECHAT_TLS_CERT_FILE SECURECHAT_TLS_KEY_FILE
 ./out/build/x64-linux-release/server 25566
-./out/build/x64-linux-release/host --server ws://127.0.0.1:25566 secure-room alice
-./out/build/x64-linux-release/client ws://127.0.0.1:25566 secure-room bob
+export SECURECHAT_LOCAL_TLS_CA=certs/local-root-ca.pem
+./out/build/x64-linux-release/host --server wss://127.0.0.1:25566 secure-room alice
+./out/build/x64-linux-release/client wss://127.0.0.1:25566 secure-room bob
 ```
 
 Host/Client 启动前需要配置成员 PKI 环境变量。WinUI 可以直接双击启动，并在设置面板中选择 trust store、成员证书链和成员私钥。
 
 ### 直接 WSS
 
-Server 直接启用 TLS 时需要配置服务器证书和私钥：
+Server 始终启用 TLS。使用正式域名证书手动运行 `server` 时显式设置：
 
 ```bash
-export SECURECHAT_SIGNALING_TLS=1
 export SECURECHAT_TLS_CERT_FILE=/path/to/fullchain.pem
 export SECURECHAT_TLS_KEY_FILE=/path/to/privkey.pem
 ./out/build/x64-linux-release/server 25566
 ```
+
+使用 Linux 启动脚本时，如果没有设置上述两个变量，脚本会直接把它们设置为 `certs/fullchain.pem` 和 `certs/privkey.pem`。这两个文件适合保存 Certbot 签发的域名证书，例如云端 `chat.example.com` 入口证书。本机/局域网测试应直接运行 `server` 可执行文件并保持 TLS 路径环境变量为空，让 C++ Server 自动生成 `certs/server-chain.pem`、`certs/server-key.pem` 和 `certs/local-root-ca.pem`。
 
 Host/Client 连接：
 
@@ -262,14 +268,14 @@ Host/Client 连接：
 ./out/build/x64-linux-release/client wss://chat.example.com:25566 secure-room bob
 ```
 
-如果服务器证书由系统信任 CA 签发，Host/Client 不需要额外配置服务器 CA。自签名或私有 CA 场景下，CLI 可通过 `SECURECHAT_TLS_CA_FILE` 指定服务器 CA；WinUI 建议使用系统信任的服务器证书。
+如果服务器证书由系统信任 CA 签发，Host/Client/WinUI 不需要额外配置服务器 CA。本地或局域网自签 CA 场景下，CLI 可通过 `SECURECHAT_LOCAL_TLS_CA` 指定 `certs/local-root-ca.pem`；WinUI 可在设置面板的 `Local Server TLS CA / 本地服务器 TLS 信任根` 中选择同一个文件。
 
 ### Nginx TLS 反向代理
 
-也可以让 Nginx 监听公网 TLS 入口，SecureChat Server 只监听本机 WebSocket backend：
+也可以让 Nginx 监听公网 TLS 入口，SecureChat Server 只监听本机 WSS backend：
 
 ```text
-Host/Client -- WSS --> Nginx :25566 -- local WS --> SecureChat Server 127.0.0.1:25567
+Host/Client -- WSS --> Nginx :25566 -- local WSS --> SecureChat Server 127.0.0.1:25567
 ```
 
 后端 Server：
@@ -277,6 +283,8 @@ Host/Client -- WSS --> Nginx :25566 -- local WS --> SecureChat Server 127.0.0.1:
 ```bash
 export SECURECHAT_BIND_ADDRESS=127.0.0.1
 export SECURECHAT_PORT=25567
+export SECURECHAT_TLS_CERT_FILE=/path/to/backend-fullchain.pem
+export SECURECHAT_TLS_KEY_FILE=/path/to/backend-privkey.pem
 ./out/build/x64-linux-release/server 25567
 ```
 
@@ -291,7 +299,9 @@ server {
     ssl_certificate_key /etc/letsencrypt/live/chat.example.com/privkey.pem;
 
     location / {
-        proxy_pass http://127.0.0.1:25567;
+        proxy_pass https://127.0.0.1:25567;
+        proxy_ssl_verify off;
+
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
@@ -413,18 +423,17 @@ WinUI 对附件预览采用当前房间内的本机 UI 策略。成员默认 All
 | `SECURECHAT_IDENTITY_CERT_FILE` | Host/Client 成员证书链 |
 | `SECURECHAT_IDENTITY_KEY_FILE` | Host/Client 成员私钥 |
 | `SECURECHAT_IDENTITY_KEY_PASS` | 成员私钥密码 |
-| `SECURECHAT_SIGNALING_TLS` | Server 直接启用 WSS |
-| `SECURECHAT_TLS_CERT_FILE` | Server TLS 证书链 |
-| `SECURECHAT_TLS_KEY_FILE` | Server TLS 私钥 |
+| `SECURECHAT_TLS_CERT_FILE` | Server TLS 证书链；手动运行 Server 时可留空以生成本地证书 |
+| `SECURECHAT_TLS_KEY_FILE` | Server TLS 私钥；手动运行 Server 时可留空以生成本地私钥 |
 | `SECURECHAT_TLS_KEY_PASS` | Server TLS 私钥密码 |
-| `SECURECHAT_TLS_CA_FILE` | CLI 连接自签名或私有 CA WSS 时使用的服务器 CA |
+| `SECURECHAT_LOCAL_TLS_CA` | Host/Client/WinUI 连接本地或局域网自签 WSS 时使用的服务器 CA |
+| `SECURECHAT_TLS_AUTO_DIR` | 手动运行 Server 时自动生成本地/局域网 TLS 材料的目录 |
 | `SECURECHAT_BIND_ADDRESS` | Server 监听地址 |
 | `SECURECHAT_PORT` | Server 默认端口 |
 | `SECURECHAT_ROOM_PASSWORD` | CLI Host/Client 的房间密码 |
 | `SECURECHAT_ATTACHMENT_MAX_BYTES` | 附件发送大小上限 |
 | `SECURECHAT_LOGS_MAX_BYTES` | 本地附件缓存上限 |
 | `SECURECHAT_SERVER_LOG_FILE` | Server 日志文件 |
-| `SECURECHAT_LOG_FILE` | Host/Client 日志文件 |
 | `SECURECHAT_ALLOW_ROOT` | Linux 上允许 root 临时运行 Server |
 
 完整环境变量见 `docs/environment-variables.md`。
@@ -458,10 +467,11 @@ export SECURECHAT_SERVER_LOG_FILE=server.log
 
 排障完成后建议删除日志。日志可能包含 room token、连接状态和脱敏后的成员标识。
 
-### ws 和 wss 不能混用
+### 只能使用 wss
 
-同一端口只能运行一种模式。Server 以 `ws://` 启动时，客户端必须使用 `ws://`；Server 以 `wss://` 或 Nginx TLS 入口启动时，客户端必须使用 `wss://`。
+正式入口只接受 `wss://`。Server 永远以 TLS WebSocket 启动，Host/Client/WinUI 会拒绝 `ws://` URL。
 
 ### 公网连接失败
 
 确认域名解析、云防火墙、系统防火墙和 Server 监听端口。使用 Nginx 反向代理时，公网入口端口应由 Nginx 监听，SecureChat backend 建议只监听 `127.0.0.1`。
+

@@ -13,6 +13,8 @@ LOG_FILE="${SECURECHAT_SERVER_LOG_FILE:-}"
 # Do not persist it unless diagnostics are explicitly requested.
 LOG_TARGET="${LOG_FILE:-/dev/null}"
 MODE_OVERRIDE=""
+DEFAULT_TLS_CERT_FILE="certs/fullchain.pem"
+DEFAULT_TLS_KEY_FILE="certs/privkey.pem"
 
 if [[ "${EUID}" == "0" && "${SECURECHAT_ALLOW_ROOT:-}" != "1" ]]; then
   echo "ERROR: Refusing to run SecureChat Server as root."
@@ -20,11 +22,11 @@ if [[ "${EUID}" == "0" && "${SECURECHAT_ALLOW_ROOT:-}" != "1" ]]; then
   exit 1
 fi
 usage() {
-  echo "Usage: ./start_server.sh [--mode ws|wss|insecure|secure|0|1]"
+  echo "Usage: ./start_server.sh [--mode wss|secure|1]"
   echo
-  echo "Modes:"
-  echo "  ws, insecure, 0   Start signaling without TLS."
-  echo "  wss, secure, 1    Start signaling with TLS, defaulting to certs/fullchain.pem and certs/privkey.pem."
+  echo "SecureChat Server always starts in WSS mode."
+  echo "If TLS env vars are empty, this script uses certs/fullchain.pem and certs/privkey.pem."
+  echo "Run the server binary directly with empty TLS env vars to generate a local/LAN development certificate."
 }
 
 show_log_hint() {
@@ -40,7 +42,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --mode)
       if [[ $# -lt 2 ]]; then
-        echo "ERROR: --mode requires ws, wss, insecure, secure, 0, or 1."
+        echo "ERROR: --mode requires wss, secure, or 1."
         usage
         exit 1
       fi
@@ -66,15 +68,11 @@ done
 if [[ -n "${MODE_OVERRIDE}" ]]; then
   case "${MODE_OVERRIDE,,}" in
     0|ws|insecure)
-      unset SECURECHAT_SIGNALING_TLS
-      unset SECURECHAT_TLS_CERT_FILE
-      unset SECURECHAT_TLS_KEY_FILE
-      unset SECURECHAT_TLS_KEY_PASS
+      echo "ERROR: ws/insecure mode is disabled. Use wss."
+      exit 1
       ;;
     1|wss|secure)
-      export SECURECHAT_SIGNALING_TLS=1
-      export SECURECHAT_TLS_CERT_FILE="${SECURECHAT_TLS_CERT_FILE:-certs/fullchain.pem}"
-      export SECURECHAT_TLS_KEY_FILE="${SECURECHAT_TLS_KEY_FILE:-certs/privkey.pem}"
+      :
       ;;
     *)
       echo "ERROR: unsupported --mode value: ${MODE_OVERRIDE}"
@@ -83,6 +81,31 @@ if [[ -n "${MODE_OVERRIDE}" ]]; then
       ;;
   esac
 fi
+
+select_script_tls_defaults() {
+  if [[ -n "${SECURECHAT_TLS_CERT_FILE:-}" && -n "${SECURECHAT_TLS_KEY_FILE:-}" ]]; then
+    return
+  fi
+
+  if [[ -n "${SECURECHAT_TLS_CERT_FILE:-}" || -n "${SECURECHAT_TLS_KEY_FILE:-}" ]]; then
+    echo "ERROR: SECURECHAT_TLS_CERT_FILE and SECURECHAT_TLS_KEY_FILE must be set together."
+    exit 1
+  fi
+
+  export SECURECHAT_TLS_CERT_FILE="${DEFAULT_TLS_CERT_FILE}"
+  export SECURECHAT_TLS_KEY_FILE="${DEFAULT_TLS_KEY_FILE}"
+  if [[ ! -f "${SECURECHAT_TLS_CERT_FILE}" || ! -f "${SECURECHAT_TLS_KEY_FILE}" ]]; then
+    echo "ERROR: start_server.sh expects ${DEFAULT_TLS_CERT_FILE} and ${DEFAULT_TLS_KEY_FILE}."
+    echo "This script is for deployment with existing WSS certificates and will not generate local certificates."
+    echo "For local/LAN testing, run the server binary directly with SECURECHAT_TLS_CERT_FILE and SECURECHAT_TLS_KEY_FILE unset."
+    exit 1
+  fi
+  echo "Using script default WSS certificate:"
+  echo "  cert: ${SECURECHAT_TLS_CERT_FILE}"
+  echo "  key:  ${SECURECHAT_TLS_KEY_FILE}"
+}
+
+select_script_tls_defaults
 
 if [[ ! -x "${SERVER_BIN}" ]]; then
   echo "ERROR: Server binary is missing or not executable: ${SERVER_BIN}"
@@ -110,24 +133,10 @@ fi
 
 echo "Starting SecureChat Server..."
 echo "  port: ${PORT}"
-
-case "${SECURECHAT_SIGNALING_TLS:-}" in
-  1|true|TRUE|yes|on)
-    tls_enabled=1
-    ;;
-  *)
-    tls_enabled=0
-    ;;
-esac
-
-if [[ "${tls_enabled}" == "1" ]]; then
-  echo "  signaling: wss"
-  if [[ -z "${SECURECHAT_TLS_CERT_FILE:-}" || -z "${SECURECHAT_TLS_KEY_FILE:-}" ]]; then
-    echo "ERROR: SECURECHAT_TLS_CERT_FILE and SECURECHAT_TLS_KEY_FILE are required for WSS."
-    exit 1
-  fi
-else
-  echo "  signaling: ws insecure mode (no TLS)"
+echo "  signaling: wss"
+if [[ -z "${SECURECHAT_TLS_CERT_FILE:-}" || -z "${SECURECHAT_TLS_KEY_FILE:-}" ]]; then
+  echo "ERROR: SECURECHAT_TLS_CERT_FILE and SECURECHAT_TLS_KEY_FILE are required for WSS."
+  exit 1
 fi
 
 env -u SECURECHAT_ROOM_PASSWORD nohup "${SERVER_BIN}" "${PORT}" > "${LOG_TARGET}" 2>&1 &

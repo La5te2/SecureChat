@@ -21,7 +21,7 @@ void handleStopSignal(int) {
 
 void printUsage() {
     std::cerr << "Usage: server <port>\n";
-    std::cerr << "Environment: SECURECHAT_SIGNALING_TLS=1 plus SECURECHAT_TLS_CERT_FILE and SECURECHAT_TLS_KEY_FILE enables WSS.\n";
+    std::cerr << "WSS is required. Set SECURECHAT_TLS_CERT_FILE and SECURECHAT_TLS_KEY_FILE to use an existing certificate, or leave both empty to generate a local/LAN certificate.\n";
     std::cerr << "Environment: SECURECHAT_BIND_ADDRESS=127.0.0.1 keeps a reverse-proxy backend local.\n";
 }
 }

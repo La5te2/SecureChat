@@ -21,7 +21,7 @@ void applyClientTlsFromEnvironment(rtc::WebSocket::Configuration& config) {
     // 保持传输帧上限与协议解析器预算一致。否则带 PKI 的较大帧
     // 例如 room_members 可能在应用解析器看到消息前关闭公网 WSS Client。
     config.maxMessageSize = chat::protocol::MaxSignalingMessageBytes;
-    const auto caFile = envValue("SECURECHAT_TLS_CA_FILE");
+    const auto caFile = envValue("SECURECHAT_LOCAL_TLS_CA");
 
     if (!caFile.empty()) {
         config.caCertificatePemFile = caFile;

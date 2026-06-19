@@ -30,7 +30,7 @@ public:
 
     // 返回已绑定的信令端口，包括自动选择的端口。
     uint16_t port() const;
-    // 返回 Client 连接该 Server 时使用的 "ws" 或 "wss"。
+    // 返回 Client 连接该 Server 时使用的 "wss"。
     std::string urlScheme() const;
     // 关闭所有已发布房间，并向已连接 Client 告知原因。
     void closeAllRooms(const std::string& reason = "host disconnected");
@@ -117,7 +117,7 @@ private:
     void safeSend(const std::shared_ptr<rtc::WebSocket>& ws, const json& data);
 
     std::unique_ptr<rtc::WebSocketServer> mServer;
-    std::string mUrlScheme = "ws";
+    std::string mUrlScheme = "wss";
     std::atomic_bool mStopping = false;
     std::thread mMaintenanceThread;
     std::condition_variable mMaintenanceCv;
