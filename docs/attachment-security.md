@@ -1,8 +1,8 @@
-# SecureChat Relay 数据通路与附件安全
+# SecureChat Relay 数据通路与附件处理
 
-本文档对应 `todolist.md` 的阶段 3、阶段 4 和阶段 12，用于说明当前真实拓扑、GKA v3 数据通路，以及附件安全边界。
+本文档说明 SecureChat 的 Server relay 数据通路、GKA v3 消息流、私发加密和附件处理边界。
 
-## 阶段 3：角色模型
+## 角色模型
 
 当前采用三个明确角色：
 
@@ -12,7 +12,7 @@ Host：创建 roomId，是第一个群成员和房间生命周期管理者；发
 Client：加入 room，提交成员 public key，参与 GKA epoch；使用 group key 加解密群聊消息和附件，私发时用目标成员已验证 public key 派生 pairwise key
 ```
 
-`Server` 的职责是公网可达、房间注册、成员状态维护，以及不透明加密中继转发。`Host` 和 `Client` 才是可见聊天成员。这样论文中的安全边界更清楚：攻破或托管 `Server` 不应得到应用层文本、附件明文或 room group key。
+`Server` 的职责是公网可达、房间注册、成员状态维护，以及不透明加密中继转发。`Host` 和 `Client` 才是可见聊天成员。系统边界是：攻破或托管 `Server` 不应得到应用层文本、附件明文或 room group key。
 
 同一个 Server 实例可以承载多个不同 room token，但同一个 Server 实例内 token 不能重复；不同 Server 或不同端口上的房间名可以重复。一台主机可以开多个 Server，只要监听端口不同。Host/Client 本地保留真实 roomId，Server 注册和路由只看到由 roomId 和房间密码派生出的 opaque room token。
 
@@ -26,13 +26,13 @@ Host member  <->  Server opaque encrypted_relay 加密中继  <->  Client member
 
 Server 会校验 WebSocket 会话所属 room token 和 sender connection id，然后转发 envelope；Server 不解密 ciphertext。Host/Client 使用当前 room group key 解密群聊应用消息；私发在外层 group key 中继消息内还需要目标成员 pairwise private key。
 
-已完成的数据通路分离：
+当前数据通路包含：
 
 - 文本消息通过 `encrypted_relay` 转发。
 - `/image`、`/file`、`/voice` 的 metadata 通过 `image_meta`、`file_meta`、`voice_meta` 加密后转发。
 - `/image`、`/file`、`/voice` 的 binary chunk 通过 `image_binary`、`file_binary`、`voice_binary` 加密后转发。
-- Host/Client 不再建立 WebRTC PeerConnection/DataChannel。
-- Server 不再接受或转发 `offer`、`answer`、`ice`。
+- Host/Client 使用 Server relay 数据通路，不建立 WebRTC PeerConnection/DataChannel。
+- Server 只处理当前 WSS relay 信令，不接受或转发 `offer`、`answer`、`ice`。
 
 ## GKA v3
 
@@ -134,7 +134,7 @@ Server 不应可见：
 - 附件二进制内容；
 - 附件 metadata 明文。
 
-## 阶段 4：附件安全现状
+## 附件处理现状
 
 当前附件实现位于 `src/attachment_transfer.cpp`。
 
@@ -183,7 +183,7 @@ WinUI 中的 `MaxPreviewImageBytes` 和 `MaxPreviewAudioBytes` 只限制本地�
 
 附件进入 `logs/` 也意味着成员本机会留下解密后的内容缓存。E2EE 保护的是网络路径和不可信 Server 不读明文；它不能保护已经收到并解密的成员设备。
 
-当前仍需诚实说明的限制：
+当前限制：
 
 - 成员身份证书链和签名绑定 `join_room` public key 与 `group_key` envelope；Server 仍不参与证书验证。
 - Server 仍可观察 room、sender、连接时间、ciphertext 大小和消息时序等元数据。

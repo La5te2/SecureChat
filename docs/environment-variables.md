@@ -69,7 +69,7 @@ export SECURECHAT_IDENTITY_CERT_FILE=certs/pki/member-chain.pem
 export SECURECHAT_IDENTITY_KEY_FILE=certs/pki/member-key.pem
 ```
 
-成员身份 PKI 的信令字段和验证流程见 `docs/pki-identity.md`。
+成员身份 PKI 的证书生成、字段边界和验证流程见 `docs/certificate-methods.md`。
 
 ## 房间密码
 
@@ -92,8 +92,3 @@ export SECURECHAT_IDENTITY_KEY_FILE=certs/pki/member-key.pem
 export SECURECHAT_ATTACHMENT_MAX_BYTES=104857600
 export SECURECHAT_LOGS_MAX_BYTES=1073741824
 ```
-
-## 已移除的旧变量
-
-当前不再使用 WebRTC/DataChannel/ICE/STUN，因此不再使用 `SECURECHAT_ICE_SERVERS`。当前也不再使用共享 E2EE passphrase，因此不再使用 `SECURECHAT_E2EE_PASSPHRASE`。当前 Server 固定使用 WSS，因此不再使用 `SECURECHAT_SIGNALING_TLS`。
-

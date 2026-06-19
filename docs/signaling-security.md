@@ -1,6 +1,6 @@
 # SecureChat 信令安全
 
-本文档记录阶段 2 的信令安全改动。它单独放在 README 之外，便于在报告中引用安全模型和实现说明。
+本文档说明 SecureChat 的信令通道、WSS 入口和不可信 Server 边界。
 
 ## 信令承载的内容
 
@@ -20,7 +20,7 @@
 
 ## WSS 信令模式
 
-当前正式信令入口强制使用 `wss://`。`ws://` 明文 WebSocket 模式不再作为可运行入口保留；Host/Client/WinUI 会拒绝 `ws://` Server URL。
+当前正式信令入口强制使用 `wss://`。Host/Client/WinUI 只接受 `wss://` Server URL。
 
 原因：
 
@@ -48,40 +48,21 @@
 - 文本和附件 metadata/chunk 使用应用层加密中继，Server 不持有 room group key，不能解密群聊内容；私发还有 pairwise 内层密钥，Server/Host/其他成员不能解开目标成员的私发正文或附件；
 - 当前 GKA v3 已实现成员 public key、签名 contribution、Host 发起 epoch 和成员变化后的 key rotation；PKI 成员身份签名证书强制绑定 `join_room` public key、GKA contribution 和 `group_key`/group-state envelope；
 - 服务器 IP、连接时间、流量大小等元数据仍可能被观察；
-- 自签名证书适合测试，但除非客户端显式信任，否则不能提供正常公网身份校验。
+- 本地自签名证书适合本机或局域网运行；公网入口应使用系统信任 CA 签发的证书。
 
-## Nginx TLS 反向代理
+## Nginx TLS 反向代理边界
 
 ```text
 Host/Client -- WSS --> Nginx -- local WSS --> SecureChat Server
 ```
 
-Nginx 可以监听公网 `25566`，完成外部 TLS 和 WebSocket upgrade，再把流量转发到本机 `wss://127.0.0.1:25567`。Server 仍只负责房间注册、成员状态和不透明加密中继。反向代理只改变传输入口，不改变应用层 PKI、GKA 和加密中继的安全边界。
-
-## 证书配置
-
-手动运行 `server` 时必须设置：
-
-```text
-export SECURECHAT_TLS_CERT_FILE=certs/fullchain.pem
-export SECURECHAT_TLS_KEY_FILE=certs/privkey.pem
-```
-
-使用 `start_server.sh` 时，如果上述两个变量都没有设置，脚本会直接把它们设置为 `certs/fullchain.pem` 和 `certs/privkey.pem`。这组默认文件适合放 Certbot 签发的域名证书。手动运行 `server` 且 TLS 路径环境变量为空时，C++ Server 会在 `certs/` 自动生成本地/局域网开发证书，并输出生成的证书、私钥和 CA 路径；CLI Host/Client 使用该开发 CA 时需要设置 `SECURECHAT_LOCAL_TLS_CA=certs/local-root-ca.pem`，WinUI 可在设置面板的 `Local Server TLS CA / 本地服务器 TLS 信任根` 中选择同一个 CA 文件。
-
-客户端随后使用与证书 SAN 匹配的 URL：
-
-```text
-wss://chat.example.com:25566
-```
-
-应使用与证书匹配的域名、主机名或 IP。连接 `wss://127.0.0.1:25566`、`wss://localhost:25566` 或局域网 IP 时，Server 证书的 Subject Alternative Name 必须覆盖对应名称。
+Nginx 可以监听公网入口，完成外部 TLS 和 WebSocket upgrade，再把流量转发到本机 SecureChat Server。Server 仍只负责房间注册、成员状态和不透明加密中继。反向代理只改变传输入口，不改变应用层 PKI、GKA 和加密中继的安全边界。具体部署命令见 `docs/startup-guide.md`，证书获取和文件边界见 `docs/certificate-methods.md`。
 
 ## 密码处理
 
 `start_server.sh` 不需要房间密码，默认把不可信 Server 作为 daemon 常驻。Host/Client CLI 默认使用隐藏输入读取房间密码。`SECURECHAT_ROOM_PASSWORD` 仍可用于非交互自动化，但交互运行时不建议长期保存在 shell 环境中。
 
-GKA v3 不再要求成员手工配置共享 E2EE 口令。Client 加入时提交临时 X25519 public key；Host 在成员变化时发起 GKA epoch；当前成员提交签名随机 contribution；Host 汇总贡献集合后通过 `group_key`/group-state envelope 分别封装给当前成员。Client 解封装 group state、验证贡献签名后本地导出 room group key。Server 负责转发这些 envelope，群密钥生成和密钥协商状态由 Host/Client 本地维护。Host 维护 GKA watchdog；如果某个 Client 在 10 秒内没有提交当前 epoch 的有效 contribution，Host 会驱逐该成员、封当前房间内的证书指纹，并用剩余成员重新发起 epoch。
+GKA 由当前成员的签名随机贡献共同生成 room group key。Client 加入时提交临时 X25519 public key；Host 在成员变化时发起 GKA epoch；当前成员提交签名随机 contribution；Host 汇总贡献集合后通过 `group_key`/group-state envelope 分别封装给当前成员。Client 解封装 group state、验证贡献签名后本地导出 room group key。Server 负责转发这些 envelope，群密钥生成和密钥协商状态由 Host/Client 本地维护。Host 维护 GKA watchdog；如果某个 Client 在 10 秒内没有提交当前 epoch 的有效 contribution，Host 会驱逐该成员、封当前房间内的证书指纹，并用剩余成员重新发起 epoch。
 
 Client 会在 `join_room` 中附带成员证书链和签名，Host 验证证书链、有效期、Key Usage 和签名后才信任该临时 X25519 public key。成员 GKA contribution 也带签名，Host 和 Client 都会验证。Host 发送 `group_key` envelope 时附带 Host 身份签名，Client 验证通过后才解封装 group state。Server 只要求相关 identity 字段结构和大小合法；证书链验证发生在 Host/Client 本地，Server 不参与身份语义。
 

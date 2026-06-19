@@ -66,7 +66,7 @@ app\chat\bin\x64\Release\net10.0-windows10.0.19041.0\win-x64\SecureChat.exe
 
 ## Windows：启动 Server
 
-Windows 手动启动 Server 时，如果要做本机/局域网测试，保持 TLS 路径环境变量为空：
+Windows 手动启动 Server 时，如果要做本机/局域网运行，保持 TLS 路径环境变量为空：
 
 ```powershell
 Remove-Item Env:SECURECHAT_TLS_CERT_FILE -ErrorAction SilentlyContinue
@@ -164,7 +164,7 @@ out/build/x64-linux-release/client
 
 ## Linux：启动 Server
 
-本机/局域网测试推荐直接运行 Server 可执行文件，并保持 TLS 路径环境变量为空：
+本机/局域网运行推荐直接运行 Server 可执行文件，并保持 TLS 路径环境变量为空：
 
 ```bash
 cd ~/SecureChat
@@ -256,7 +256,7 @@ unset SECURECHAT_TLS_CERT_FILE SECURECHAT_TLS_KEY_FILE
 ./out/build/x64-linux-release/server 25566
 ```
 
-自动生成开发证书时，Server 会把当前主机名、`localhost`、`127.0.0.1` 和探测到的局域网 IP 写入证书的 Subject Alternative Name。自动生成路径只用于本机和局域网测试，不生成公网域名证书；公网域名证书应使用 Certbot 等外部工具获取，并通过 `SECURECHAT_TLS_CERT_FILE` 和 `SECURECHAT_TLS_KEY_FILE` 显式传入。
+自动生成本地证书时，Server 会把当前主机名、`localhost`、`127.0.0.1` 和探测到的局域网 IP 写入证书的 Subject Alternative Name。自动生成路径只用于本机和局域网运行，不生成公网域名证书；公网域名证书应使用 Certbot 等外部工具获取，并通过 `SECURECHAT_TLS_CERT_FILE` 和 `SECURECHAT_TLS_KEY_FILE` 显式传入。
 
 其他机器连接时使用证书覆盖的名称或 IP，并把 `certs/local-root-ca.pem` 通过可信渠道复制到客户端机器。CLI 设置 `SECURECHAT_LOCAL_TLS_CA`，WinUI 在设置面板选择该 CA 文件。
 

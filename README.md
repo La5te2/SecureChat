@@ -30,7 +30,7 @@ SecureChat 分为三个运行角色。
 
 SecureChat 有两层保护。
 
-第一层是传输层。`wss://` 使用 TLS 保护 Host/Client 到 Server 或反向代理之间的连接。当前正式入口强制使用 WSS，不再提供 `ws://` 明文信令模式。
+第一层是传输层。`wss://` 使用 TLS 保护 Host/Client 到 Server 或反向代理之间的连接。当前正式入口只提供 WSS，Host/Client/WinUI 的 Server URL 必须使用 `wss://`。
 
 第二层是应用层。文本、附件元数据和附件分片在发送端加密，在接收端解密。Server 只转发 ciphertext、nonce、tag 等 envelope 字段，不能读取聊天明文或附件明文。
 
@@ -218,7 +218,7 @@ out/build/x64-linux-release/libnative.so
 - `member-key.pem` 是成员私钥，只能交给对应成员本人保存。
 - `member-chain.pem` 是成员证书链，Host/Client 启动时通过 `SECURECHAT_IDENTITY_CERT_FILE` 指定。
 
-证书生成方法见 `docs/certificate_methods.md` 和 `docs/pki-identity.md`。正式环境中，不应由同一个普通 Host 长期代管所有成员私钥。更好的流程是成员本地生成私钥和 CSR，由证书签发方只签发证书，不接触成员私钥。
+证书生成和使用方法见 `docs/certificate-methods.md`。正式环境中，不应由同一个普通 Host 长期代管所有成员私钥。更好的流程是成员本地生成私钥和 CSR，由证书签发方只签发证书，不接触成员私钥。
 
 ## 运行
 
@@ -259,7 +259,7 @@ export SECURECHAT_TLS_KEY_FILE=/path/to/privkey.pem
 ./out/build/x64-linux-release/server 25566
 ```
 
-使用 Linux 启动脚本时，如果没有设置上述两个变量，脚本会直接把它们设置为 `certs/fullchain.pem` 和 `certs/privkey.pem`。这两个文件适合保存 Certbot 签发的域名证书，例如云端 `chat.example.com` 入口证书。本机/局域网测试应直接运行 `server` 可执行文件并保持 TLS 路径环境变量为空，让 C++ Server 自动生成 `certs/server-chain.pem`、`certs/server-key.pem` 和 `certs/local-root-ca.pem`。
+使用 Linux 启动脚本时，如果没有设置上述两个变量，脚本会直接把它们设置为 `certs/fullchain.pem` 和 `certs/privkey.pem`。这两个文件适合保存 Certbot 签发的域名证书，例如 `chat.example.com` 入口证书。本机/局域网运行应直接运行 `server` 可执行文件并保持 TLS 路径环境变量为空，让 C++ Server 自动生成 `certs/server-chain.pem`、`certs/server-key.pem` 和 `certs/local-root-ca.pem`。
 
 Host/Client 连接：
 
@@ -470,6 +470,23 @@ export SECURECHAT_SERVER_LOG_FILE=server.log
 ### 只能使用 wss
 
 正式入口只接受 `wss://`。Server 永远以 TLS WebSocket 启动，Host/Client/WinUI 会拒绝 `ws://` URL。
+
+### 构建依赖下载需要代理
+
+Linux 或 Git Bash 中，如果 vcpkg、Git、CMake 下载依赖失败，可以临时设置本机代理。端口按本机代理实际监听端口选择，常见为 `10090` 或 `7897`：
+
+```bash
+export http_proxy=http://127.0.0.1:10090   # 或 http://127.0.0.1:7897
+export https_proxy=http://127.0.0.1:10090  # 或 http://127.0.0.1:7897
+export HTTP_PROXY=http://127.0.0.1:10090   # 或 http://127.0.0.1:7897
+export HTTPS_PROXY=http://127.0.0.1:10090  # 或 http://127.0.0.1:7897
+```
+
+下载完成后可以清理代理变量：
+
+```bash
+unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
+```
 
 ### 公网连接失败
 
