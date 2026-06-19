@@ -20,7 +20,6 @@ app/**/uploads/
 *.log
 
 # Local Files
-todolist.md
 artifacts/
 dist/
 
