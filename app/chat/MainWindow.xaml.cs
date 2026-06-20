@@ -45,6 +45,7 @@ public sealed partial class MainWindow : Window
     private readonly HashSet<string> participants = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> pendingParticipants = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, string> pendingJoinNamesByRequestId = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, string> pendingJoinRequestIdByParticipant = new(StringComparer.OrdinalIgnoreCase);
     // Blocked 是当前房间内的本机 UI 策略：右键成员卡片切换。
     // PKI 验证仍在 native 层完成；这里的颜色/预览策略不参与密钥认证。
     private readonly HashSet<string> blockedAttachmentMembers = new(StringComparer.OrdinalIgnoreCase);
@@ -52,6 +53,7 @@ public sealed partial class MainWindow : Window
     // native core 先回调附件 metadata，再回调解密后的本地缓存路径。
     // 这里用队列把“来源成员”暂存起来，等真正渲染附件卡片时取出。
     private readonly Dictionary<string, Queue<AttachmentSenderInfo>> pendingAttachmentSenders = new(StringComparer.OrdinalIgnoreCase);
+    private readonly List<Border> roomInstanceCards = new();
     private SessionMode sessionMode = SessionMode.None;
     private bool sidebarVisible = true;
     private bool resizingSidebar;
@@ -77,6 +79,8 @@ public sealed partial class MainWindow : Window
     private ImageBrush? chatBackgroundBrush;
     private string? chatBackgroundPath;
     private bool isClosing;
+    private LocalRoomInstanceInfo? selectedRoomInstance;
+    private System.Threading.Tasks.TaskCompletionSource<LocalRoomInstanceInfo?>? roomInstanceSelectionSource;
 
     private static readonly NativeMethods.ChatEventCallback NoOpCallback = (_, _, _) => { };
     // 附件预览状态只影响 WinUI 是否自动预览，不影响加解密和传输。
@@ -94,6 +98,13 @@ public sealed partial class MainWindow : Window
         public static readonly AttachmentSenderInfo Empty = new("", "", "");
     }
     private sealed record VerifiedMemberInfo(string DisplayName, string Fingerprint, string Subject);
+    private sealed class LocalRoomInstanceInfo
+    {
+        public string roomDir { get; set; } = "";
+        public string roomName { get; set; } = "";
+        public string roomInstanceTokenDigest { get; set; } = "";
+        public long modifiedTimeUnixMs { get; set; }
+    }
     private const int InitialWindowWidth = 1180;
     private const int InitialWindowHeight = 760;
     // These caps only protect local WinUI preview/decoder paths. The protocol
@@ -232,7 +243,7 @@ public sealed partial class MainWindow : Window
         return true;
     }
 
-    private void HostJoin_Click(object sender, RoutedEventArgs e)
+    private async void HostJoin_Click(object sender, RoutedEventArgs e)
     {
         if (!TryReadSessionInputs(HostRoomBox, HostServerUrlBox, HostUserBox, out var room, out var serverUrl, out var user))
         {
@@ -243,13 +254,18 @@ public sealed partial class MainWindow : Window
             return;
         }
 
+        var nickname = MemberDefaultNicknameBox.Text.Trim();
+        var selected = await ShowRoomInstancePickerAsync(room, user, "host");
+        if (selected is null) return;
+
         ClearAttachmentMemberStates();
-        // 加入已有房间只读取本机 logs/certs/<digest>/ 中的 Host 材料。
-        // 它不会重新生成 entrance.scp，也不会覆盖房间级 PKI。
-        var ok = NativeMethods.chat_host_join_existing(
+        // 用户显式选择 room instance 后，WinUI 使用隐藏 room-dir 启动 Host。
+        // 同名房间不会再由程序暗中选择“最新”的本地目录。
+        var ok = NativeMethods.chat_host_start(
             serverUrl,
-            room,
+            selected.roomDir,
             user,
+            nickname,
             MemberKeyPassBox.Password);
         if (ok != 0)
         {
@@ -270,6 +286,7 @@ public sealed partial class MainWindow : Window
             return;
         }
 
+        var nickname = MemberDefaultNicknameBox.Text.Trim();
         ClearAttachmentMemberStates();
         // 创建房间时生成新的房间级 Root/Intermediate、Host 成员证书和 entrance.scp。
         // 监听、TLS/WSS 和 relay 都由外部 Server 进程处理。
@@ -277,6 +294,7 @@ public sealed partial class MainWindow : Window
             serverUrl,
             room,
             user,
+            nickname,
             MemberKeyPassBox.Password);
         if (ok != 0)
         {
@@ -286,7 +304,7 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    private void JoinExisting_Click(object sender, RoutedEventArgs e)
+    private async void JoinExisting_Click(object sender, RoutedEventArgs e)
     {
         if (!TryReadSessionInputs(JoinRoomBox, JoinUrlBox, JoinUserBox, out var room, out var serverUrl, out var user))
         {
@@ -297,12 +315,18 @@ public sealed partial class MainWindow : Window
             return;
         }
 
+        var nickname = MemberDefaultNicknameBox.Text.Trim();
+        var selected = await ShowRoomInstancePickerAsync(room, user, "client");
+        if (selected is null) return;
+
         ClearAttachmentMemberStates();
-        // 加入房间只使用本机已有 room-dir；首次拿到 entrance.scp 时应点“导入房间”。
-        var ok = NativeMethods.chat_join_existing(
+        // 加入房间只使用用户刚刚确认的本机 room-dir；
+        // 首次拿到 entrance.scp 时应点“导入房间”。
+        var ok = NativeMethods.chat_join_start(
             serverUrl,
-            room,
+            selected.roomDir,
             user,
+            nickname,
             MemberKeyPassBox.Password);
         if (ok != 0)
         {
@@ -327,6 +351,7 @@ public sealed partial class MainWindow : Window
             return;
         }
 
+        var nickname = MemberDefaultNicknameBox.Text.Trim();
         ClearAttachmentMemberStates();
         // 导入房间才打开 entrance.scp 文件选择器。
         // C# 只负责收集 UI 输入，
@@ -335,6 +360,7 @@ public sealed partial class MainWindow : Window
             serverUrl,
             room,
             user,
+            nickname,
             entranceFile,
             MemberKeyPassBox.Password);
         if (ok != 0)
@@ -1003,10 +1029,15 @@ public sealed partial class MainWindow : Window
     {
         var displayName = name.Trim();
         if (displayName.Length == 0) return;
-        pendingParticipants.Add(displayName);
-        participants.Add(displayName);
+        var normalizedRequestId = requestId.Trim();
+        var participantKey = string.IsNullOrWhiteSpace(normalizedRequestId)
+            ? displayName
+            : ParticipantLabel(displayName, normalizedRequestId);
+        pendingParticipants.Add(participantKey);
+        participants.Add(participantKey);
         if (!string.IsNullOrWhiteSpace(requestId)) {
-            pendingJoinNamesByRequestId[requestId.Trim()] = displayName;
+            pendingJoinNamesByRequestId[normalizedRequestId] = displayName;
+            pendingJoinRequestIdByParticipant[participantKey] = normalizedRequestId;
         }
         RefreshParticipants();
     }
@@ -1017,28 +1048,62 @@ public sealed partial class MainWindow : Window
         var normalized = token.Trim();
         if (pendingJoinNamesByRequestId.TryGetValue(normalized, out var name)) {
             pendingJoinNamesByRequestId.Remove(normalized);
-            normalized = name;
+            var key = pendingParticipants.FirstOrDefault(participant =>
+                pendingJoinRequestIdByParticipant.TryGetValue(participant, out var requestId) &&
+                string.Equals(requestId, token.Trim(), StringComparison.OrdinalIgnoreCase));
+            if (!string.IsNullOrWhiteSpace(key))
+            {
+                pendingJoinRequestIdByParticipant.Remove(key);
+                normalized = key;
+            }
+            else
+            {
+                normalized = name;
+            }
+        }
+        else
+        {
+            var key = pendingParticipants.FirstOrDefault(participant =>
+                pendingJoinRequestIdByParticipant.TryGetValue(participant, out var requestId) &&
+                requestId.StartsWith(normalized, StringComparison.OrdinalIgnoreCase));
+            if (!string.IsNullOrWhiteSpace(key))
+            {
+                pendingJoinRequestIdByParticipant.Remove(key);
+                normalized = key;
+            }
+            pendingJoinRequestIdByParticipant.Remove(normalized);
         }
         pendingParticipants.RemoveWhere(key => string.Equals(key, normalized, StringComparison.OrdinalIgnoreCase));
         RemoveParticipant(normalized);
         RefreshParticipants();
     }
 
+    private string PendingRequestIdForParticipant(string participant)
+    {
+        return pendingJoinRequestIdByParticipant.TryGetValue(participant.Trim(), out var requestId)
+            ? requestId
+            : "";
+    }
+
     private void ApprovePendingParticipant(string participant)
     {
         if (sessionMode != SessionMode.Host) return;
-        NativeMethods.chat_send_line("/approve " + ParticipantDisplayName(participant));
+        var requestId = PendingRequestIdForParticipant(participant);
+        if (requestId.Length == 0) return;
+        NativeMethods.chat_send_line("/approve " + requestId);
     }
 
     private void RejectPendingParticipant(string participant)
     {
         if (sessionMode != SessionMode.Host) return;
-        NativeMethods.chat_send_line("/reject " + ParticipantDisplayName(participant));
+        var requestId = PendingRequestIdForParticipant(participant);
+        if (requestId.Length == 0) return;
+        NativeMethods.chat_send_line("/reject " + requestId);
     }
 
     private void CopyParticipantFingerprint(string participant)
     {
-        // 成员列表点击复制完整证书指纹；界面只显示 name，避免长 id/指纹破坏布局。
+        // 成员列表点击复制证书指纹前 8 位；完整指纹只留在内部状态和 Host /list 中。
         var info = VerifiedInfoForParticipant(participant);
         if (info is null || string.IsNullOrWhiteSpace(info.Fingerprint))
         {
@@ -1046,10 +1111,11 @@ public sealed partial class MainWindow : Window
             return;
         }
 
+        var prefix = info.Fingerprint.Length > 8 ? info.Fingerprint[..8] : info.Fingerprint;
         var package = new DataPackage();
-        package.SetText(info.Fingerprint);
+        package.SetText(prefix);
         Clipboard.SetContent(package);
-        ShowInfo(UiText("Fingerprint copied", "指纹已复制"), InfoBarSeverity.Success);
+        ShowInfo(UiText("Fingerprint prefix copied", "指纹前缀已复制"), InfoBarSeverity.Success);
     }
 
     private static string SenderLabel(AttachmentSenderInfo sender, string fallback = "")
@@ -1514,7 +1580,7 @@ public sealed partial class MainWindow : Window
             return;
         }
 
-        if (message.StartsWith("Join request is waiting for Host approval:", StringComparison.OrdinalIgnoreCase))
+        if (message.StartsWith("Join request is waiting for Host approval", StringComparison.OrdinalIgnoreCase))
         {
             SetSessionMode(SessionMode.PendingJoin);
             AddPendingParticipant(JoinUserBox.Text.Trim());
@@ -1663,6 +1729,7 @@ public sealed partial class MainWindow : Window
         participants.Clear();
         pendingParticipants.Clear();
         pendingJoinNamesByRequestId.Clear();
+        pendingJoinRequestIdByParticipant.Clear();
         ClearAttachmentMemberStates();
         RefreshParticipants();
     }
@@ -1719,7 +1786,7 @@ public sealed partial class MainWindow : Window
                 ? UiText("Click to approve; right-click to reject", "单击允许加入；右键拒绝加入")
                 : verifiedInfo is null
                 ? UiText("Right-click to block/unblock attachment preview", "右键阻止/解除阻止附件预览")
-                : UiText("Click copies fingerprint; right-click blocks/unblocks previews", "单击复制指纹；右键阻止/解除阻止预览"));
+                : UiText("Click copies fingerprint prefix; right-click blocks/unblocks previews", "单击复制指纹前缀；右键阻止/解除阻止预览"));
             identityBox.Tapped += (_, args) =>
             {
                 args.Handled = true;
@@ -1812,6 +1879,182 @@ public sealed partial class MainWindow : Window
     private void SettingsPanel_PointerPressed(object sender, PointerRoutedEventArgs e)
     {
         e.Handled = true;
+    }
+
+    private System.Threading.Tasks.Task<LocalRoomInstanceInfo?> ShowRoomInstancePickerAsync(
+        string room,
+        string user,
+        string role)
+    {
+        var rooms = LoadLocalRoomInstances(room, user, role);
+        if (rooms.Count == 0)
+        {
+            return System.Threading.Tasks.Task.FromResult<LocalRoomInstanceInfo?>(null);
+        }
+
+        roomInstanceSelectionSource?.TrySetResult(null);
+        roomInstanceSelectionSource = new System.Threading.Tasks.TaskCompletionSource<LocalRoomInstanceInfo?>(
+            System.Threading.Tasks.TaskCreationOptions.RunContinuationsAsynchronously);
+        RenderRoomInstanceChoices(rooms);
+        RoomInstanceOverlay.Opacity = 1;
+        RoomInstanceOverlay.Visibility = Visibility.Visible;
+        return roomInstanceSelectionSource.Task;
+    }
+
+    private List<LocalRoomInstanceInfo> LoadLocalRoomInstances(string room, string user, string role)
+    {
+        var required = NativeMethods.chat_list_local_room_dirs(room, user, role, IntPtr.Zero, 0);
+        if (required <= 0) return new List<LocalRoomInstanceInfo>();
+
+        var buffer = Marshal.AllocHGlobal(required);
+        try
+        {
+            var written = NativeMethods.chat_list_local_room_dirs(room, user, role, buffer, required);
+            if (written < 0)
+            {
+                Marshal.FreeHGlobal(buffer);
+                buffer = IntPtr.Zero;
+                required = -written;
+                buffer = Marshal.AllocHGlobal(required);
+                written = NativeMethods.chat_list_local_room_dirs(room, user, role, buffer, required);
+            }
+            if (written <= 1 || written > required) return new List<LocalRoomInstanceInfo>();
+
+            var bytes = new byte[written - 1];
+            Marshal.Copy(buffer, bytes, 0, bytes.Length);
+            var json = Encoding.UTF8.GetString(bytes);
+            return JsonSerializer.Deserialize<List<LocalRoomInstanceInfo>>(json) ?? new List<LocalRoomInstanceInfo>();
+        }
+        catch (Exception ex)
+        {
+            AddLine("error", "Failed to read local room instances: " + ex.Message);
+            return new List<LocalRoomInstanceInfo>();
+        }
+        finally
+        {
+            if (buffer != IntPtr.Zero) Marshal.FreeHGlobal(buffer);
+        }
+    }
+
+    private void RenderRoomInstanceChoices(IReadOnlyList<LocalRoomInstanceInfo> rooms)
+    {
+        RoomInstanceListPanel.Children.Clear();
+        roomInstanceCards.Clear();
+        selectedRoomInstance = rooms[0];
+
+        foreach (var room in rooms)
+        {
+            var card = new Border
+            {
+                Padding = new Thickness(10),
+                CornerRadius = new CornerRadius(8),
+                BorderThickness = new Thickness(2),
+                BorderBrush = new SolidColorBrush(Color.FromArgb(0, 0, 0, 0)),
+                Background = new SolidColorBrush(Color.FromArgb(0, 0, 0, 0)),
+                Tag = room
+            };
+            card.PointerPressed += RoomInstanceCard_PointerPressed;
+
+            var stack = new StackPanel { Spacing = 4 };
+            stack.Children.Add(new TextBlock
+            {
+                Text = $"{UiText("Room", "房间名")}: {room.roomName}",
+                TextWrapping = TextWrapping.Wrap
+            });
+            stack.Children.Add(new TextBlock
+            {
+                Text = $"{UiText("Created/imported time", "创建/导入时间")}: {FormatRoomInstanceTime(room.modifiedTimeUnixMs)}",
+                TextWrapping = TextWrapping.Wrap
+            });
+            stack.Children.Add(new TextBlock
+            {
+                Text = $"Room instance: {ShortRoomInstanceDigest(room.roomInstanceTokenDigest)}",
+                TextWrapping = TextWrapping.Wrap
+            });
+
+            card.Child = stack;
+            roomInstanceCards.Add(card);
+            RoomInstanceListPanel.Children.Add(card);
+        }
+
+        RefreshRoomInstanceCardSelection();
+    }
+
+    private void RoomInstanceCard_PointerPressed(object sender, PointerRoutedEventArgs e)
+    {
+        if (sender is Border { Tag: LocalRoomInstanceInfo room })
+        {
+            selectedRoomInstance = room;
+            RefreshRoomInstanceCardSelection();
+            e.Handled = true;
+        }
+    }
+
+    private void RefreshRoomInstanceCardSelection()
+    {
+        var selectedBorder = new SolidColorBrush(Color.FromArgb(255, 0, 95, 184));
+        var transparent = new SolidColorBrush(Color.FromArgb(0, 0, 0, 0));
+        foreach (var card in roomInstanceCards)
+        {
+            var selected = card.Tag is LocalRoomInstanceInfo room &&
+                selectedRoomInstance is not null &&
+                string.Equals(room.roomDir, selectedRoomInstance.roomDir, StringComparison.OrdinalIgnoreCase);
+            card.BorderBrush = selected ? selectedBorder : transparent;
+        }
+    }
+
+    private void CompleteRoomInstanceSelection(LocalRoomInstanceInfo? room)
+    {
+        RoomInstanceOverlay.Visibility = Visibility.Collapsed;
+        RoomInstanceOverlay.Opacity = 1;
+        RoomInstanceListPanel.Children.Clear();
+        roomInstanceCards.Clear();
+        selectedRoomInstance = null;
+        roomInstanceSelectionSource?.TrySetResult(room);
+        roomInstanceSelectionSource = null;
+    }
+
+    private void RoomInstanceOverlay_PointerPressed(object sender, PointerRoutedEventArgs e)
+    {
+        CompleteRoomInstanceSelection(null);
+    }
+
+    private void RoomInstancePanel_PointerPressed(object sender, PointerRoutedEventArgs e)
+    {
+        e.Handled = true;
+    }
+
+    private void RoomInstanceConfirm_Click(object sender, RoutedEventArgs e)
+    {
+        if (selectedRoomInstance is null)
+        {
+            AddLine("error", UiText("Select a room instance first.", "请先选择一个房间实例。"));
+            return;
+        }
+        CompleteRoomInstanceSelection(selectedRoomInstance);
+    }
+
+    private void RoomInstanceCancel_Click(object sender, RoutedEventArgs e)
+    {
+        CompleteRoomInstanceSelection(null);
+    }
+
+    private static string FormatRoomInstanceTime(long unixMs)
+    {
+        if (unixMs <= 0) return "-";
+        return DateTimeOffset.FromUnixTimeMilliseconds(unixMs)
+            .LocalDateTime
+            .ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture);
+    }
+
+    private static string ShortRoomInstanceDigest(string digest)
+    {
+        var clean = new string((digest ?? "")
+            .Where(Uri.IsHexDigit)
+            .ToArray())
+            .ToUpperInvariant();
+        if (clean.Length == 0) return "-";
+        return clean.Length <= 12 ? clean : clean[..12] + "...";
     }
 
     private void ThemeComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -2027,6 +2270,8 @@ public sealed partial class MainWindow : Window
         InputFrame.BorderBrush = new SolidColorBrush(border);
         SettingsPanel.Background = new SolidColorBrush(panel);
         SettingsPanel.BorderBrush = new SolidColorBrush(border);
+        RoomInstancePanel.Background = new SolidColorBrush(panel);
+        RoomInstancePanel.BorderBrush = new SolidColorBrush(border);
         ChatBackgroundWash.Background = new SolidColorBrush(chat);
         SidebarToggleIcon.Source = new BitmapImage(new Uri(Path.Combine(
             AppContext.BaseDirectory,
@@ -2286,7 +2531,7 @@ public sealed partial class MainWindow : Window
             RoomParticipantsHeaderText.Text = UiText("Participants", "参与者");
 
             MessageBox.PlaceholderText = UiText("Type a message", "输入消息");
-            PrivateTargetBox.PlaceholderText = UiText("To: name", "私信姓名");
+            PrivateTargetBox.PlaceholderText = UiText("To: Member", "私信对象");
             SendButton.Content = UiText("Send", "发送");
             SetComboItemContent(SendModeBox, "Text", UiText("Texts", "文字"));
             SetComboItemContent(SendModeBox, "Image", UiText("Image", "图片"));
@@ -2314,10 +2559,14 @@ public sealed partial class MainWindow : Window
             AutoLoadAudioToggleSwitch.OnContent = UiText("On", "开");
             AutoLoadAudioToggleSwitch.OffContent = UiText("Off", "关");
             RoomIdentityHeaderText.Text = UiText("Room Identity", "房间身份");
+            MemberDefaultNicknameBox.Header = UiText("Member default nickname", "成员默认昵称");
             MemberKeyPassBox.Header = UiText("Member key passphrase", "成员私钥口令");
             ServerTlsHeaderText.Text = UiText("Server TLS", "服务器 TLS");
             LocalServerTlsCaBox.Header = UiText("Local Server TLS CA", "本地服务器 TLS 信任根");
             BrowseLocalServerTlsCaButton.Content = UiText("Browse", "选择");
+            RoomInstanceTitleText.Text = UiText("Select Room Instance", "选择房间实例");
+            RoomInstanceConfirmButton.Content = UiText("Confirm", "确认");
+            RoomInstanceCancelButton.Content = UiText("Cancel", "取消");
             ChatBackgroundHeaderText.Text = UiText("Chat Background", "聊天背景");
             ImportChatBackgroundButton.Content = UiText("Import Image", "导入图片");
             ClearChatBackgroundButton.Content = UiText("Clear Image", "清除图片");
@@ -2433,6 +2682,7 @@ public sealed partial class MainWindow : Window
             AppendYaml(builder, "show_only_messages", showOnlyMessages ? "true" : "false");
             AppendYaml(builder, "auto_preview_images", autoPreviewImages ? "true" : "false");
             AppendYaml(builder, "auto_load_audio", autoLoadAudio ? "true" : "false");
+            AppendYaml(builder, "member_default_nickname", MemberDefaultNicknameBox.Text.Trim());
             AppendYaml(builder, "local_server_tls_ca", LocalServerTlsCaBox.Text.Trim());
             AppendYaml(builder, "chat_background_path", chatBackgroundPath ?? "");
             AppendYaml(builder, "chat_background_opacity", NumberString(BackgroundOpacitySlider.Value));
@@ -2475,6 +2725,7 @@ public sealed partial class MainWindow : Window
             autoLoadAudio = Value(chatValues, "auto_load_audio", "false").Equals("true", StringComparison.OrdinalIgnoreCase);
             AutoPreviewImagesToggleSwitch.IsOn = autoPreviewImages;
             AutoLoadAudioToggleSwitch.IsOn = autoLoadAudio;
+            MemberDefaultNicknameBox.Text = Value(chatValues, "member_default_nickname", "");
             // Server URL is intentionally not restored from config. It is a
             // per-session endpoint choice, so stale or sensitive endpoints
             // should not silently appear after a restart.

@@ -26,56 +26,56 @@ CHAT_API void CHAT_CALL chat_set_event_callback(chat_event_callback callback, vo
 // WinUI 在启动会话前调用它，使基于 std::getenv 的 C++ 代码能看到
 // GUI 中输入的设置，而不要求从 PowerShell 启动进程。
 CHAT_API int CHAT_CALL chat_set_environment_variable(const char* name, const char* value);
+// 列出本机匹配房间名、用户名和角色的 room-dir 候选项。
+// output_json 为 UTF-8 JSON 数组；传空 buffer 时返回所需字节数。
+CHAT_API int CHAT_CALL chat_list_local_room_dirs(
+    const char* room_name,
+    const char* username,
+    const char* role,
+    char* output_json,
+    int output_json_size);
 // 从 room-dir 加载 room token 和房间级 PKI 后启动 Host。
 CHAT_API int CHAT_CALL chat_host_start(
     const char* server_url,
     const char* room_dir,
     const char* username,
+    const char* nickname,
     const char* key_pass);
 // WinUI 自动生成 logs/certs/<digest>/entrance.scp，并隐藏 room-dir 细节。
 CHAT_API int CHAT_CALL chat_host_start_auto(
     const char* server_url,
     const char* room_name,
     const char* username,
-    const char* key_pass);
-// WinUI 按房间名/用户名查找本机已有 Host room-dir，并重新接管房间。
-CHAT_API int CHAT_CALL chat_host_join_existing(
-    const char* server_url,
-    const char* room_name,
-    const char* username,
+    const char* nickname,
     const char* key_pass);
 // 从 room-dir 加载 room token 和房间级 PKI 后启动 Client。
 CHAT_API int CHAT_CALL chat_join_start(
     const char* url,
     const char* room_dir,
     const char* username,
+    const char* nickname,
     const char* key_pass);
 // WinUI 选择 Host 分发的 entrance.scp 后自动导入并发起 pending join。
 CHAT_API int CHAT_CALL chat_join_start_auto(
     const char* url,
     const char* room_name,
     const char* username,
+    const char* nickname,
     const char* entrance_file,
-    const char* key_pass);
-// WinUI 按房间名/用户名查找本机已有 Client room-dir，并加入或重连房间。
-CHAT_API int CHAT_CALL chat_join_existing(
-    const char* url,
-    const char* room_name,
-    const char* username,
     const char* key_pass);
 // 通过活动 native 会话发送房间文本行或斜杠命令。
 CHAT_API int CHAT_CALL chat_send_line(const char* line);
-// 向某个成员显示名发送文本行或斜杠附件命令。
+// 向证书指纹前缀匹配到的成员发送文本行。
 CHAT_API int CHAT_CALL chat_send_line_to(const char* target, const char* line);
 // 广播一个指定媒体类型的附件。
 CHAT_API int CHAT_CALL chat_send_image(const char* file_path);
-// 向某个成员显示名发送一个图片附件。
+// 向证书指纹前缀匹配到的成员发送一个图片附件。
 CHAT_API int CHAT_CALL chat_send_image_to(const char* target, const char* file_path);
 CHAT_API int CHAT_CALL chat_send_file(const char* file_path);
-// 向某个成员显示名发送一个普通文件附件。
+// 向证书指纹前缀匹配到的成员发送一个普通文件附件。
 CHAT_API int CHAT_CALL chat_send_file_to(const char* target, const char* file_path);
 CHAT_API int CHAT_CALL chat_send_voice(const char* file_path);
-// 向某个成员显示名发送一个语音附件。
+// 向证书指纹前缀匹配到的成员发送一个语音附件。
 CHAT_API int CHAT_CALL chat_send_voice_to(const char* target, const char* file_path);
 // 停止活动 Host 或 Client 会话，但不卸载 native 模块。
 CHAT_API void CHAT_CALL chat_stop();

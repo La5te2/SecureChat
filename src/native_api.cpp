@@ -14,6 +14,7 @@
 #include "client_session_core.hpp"
 #include "pki_application.hpp"
 
+#include <nlohmann/json.hpp>
 #include <rtc/rtc.hpp>
 
 #include <atomic>
@@ -21,6 +22,7 @@
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <exception>
 #include <filesystem>
 #include <fstream>
@@ -305,11 +307,49 @@ int CHAT_CALL chat_set_environment_variable(const char* name, const char* value)
 #endif
 }
 
+int CHAT_CALL chat_list_local_room_dirs(
+    const char* room_name,
+    const char* username,
+    const char* role,
+    char* output_json,
+    int output_json_size) {
+    installNativeCrashHandlersOnce();
+    try {
+        const auto rooms = chat::certs::listLocalRoomDirs(
+            safeString(room_name),
+            safeString(username),
+            safeString(role),
+            "logs/certs");
+        nlohmann::json payload = nlohmann::json::array();
+        for (const auto& room : rooms) {
+            payload.push_back({
+                {"roomDir", room.roomDir},
+                {"roomName", room.roomName},
+                {"roomInstanceTokenDigest", room.roomInstanceTokenDigest},
+                {"modifiedTimeUnixMs", room.modifiedTimeUnixMs}
+            });
+        }
+
+        const auto text = payload.dump();
+        const auto required = static_cast<int>(text.size() + 1);
+        if (!output_json || output_json_size <= 0) return required;
+        if (output_json_size < required) return -required;
+        std::memcpy(output_json, text.c_str(), static_cast<std::size_t>(required));
+        return required;
+    }
+    catch (const std::exception& e) {
+        emitEvent("error", e.what());
+        if (output_json && output_json_size > 0) output_json[0] = '\0';
+        return 0;
+    }
+}
+
 // 从 room-dir 读取 room token 和房间级 Host PKI，然后创建 Host 会话。
 int CHAT_CALL chat_host_start(
     const char* server_url,
     const char* room_dir,
     const char* username,
+    const char* nickname,
     const char* key_pass) {
     installNativeCrashHandlersOnce();
 
@@ -345,6 +385,8 @@ int CHAT_CALL chat_host_start(
             serverUrl,
             material.roomName,
             material.username,
+            material.baseUsername,
+            safeString(nickname),
             std::move(identity),
             material.roomInstanceToken,
             roomDir);
@@ -372,6 +414,7 @@ int CHAT_CALL chat_host_start_auto(
     const char* server_url,
     const char* room_name,
     const char* username,
+    const char* nickname,
     const char* key_pass) {
     installNativeCrashHandlersOnce();
     try {
@@ -394,30 +437,7 @@ int CHAT_CALL chat_host_start_auto(
         options.memberKeyPassword = safeString(key_pass);
         const auto created = chat::certs::createRoomEntrance(options);
         emitEvent("status", "Entrance created: " + created.entranceFile);
-        return chat_host_start(server_url, created.roomDir.c_str(), user.c_str(), key_pass);
-    }
-    catch (const std::exception& e) {
-        emitEvent("error", e.what());
-        return 0;
-    }
-}
-
-// WinUI Host 页“加入房间”：只复用本机已有 Host room-dir。
-// 它不会重新创建 entrance.scp，也不会覆盖房间级 Root/Intermediate。
-int CHAT_CALL chat_host_join_existing(
-    const char* server_url,
-    const char* room_name,
-    const char* username,
-    const char* key_pass) {
-    installNativeCrashHandlersOnce();
-    try {
-        const auto roomDir = chat::certs::findLocalRoomDir(
-            safeString(room_name),
-            safeString(username),
-            "host",
-            "logs/certs");
-        emitEvent("status", "Local host room loaded: " + roomDir);
-        return chat_host_start(server_url, roomDir.c_str(), username, key_pass);
+        return chat_host_start(server_url, created.roomDir.c_str(), user.c_str(), nickname, key_pass);
     }
     catch (const std::exception& e) {
         emitEvent("error", e.what());
@@ -431,6 +451,7 @@ int CHAT_CALL chat_join_start(
     const char* url,
     const char* room_dir,
     const char* username,
+    const char* nickname,
     const char* key_pass) {
     installNativeCrashHandlersOnce();
     try {
@@ -469,6 +490,8 @@ int CHAT_CALL chat_join_start(
             serverUrl,
             material.roomName,
             material.username,
+            material.baseUsername,
+            safeString(nickname),
             std::move(identity),
             material.roomInstanceToken,
             roomDir,
@@ -495,6 +518,7 @@ int CHAT_CALL chat_join_start_auto(
     const char* url,
     const char* room_name,
     const char* username,
+    const char* nickname,
     const char* entrance_file,
     const char* key_pass) {
     installNativeCrashHandlersOnce();
@@ -517,9 +541,17 @@ int CHAT_CALL chat_join_start_auto(
 
         const auto roomDir = chat::certs::roomDirForEntrance(entrance, roomName, "logs/certs");
         const auto localRoomDir = std::filesystem::path(roomDir);
-        const auto userKeyPath = localRoomDir / (user + "-key.pem");
-        if (!std::filesystem::exists(localRoomDir / "room-runtime.json") ||
-            !std::filesystem::exists(userKeyPath)) {
+        bool alreadyImported = false;
+        if (std::filesystem::exists(localRoomDir / "room-runtime.json")) {
+            try {
+                (void)chat::certs::loadRoomRuntimeMaterial(roomDir, user, false, false);
+                alreadyImported = true;
+            }
+            catch (const std::exception&) {
+                alreadyImported = false;
+            }
+        }
+        if (!alreadyImported) {
             chat::certs::RoomEntranceImportOptions options;
             options.entranceFile = entrance;
             options.roomPhrase = roomName;
@@ -529,30 +561,7 @@ int CHAT_CALL chat_join_start_auto(
             const auto imported = chat::certs::importRoomEntrance(options);
             emitEvent("status", "Entrance imported: " + imported.roomDir);
         }
-        return chat_join_start(url, roomDir.c_str(), user.c_str(), key_pass);
-    }
-    catch (const std::exception& e) {
-        emitEvent("error", e.what());
-        return 0;
-    }
-}
-
-// WinUI Join 页“加入房间”：只复用本机已有 Client room-dir。
-// 如果本机还没有导入 entrance.scp，会明确报错，让用户改点“导入房间”。
-int CHAT_CALL chat_join_existing(
-    const char* url,
-    const char* room_name,
-    const char* username,
-    const char* key_pass) {
-    installNativeCrashHandlersOnce();
-    try {
-        const auto roomDir = chat::certs::findLocalRoomDir(
-            safeString(room_name),
-            safeString(username),
-            "client",
-            "logs/certs");
-        emitEvent("status", "Local client room loaded: " + roomDir);
-        return chat_join_start(url, roomDir.c_str(), username, key_pass);
+        return chat_join_start(url, roomDir.c_str(), user.c_str(), nickname, key_pass);
     }
     catch (const std::exception& e) {
         emitEvent("error", e.what());

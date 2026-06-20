@@ -26,10 +26,19 @@ internal static class NativeMethods
         [MarshalAs(UnmanagedType.LPUTF8Str)] string value);
 
     [DllImport("native.dll", CallingConvention = CallingConvention.StdCall)]
+    internal static extern int chat_list_local_room_dirs(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string roomName,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string username,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string role,
+        IntPtr outputJson,
+        int outputJsonSize);
+
+    [DllImport("native.dll", CallingConvention = CallingConvention.StdCall)]
     internal static extern int chat_host_start(
         [MarshalAs(UnmanagedType.LPUTF8Str)] string serverUrl,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string roomDir,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string username,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string nickname,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string keyPass);
 
     [DllImport("native.dll", CallingConvention = CallingConvention.StdCall)]
@@ -37,13 +46,7 @@ internal static class NativeMethods
         [MarshalAs(UnmanagedType.LPUTF8Str)] string serverUrl,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string roomName,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string username,
-        [MarshalAs(UnmanagedType.LPUTF8Str)] string keyPass);
-
-    [DllImport("native.dll", CallingConvention = CallingConvention.StdCall)]
-    internal static extern int chat_host_join_existing(
-        [MarshalAs(UnmanagedType.LPUTF8Str)] string serverUrl,
-        [MarshalAs(UnmanagedType.LPUTF8Str)] string roomName,
-        [MarshalAs(UnmanagedType.LPUTF8Str)] string username,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string nickname,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string keyPass);
 
     [DllImport("native.dll", CallingConvention = CallingConvention.StdCall)]
@@ -51,6 +54,7 @@ internal static class NativeMethods
         [MarshalAs(UnmanagedType.LPUTF8Str)] string url,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string roomDir,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string username,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string nickname,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string keyPass);
 
     [DllImport("native.dll", CallingConvention = CallingConvention.StdCall)]
@@ -58,20 +62,15 @@ internal static class NativeMethods
         [MarshalAs(UnmanagedType.LPUTF8Str)] string url,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string roomName,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string username,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string nickname,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string entranceFile,
-        [MarshalAs(UnmanagedType.LPUTF8Str)] string keyPass);
-
-    [DllImport("native.dll", CallingConvention = CallingConvention.StdCall)]
-    internal static extern int chat_join_existing(
-        [MarshalAs(UnmanagedType.LPUTF8Str)] string url,
-        [MarshalAs(UnmanagedType.LPUTF8Str)] string roomName,
-        [MarshalAs(UnmanagedType.LPUTF8Str)] string username,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string keyPass);
 
     [DllImport("native.dll", CallingConvention = CallingConvention.StdCall)]
     internal static extern int chat_send_line([MarshalAs(UnmanagedType.LPUTF8Str)] string line);
 
-    // Private text send. Target may be the displayed member name or the member id.
+    // Private text send. Target is resolved by the C++ core from a certificate
+    // fingerprint prefix of at least 8 hex characters; display names are not routable.
     [DllImport("native.dll", CallingConvention = CallingConvention.StdCall)]
     internal static extern int chat_send_line_to(
         [MarshalAs(UnmanagedType.LPUTF8Str)] string target,

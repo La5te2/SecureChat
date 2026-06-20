@@ -113,10 +113,11 @@ $env:SECURECHAT_LOCAL_TLS_CA="certs\local-root-ca.pem"
 .\out\build\x64-release\client.exe wss://127.0.0.1:25566 --room-dir logs\certs\<room-digest> bob
 ```
 
-Client 会进入 pending join。回到 Host 窗口执行：
+Client 会进入 pending join。回到 Host 窗口先查看 pending requestId，再审批：
 
 ```powershell
-/approve bob
+/list
+/approve <requestId>
 ```
 
 ## Windows：WinUI
@@ -131,7 +132,7 @@ app\chat\bin\x64\Release\net10.0-windows10.0.19041.0\win-x64\SecureChat.exe
 
 WinUI 的 Server URL 必须填写 `wss://...`。如果 Server 使用 Certbot 等系统信任 CA 签发的证书，WinUI 不需要额外配置 Server CA。如果 Server 使用自动生成的开发证书，在设置面板的 `Local Server TLS CA / 本地服务器 TLS 信任根` 中选择 `certs/local-root-ca.pem`。
 
-Host 页填写 Room、Server URL、User 后点击启动房间，WinUI 会自动生成 `logs/certs/<room-digest>/entrance.scp`。Join 页填写同一个 Room、Server URL、当前 User 后点击加入房间，并在弹出的文件选择器中选择 Host 分发的 `entrance.scp`。Client 进入 pending join 后，Host 可以左键灰色 pending 成员卡片允许加入，或在输入框中发送 `/approve <成员名>` 完成审批；右键灰色 pending 成员卡片会拒绝该申请。
+Host 页填写 Room、Server URL、User 后点击启动房间，WinUI 会自动生成 `logs/certs/<room-digest>/entrance.scp`。同一个 Host 可以创建多个同名房间，每次创建都会生成新的 room instance 和新的本地 room-dir。Host 页或 Join 页点击“加入房间”时，WinUI 总会弹出房间实例选择面板；用户确认具体实例后才会连接。Join 页首次加入时填写同一个 Room、Server URL、当前 User，点击“导入房间”，并在弹出的文件选择器中选择 Host 分发的 `entrance.scp`。Client 进入 pending join 后，Host 可以左键灰色 pending 成员卡片允许加入，右键灰色 pending 成员卡片会拒绝该申请。WinUI 不显示 pending requestId。
 
 ## Linux：构建
 
@@ -226,10 +227,11 @@ export SECURECHAT_LOCAL_TLS_CA=certs/local-root-ca.pem
 ./out/build/x64-linux-release/client wss://127.0.0.1:25566 --room-dir logs/certs/<room-digest> bob
 ```
 
-Client 会进入 pending join。回到 Host 终端输入：
+Client 会进入 pending join。回到 Host 终端先查看 pending requestId，再审批：
 
 ```bash
-/approve bob
+/list
+/approve <requestId>
 ```
 
 ## Linux：局域网
@@ -314,8 +316,8 @@ sudo nginx -s reload
 Host/Client 连接 Nginx 入口：
 
 ```bash
-./out/build/x64-linux-release/host --server wss://chat.example.com:25566 secure-room alice
-./out/build/x64-linux-release/client wss://chat.example.com:25566 secure-room bob
+./out/build/x64-linux-release/host --server wss://chat.example.com:25566 --room-dir logs/certs/<room-digest> alice
+./out/build/x64-linux-release/client wss://chat.example.com:25566 --room-dir logs/certs/<room-digest> bob
 ```
 
 ## 常用聊天命令
@@ -325,8 +327,10 @@ Host/Client 连接 Nginx 入口：
 私发文本：
 
 ```text
-/to <成员名> <消息>
+/to <fingerprint-prefix> <消息>
 ```
+
+`fingerprint-prefix` 至少 8 位十六进制字符。WinUI 左键成员卡片会复制该成员证书指纹前 8 位。
 
 发送附件：
 
@@ -339,17 +343,17 @@ Host/Client 连接 Nginx 入口：
 私发附件：
 
 ```text
-/to <成员名> /image <path>
-/to <成员名> /voice <path>
-/to <成员名> /file <path>
+/to <fingerprint-prefix> /image <path>
+/to <fingerprint-prefix> /voice <path>
+/to <fingerprint-prefix> /file <path>
 ```
 
 Host 管理命令：
 
 ```text
-/silence <成员名>
-/unsilence <成员名>
-/evict <成员名>
-/ban <成员名>
+/silence <fingerprint-prefix>
+/unsilence <fingerprint-prefix>
+/evict <fingerprint-prefix>
+/ban <fingerprint-prefix>
 ```
 

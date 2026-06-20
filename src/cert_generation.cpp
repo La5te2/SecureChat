@@ -39,6 +39,8 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <chrono>
+#include <cstdint>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -471,6 +473,22 @@ std::string canonicalRoomName(const std::string& value) {
         return static_cast<char>(std::tolower(c));
     });
     return out;
+}
+
+std::string systemUsernameFromPublicFingerprint(const std::string& baseUsername, const std::string& publicKeyFingerprintValue) {
+    constexpr std::size_t systemUsernameFingerprintHexLength = 16;
+    const auto base = trimAscii(baseUsername);
+    if (base.empty()) throw std::runtime_error("username is required");
+    if (publicKeyFingerprintValue.size() < systemUsernameFingerprintHexLength) {
+        throw std::runtime_error("PKI public key fingerprint is too short");
+    }
+    // Server 的 AuthService 允许 '_'，不允许 '#/@'。
+    // 系统 id 对普通 UI 隐藏；Host 可通过 /list 查看完整 username。
+    const auto username = base + "_" + publicKeyFingerprintValue.substr(0, systemUsernameFingerprintHexLength);
+    if (username.size() > 128) {
+        throw std::runtime_error("system username is too long; choose a shorter username");
+    }
+    return username;
 }
 
 std::string pemFromCertificate(X509* cert) {
@@ -1243,9 +1261,9 @@ json decryptAdmissionPayload(
 RoomEntranceCreateResult createRoomEntrance(const RoomEntranceCreateOptions& options) {
     const auto roomName = trimAscii(options.roomName);
     const auto roomPhrase = trimAscii(options.roomPhrase);
-    const auto hostName = trimAscii(options.hostName.empty() ? "host" : options.hostName);
+    const auto hostBaseName = trimAscii(options.hostName.empty() ? "host" : options.hostName);
     if (roomName.empty()) throw std::runtime_error("room name is required");
-    if (roomPhrase.size() < 16) throw std::runtime_error("room phrase is too short for entrance.scp");
+    if (roomPhrase.empty()) throw std::runtime_error("room phrase is required");
 
     const auto roomInstanceId = base64Encode(randomBytes(32).data(), 32);
     const auto admissionSecret = base64Encode(randomBytes(32).data(), 32);
@@ -1258,6 +1276,7 @@ RoomEntranceCreateResult createRoomEntrance(const RoomEntranceCreateOptions& opt
     const auto rootPublicKeyFp = publicKeyFingerprint(rootKey.get());
     const auto intermediatePublicKeyFp = publicKeyFingerprint(intermediateKey.get());
     const auto hostPublicKeyFp = publicKeyFingerprint(hostKey.get());
+    const auto hostName = systemUsernameFromPublicFingerprint(hostBaseName, hostPublicKeyFp);
     const auto roomInstanceToken = deriveRoomInstanceToken(
         canonicalName,
         roomInstanceId,
@@ -1332,6 +1351,7 @@ RoomEntranceCreateResult createRoomEntrance(const RoomEntranceCreateOptions& opt
         {"rootPublicKeyFingerprint", rootPublicKeyFp},
         {"intermediatePublicKeyFingerprint", intermediatePublicKeyFp},
         {"hostPublicKeyFingerprint", hostPublicKeyFp},
+        {"hostBaseName", hostBaseName},
         {"hostName", hostName},
         {"hostDevice", hostDevice}
     };
@@ -1350,6 +1370,7 @@ RoomEntranceCreateResult createRoomEntrance(const RoomEntranceCreateOptions& opt
         {"roomInstanceTokenDigest", digest},
         {"admissionSecret", admissionSecret},
         {"role", "host"},
+        {"baseUsername", hostBaseName},
         {"username", hostName}
     };
     writeTextFile(runtimePath, runtime.dump(2));
@@ -1373,6 +1394,7 @@ RoomEntranceCreateResult createRoomEntrance(const RoomEntranceCreateOptions& opt
         {"rootPublicKeyFingerprint", rootPublicKeyFp},
         {"intermediatePublicKeyFingerprint", intermediatePublicKeyFp},
         {"hostPublicKeyFingerprint", hostPublicKeyFp},
+        {"hostBaseName", hostBaseName},
         {"descriptor", descriptor}
     };
     const auto envelope = encryptEntrancePayload(payload, roomPhrase);
@@ -1409,7 +1431,7 @@ std::string roomDirForEntrance(
     return pathToUtf8(roomDirFromDigest(outputRoot.empty() ? "logs/certs" : outputRoot, digest));
 }
 
-std::string findLocalRoomDir(
+std::vector<LocalRoomDirInfo> listLocalRoomDirs(
     const std::string& roomNameValue,
     const std::string& usernameValue,
     const std::string& roleValue,
@@ -1427,9 +1449,7 @@ std::string findLocalRoomDir(
         throw std::runtime_error("no local room certificates found; import or create the room first");
     }
 
-    std::filesystem::path bestDir;
-    std::filesystem::file_time_type bestTime{};
-    bool found = false;
+    std::vector<LocalRoomDirInfo> rooms;
     for (const auto& entry : std::filesystem::directory_iterator(root, ec)) {
         if (ec) break;
         if (!entry.is_directory(ec)) continue;
@@ -1438,31 +1458,44 @@ std::string findLocalRoomDir(
         try {
             const auto runtime = json::parse(readTextFile(runtimePath));
             if (runtime.value("canonicalRoomName", "") != canonicalName) continue;
-            if (runtime.value("username", "") != username) continue;
+            const auto storedBaseUsername = runtime.value("baseUsername", runtime.value("username", ""));
+            if (storedBaseUsername != username) continue;
             if (runtime.value("role", "") != role) continue;
 
             std::error_code timeEc;
             const auto modified = std::filesystem::last_write_time(runtimePath, timeEc);
-            if (!found || (!timeEc && modified > bestTime)) {
-                bestDir = entry.path();
-                bestTime = timeEc ? std::filesystem::file_time_type{} : modified;
-                found = true;
+            long long modifiedUnixMs = 0;
+            if (!timeEc) {
+                const auto systemTime = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
+                    modified - decltype(modified)::clock::now() + std::chrono::system_clock::now());
+                modifiedUnixMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    systemTime.time_since_epoch()).count();
             }
+
+            rooms.push_back({
+                pathToUtf8(entry.path()),
+                runtime.value("roomName", roomNameValue),
+                runtime.value("roomInstanceTokenDigest", ""),
+                modifiedUnixMs});
         }
         catch (...) {
             // 损坏或半写入的 room-runtime 不参与自动选择。
             continue;
         }
     }
-    if (!found) {
+
+    std::sort(rooms.begin(), rooms.end(), [](const LocalRoomDirInfo& left, const LocalRoomDirInfo& right) {
+        return left.modifiedTimeUnixMs > right.modifiedTimeUnixMs;
+    });
+    if (rooms.empty()) {
         throw std::runtime_error("no matching local room certificate directory found; import or create the room first");
     }
-    return pathToUtf8(bestDir);
+    return rooms;
 }
 
 RoomEntranceImportResult importRoomEntrance(const RoomEntranceImportOptions& options) {
-    const auto username = trimAscii(options.username);
-    if (username.empty()) throw std::runtime_error("username is required");
+    const auto baseUsername = trimAscii(options.username);
+    if (baseUsername.empty()) throw std::runtime_error("username is required");
     auto payload = validateEntrancePayload(decryptEntrancePayload(pathFromUtf8(options.entranceFile), trimAscii(options.roomPhrase)));
     const auto digest = payload.value("roomInstanceTokenDigest", "");
     if (digest.empty()) throw std::runtime_error("entrance payload missing roomInstanceTokenDigest");
@@ -1474,13 +1507,17 @@ RoomEntranceImportResult importRoomEntrance(const RoomEntranceImportOptions& opt
     const auto hostCertPath = roomDir / "host-cert.pem";
     const auto descriptorPath = roomDir / "room-descriptor.json";
     const auto runtimePath = roomDir / "room-runtime.json";
-    const auto keyPath = roomDir / (username + "-key.pem");
-    const auto csrPath = roomDir / (username + ".csr");
-    const auto csrBundlePath = roomDir / (username + ".csr.json");
     writeTextFile(rootPath, payload.value("rootCaPem", ""));
     writeTextFile(intermediatePath, payload.value("intermediateCaPem", ""));
     writeTextFile(hostCertPath, payload.value("hostCertPem", ""));
     writeTextFile(descriptorPath, payload["descriptor"].dump(2));
+
+    auto memberKey = generateRsaKey(3072);
+    const auto memberPublicKeyFp = publicKeyFingerprint(memberKey.get());
+    const auto username = systemUsernameFromPublicFingerprint(baseUsername, memberPublicKeyFp);
+    const auto keyPath = roomDir / (username + "-key.pem");
+    const auto csrPath = roomDir / (username + ".csr");
+    const auto csrBundlePath = roomDir / (username + ".csr.json");
 
     json runtime = {
         {"version", 1},
@@ -1490,12 +1527,12 @@ RoomEntranceImportResult importRoomEntrance(const RoomEntranceImportOptions& opt
         {"roomInstanceTokenDigest", digest},
         {"admissionSecret", payload.value("admissionSecret", "")},
         {"role", "client"},
+        {"baseUsername", baseUsername},
         {"username", username}
     };
     writeTextFile(runtimePath, runtime.dump(2));
     restrictPrivateFile(runtimePath);
 
-    auto memberKey = generateRsaKey(3072);
     const auto deviceName = localHostname();
     auto csr = createMemberCsr(memberKey.get(), username, digest, deviceName);
     writePrivateKeyMaybeEncrypted(keyPath, memberKey.get(), options.memberKeyPassword);
@@ -1512,7 +1549,8 @@ RoomEntranceImportResult importRoomEntrance(const RoomEntranceImportOptions& opt
         {"deviceName", deviceName},
         {"csrPem", csrPem},
         {"csrSha256", sha256Hex(csrPem)},
-        {"publicKeyFingerprint", publicKeyFingerprint(csrPublicKey.get())},
+        {"publicKeyFingerprint", memberPublicKeyFp},
+        {"baseUsername", baseUsername},
         {"nonce", base64Encode(randomBytes(16).data(), 16)}
     };
     const auto proof = signBytes(memberKey.get(), canonicalCsrBundle(csrBundle));
@@ -1707,9 +1745,19 @@ RoomRuntimeMaterial loadRoomRuntimeMaterial(
     bool requireIdentityCert) {
     const auto roomDir = pathFromUtf8(roomDirValue);
     const auto runtime = json::parse(readTextFile(roomDir / "room-runtime.json"));
-    const auto username = trimAscii(usernameValue.empty()
-        ? runtime.value("username", host ? "host" : "")
-        : usernameValue);
+    const auto storedUsername = trimAscii(runtime.value("username", host ? "host" : ""));
+    const auto storedBaseUsername = trimAscii(runtime.value("baseUsername", storedUsername));
+    const auto requestedUsername = trimAscii(usernameValue);
+    if (!requestedUsername.empty() &&
+        !storedUsername.empty() &&
+        requestedUsername != storedUsername &&
+        requestedUsername != storedBaseUsername) {
+        // room-runtime 同时记录用户输入名和系统 username。
+        // 重连时拒绝换成第三个名字，避免同一份成员私钥冒用其他身份。
+        throw std::runtime_error(
+            "room username mismatch: expected " + storedBaseUsername + ", got " + requestedUsername);
+    }
+    const auto username = storedUsername.empty() ? requestedUsername : storedUsername;
     if (username.empty()) throw std::runtime_error("room runtime username is required");
 
     const auto trustStore = roomDir / "root-ca.pem";
@@ -1726,6 +1774,7 @@ RoomRuntimeMaterial loadRoomRuntimeMaterial(
     return {
         runtime.value("roomName", ""),
         runtime.value("canonicalRoomName", ""),
+        storedBaseUsername.empty() ? username : storedBaseUsername,
         username,
         runtime.value("roomInstanceToken", ""),
         runtime.value("roomInstanceTokenDigest", ""),

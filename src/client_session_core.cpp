@@ -127,12 +127,26 @@ std::string actorIdFromMessage(const Message& msg) {
     }
     return msg.from;
 }
+
+std::string normalizeNickname(const std::string& nickname, const std::string& fallbackName) {
+    // nickname 是运行时显示名。非法或为空时回退到用户输入的 base username，
+    // 避免把内部唯一 username 暴露到普通聊天界面。
+    const auto trimmed = trimCopy(nickname);
+    if (trimmed.empty() || trimmed.size() > 64) return fallbackName;
+    for (const auto ch : trimmed) {
+        const auto c = static_cast<unsigned char>(ch);
+        if (c < 0x20 || c == 0x7f) return fallbackName;
+    }
+    return trimmed;
+}
 }
 
 ClientSessionCore::ClientSessionCore(
     std::string url,
     std::string room,
     std::string username,
+    std::string baseUsername,
+    std::string nickname,
     chat::pki_application::IdentityContext identity,
     std::string roomToken,
     std::string roomDir,
@@ -140,7 +154,9 @@ ClientSessionCore::ClientSessionCore(
     rtc::WebSocket::Configuration wsConfig)
     : mWsUrl(std::move(url)),
       mRoomId(std::move(room)),
+      mBaseUsername(std::move(baseUsername)),
       mUsername(std::move(username)),
+      mDisplayName(normalizeNickname(nickname, mBaseUsername.empty() ? mUsername : mBaseUsername)),
       mRoomToken(std::move(roomToken)),
       mRoomDir(std::move(roomDir)),
       mKeyPassword(std::move(keyPassword)),
@@ -183,6 +199,7 @@ void ClientSessionCore::start() {
             {"type", "join_room"},
             {"roomId", mRoomToken},
             {"username", mUsername},
+            {"nickname", mDisplayName},
             {"publicKey", mMemberKeys.publicKey}
         };
         if (mIdentity.enabled()) {
@@ -286,7 +303,7 @@ void ClientSessionCore::sendLine(const std::string& line) {
         Message msg = parseInput(line);
         msg.payload["actorId"] = mClientId;
         msg.payload["actorKind"] = chat::protocol::ClientActorKind;
-        msg.payload["displayName"] = mUsername;
+        msg.payload["displayName"] = mDisplayName;
         if (!chat::secure_relay::hasUsableGroupKey(mGroupKey)) {
             chatEmit(mCallbacks.onStatus, "Waiting for room group key");
             return;
@@ -299,7 +316,7 @@ void ClientSessionCore::sendLine(const std::string& line) {
             msg,
             mRoomToken,
             mClientId,
-            mUsername,
+            mDisplayName,
             chat::protocol::ClientActorKind,
             "",
             mGroupKey);
@@ -319,7 +336,7 @@ void ClientSessionCore::sendLineTo(const std::string& target, const std::string&
         return;
     }
     if (targetId.empty()) {
-        chatEmit(mCallbacks.onError, "Target member name not found: " + targetName);
+        chatEmit(mCallbacks.onError, "Target fingerprint prefix not found: " + targetName);
         return;
     }
     if (targetId == mClientId) {
@@ -347,7 +364,7 @@ void ClientSessionCore::sendLineTo(const std::string& target, const std::string&
         Message msg = parseInput(line);
         msg.payload["actorId"] = mClientId;
         msg.payload["actorKind"] = chat::protocol::ClientActorKind;
-        msg.payload["displayName"] = mUsername;
+        msg.payload["displayName"] = mDisplayName;
         std::string targetName = targetId;
         {
             std::lock_guard<std::mutex> lock(mMembersMutex);
@@ -355,7 +372,7 @@ void ClientSessionCore::sendLineTo(const std::string& target, const std::string&
             if (it != mMemberNamesById.end()) targetName = it->second;
         }
         markPrivateTarget(msg, targetId, targetName);
-        if (sendRelayMessage(msg, mClientId, mUsername, chat::protocol::ClientActorKind, targetId)) {
+        if (sendRelayMessage(msg, mClientId, mDisplayName, chat::protocol::ClientActorKind, targetId)) {
             chatEmit(mCallbacks.onMessage, msg.toJson());
         }
     }
@@ -371,19 +388,28 @@ Message ClientSessionCore::parseInput(const std::string& line) {
 }
 
 std::string ClientSessionCore::resolveMemberId(const std::string& token) {
-    // 私发中继需要具体成员 id，但 UI/CLI 目标只使用显示名。
-    // 这样可以避免与 "host" 等固定协议 id 冲突。
+    // 私发中继最终需要具体成员 id。输入端只接受证书指纹前缀，
+    // 且至少 8 个十六进制字符，避免同名昵称或 username 被误用为路由目标。
     if (token.empty()) return "";
+    if (token.size() < 8) return "";
+    for (const auto ch : token) {
+        if (!std::isxdigit(static_cast<unsigned char>(ch))) return "";
+    }
 
     std::lock_guard<std::mutex> lock(mMembersMutex);
-    for (const auto& [id, name] : mMemberNamesById) {
-        if (name == token) return id;
+    std::string match;
+    for (const auto& [id, fingerprint] : mMemberFingerprintsById) {
+        if (startsWithIgnoreCase(fingerprint, token)) {
+            if (!match.empty() && match != id) return "";
+            match = id;
+        }
     }
-    return "";
+    return match;
 }
 
 bool ClientSessionCore::rememberVerifiedMemberIdentity(
     const std::string& memberId,
+    const std::string& identityName,
     const std::string& displayName,
     const std::string& publicKey,
     const json& identity,
@@ -391,11 +417,11 @@ bool ClientSessionCore::rememberVerifiedMemberIdentity(
     const std::string& source,
     bool allowSessionKeyRotation) {
     // Server/Host 可以报告成员列表，但二者都不被视为密钥权威。
-    // 成员证书签名必须绑定 roomId、displayName 和 X25519 公钥后，
-    // 双方私发才能使用该成员信息。
+    // 成员证书签名绑定 roomId、username 和 X25519 公钥；
+    // nickname/displayName 只用于成员列表和消息气泡显示。
     if (memberId.empty() || publicKey.empty() || !identity.is_object()) return false;
     try {
-        const auto verified = mIdentity.verifyJoinRoom(mRoomId, displayName, publicKey, identity);
+        const auto verified = mIdentity.verifyJoinRoom(mRoomId, identityName, publicKey, identity);
         if (!advertisedFingerprint.empty() && advertisedFingerprint != verified.fingerprint) {
             throw std::runtime_error("member identity fingerprint mismatch");
         }
@@ -412,14 +438,17 @@ bool ClientSessionCore::rememberVerifiedMemberIdentity(
                 !allowSessionKeyRotation) {
                 throw std::runtime_error("member public key changed for existing id");
             }
-            mMemberNamesById[memberId] = displayName.empty() ? memberId : displayName;
+            mMemberNamesById[memberId] = displayName.empty()
+                ? (identityName.empty() ? memberId : identityName)
+                : displayName;
+            mMemberUsernamesById[memberId] = identityName.empty() ? memberId : identityName;
             mMemberPublicKeysById[memberId] = publicKey;
             mMemberFingerprintsById[memberId] = verified.fingerprint;
         }
 
         chatEmit(
             mCallbacks.onStatus,
-            "PKI member verified: " + (displayName.empty() ? memberId : displayName) +
+            "PKI member verified: " + (displayName.empty() ? (identityName.empty() ? memberId : identityName) : displayName) +
                 " / " + memberId + " / " + verified.fingerprint);
         return true;
     }
@@ -552,7 +581,10 @@ bool ClientSessionCore::installGroupState(const json& groupState, std::uint64_t 
                     !allowSessionKeyRotation) {
                     throw std::runtime_error("member public key changed inside GKA state");
                 }
-                mMemberNamesById[memberId] = username.empty() ? memberId : username;
+                mMemberUsernamesById[memberId] = username.empty() ? memberId : username;
+                if (mMemberNamesById.find(memberId) == mMemberNamesById.end()) {
+                    mMemberNamesById[memberId] = username.empty() ? memberId : username;
+                }
                 mMemberPublicKeysById[memberId] = publicKey;
                 mMemberFingerprintsById[memberId] = verified.fingerprint;
             }
@@ -589,6 +621,7 @@ void ClientSessionCore::handleRelayMessage(const Message& msg) {
         if (relaySenderId == chat::protocol::HostActorId &&
             relaySenderKind == chat::protocol::HostActorKind) {
             const auto memberId = msg.payload.value("memberId", "");
+            const auto username = msg.payload.value("username", memberId);
             const auto displayName = msg.payload.value("displayName", memberId);
             const auto fingerprint = msg.payload.value("fingerprint", "");
             const auto publicKey = msg.payload.value("publicKey", "");
@@ -596,7 +629,7 @@ void ClientSessionCore::handleRelayMessage(const Message& msg) {
             if (!memberId.empty() && !publicKey.empty() && identity != msg.payload.end() && identity->is_object()) {
                 // Host 公告是加密控制消息，但 Client 仍会重新验证其中的成员签名，
                 // 并拒绝与此前已验证 Server 成员列表冲突的内容。
-                rememberVerifiedMemberIdentity(memberId, displayName, publicKey, *identity, fingerprint, "member_identity");
+                rememberVerifiedMemberIdentity(memberId, username, displayName, publicKey, *identity, fingerprint, "member_identity");
             }
         }
         return;
@@ -684,7 +717,7 @@ bool ClientSessionCore::sendImageTo(const std::string& target, const std::string
     const auto targetName = trimCopy(target);
     const auto targetId = resolveMemberId(targetName);
     if (!targetName.empty() && targetId.empty()) {
-        chatEmit(mCallbacks.onError, "Target member name not found: " + targetName);
+        chatEmit(mCallbacks.onError, "Target fingerprint prefix not found: " + targetName);
         return false;
     }
     return sendAttachmentRelay(
@@ -705,7 +738,7 @@ bool ClientSessionCore::sendTextFileTo(const std::string& target, const std::str
     const auto targetName = trimCopy(target);
     const auto targetId = resolveMemberId(targetName);
     if (!targetName.empty() && targetId.empty()) {
-        chatEmit(mCallbacks.onError, "Target member name not found: " + targetName);
+        chatEmit(mCallbacks.onError, "Target fingerprint prefix not found: " + targetName);
         return false;
     }
     return sendAttachmentRelay(
@@ -726,7 +759,7 @@ bool ClientSessionCore::sendVoiceTo(const std::string& target, const std::string
     const auto targetName = trimCopy(target);
     const auto targetId = resolveMemberId(targetName);
     if (!targetName.empty() && targetId.empty()) {
-        chatEmit(mCallbacks.onError, "Target member name not found: " + targetName);
+        chatEmit(mCallbacks.onError, "Target fingerprint prefix not found: " + targetName);
         return false;
     }
     return sendAttachmentRelay(
@@ -884,14 +917,14 @@ bool ClientSessionCore::sendAttachmentRelay(
         auto it = mMemberNamesById.find(targetId);
         if (it != mMemberNamesById.end()) targetName = it->second;
     }
-    Message meta = attachment::makeBinaryMeta(metaType, mUsername, filePath, mime, bytes.size());
+    Message meta = attachment::makeBinaryMeta(metaType, mDisplayName, filePath, mime, bytes.size());
     // actor 元数据让 UI 在解密后区分发送者身份，
     // 同时中继元数据仍绑定到 Server 侧连接状态。
     meta.payload["actorId"] = mClientId;
     meta.payload["actorKind"] = chat::protocol::ClientActorKind;
-    meta.payload["displayName"] = mUsername;
+    meta.payload["displayName"] = mDisplayName;
     markPrivateTarget(meta, targetId, targetName);
-    if (!sendRelayMessage(meta, mClientId, mUsername, chat::protocol::ClientActorKind, targetId)) {
+    if (!sendRelayMessage(meta, mClientId, mDisplayName, chat::protocol::ClientActorKind, targetId)) {
         return false;
     }
 
@@ -902,7 +935,7 @@ bool ClientSessionCore::sendAttachmentRelay(
         // 每个分片都是独立的应用 Message，并由 sendRelayMessage 分别加密，
         // 因此大附件不会以明文传输。
         chunk.type = binaryType;
-        chunk.from = mUsername;
+        chunk.from = mDisplayName;
         chunk.name = meta.name;
         chunk.mime = meta.mime;
         chunk.data = attachment::base64Encode(bytes, offset, chunkSize);
@@ -915,10 +948,10 @@ bool ClientSessionCore::sendAttachmentRelay(
             {"chunkSize", static_cast<int>(chunkSize)},
             {"actorId", mClientId},
             {"actorKind", chat::protocol::ClientActorKind},
-            {"displayName", mUsername}
+            {"displayName", mDisplayName}
         };
         markPrivateTarget(chunk, targetId, targetName);
-        if (!sendRelayMessage(chunk, mClientId, mUsername, chat::protocol::ClientActorKind, targetId)) {
+        if (!sendRelayMessage(chunk, mClientId, mDisplayName, chat::protocol::ClientActorKind, targetId)) {
             return false;
         }
     }
@@ -1064,9 +1097,11 @@ void ClientSessionCore::handleSignalingMessage(const std::string& s) {
                 requestShutdown("Host identity verification failed");
                 return;
             }
+            const auto hostDisplayName = j.value("hostDisplayName", hostUsername);
             if (!rememberVerifiedMemberIdentity(
                     chat::protocol::HostActorId,
                     hostUsername,
+                    hostDisplayName,
                     hostPublicKey,
                     *hostIdentity,
                     "",
@@ -1120,10 +1155,11 @@ void ClientSessionCore::handleSignalingMessage(const std::string& s) {
             const auto requestId = j.value("requestId", "");
             chatEmit(
                 mCallbacks.onStatus,
-                "Join request is waiting for Host approval: " + requestId.substr(0, 12));
+                "Join request is waiting for Host approval");
         }
         else if (type == "room_members") {
-            // 保存最新成员 name/id 映射，用于解析 To: name 输入。
+            // 保存最新成员显示名、username 和 id 映射。
+            // 私信解析只使用证书指纹前缀，显示名仅供 UI 展示。
             // 如果 Server 包含已签名成员 identity，离开 mutex 后再验证，
             // 避免 OpenSSL 工作阻塞 UI/成员表读取。
             std::ostringstream members;
@@ -1137,17 +1173,18 @@ void ClientSessionCore::handleSignalingMessage(const std::string& s) {
                     if (!member.is_object()) continue;
                     const auto id = member.value("id", "");
                     const auto username = member.value("username", id);
+                    const auto displayName = member.value("displayName", username);
                     if (!id.empty()) {
-                        mMemberNamesById[id] = username;
+                        mMemberNamesById[id] = displayName.empty() ? username : displayName;
+                        mMemberUsernamesById[id] = username.empty() ? id : username;
                         currentMemberIds.insert(id);
                         if (member.contains("publicKey") && member.contains("identity")) {
                             identityCandidates.push_back(member);
                         }
                     }
-                    // 发出 name/id，使 UI Client 不解析原始信令 JSON
-                    // 也能保留内部 PKI 映射。
+                    // 发出显示名/id，使 UI Client 不解析原始信令 JSON。
                     if (!first) members << "; ";
-                    members << username << " / " << id;
+                    members << (displayName.empty() ? username : displayName) << " / " << id;
                     first = false;
                 }
                 for (auto it = mMemberPublicKeysById.begin(); it != mMemberPublicKeysById.end();) {
@@ -1166,6 +1203,14 @@ void ClientSessionCore::handleSignalingMessage(const std::string& s) {
                         ++it;
                     }
                 }
+                for (auto it = mMemberUsernamesById.begin(); it != mMemberUsernamesById.end();) {
+                    if (it->first != chat::protocol::HostActorId && currentMemberIds.find(it->first) == currentMemberIds.end()) {
+                        it = mMemberUsernamesById.erase(it);
+                    }
+                    else {
+                        ++it;
+                    }
+                }
             }
             for (const auto& member : identityCandidates) {
                 const auto id = member.value("id", "");
@@ -1177,6 +1222,7 @@ void ClientSessionCore::handleSignalingMessage(const std::string& s) {
                     continue;
                 }
                 const auto username = member.value("username", id);
+                const auto displayName = member.value("displayName", username);
                 const auto publicKey = member.value("publicKey", "");
                 const auto identity = member.find("identity");
                 if (identity != member.end() && identity->is_object()) {
@@ -1200,6 +1246,7 @@ void ClientSessionCore::handleSignalingMessage(const std::string& s) {
                         rememberVerifiedMemberIdentity(
                             id,
                             username,
+                            displayName,
                             publicKey,
                             *identity,
                             verified.fingerprint,

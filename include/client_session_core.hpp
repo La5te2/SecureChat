@@ -33,6 +33,8 @@ public:
         std::string url,
         std::string room,
         std::string username,
+        std::string baseUsername,
+        std::string nickname,
         chat::pki_application::IdentityContext identity,
         std::string roomToken,
         std::string roomDir = {},
@@ -85,6 +87,7 @@ private:
     // 验证并保存一个成员 identity/publicKey 映射，用于双方私发。
     bool rememberVerifiedMemberIdentity(
         const std::string& memberId,
+        const std::string& identityName,
         const std::string& displayName,
         const std::string& publicKey,
         const json& identity,
@@ -103,7 +106,7 @@ private:
     void handleRelayBinaryChunk(const std::string& senderKey, const Message& msg);
     // 将原始控制台/UI 输入转换为协议消息。
     Message parseInput(const std::string& line);
-    // 根据最新 room_members 更新解析可见成员名。
+    // 根据至少 8 位证书指纹前缀解析成员 id。
     std::string resolveMemberId(const std::string& token);
 
 private:
@@ -113,10 +116,13 @@ private:
     std::string mRoomToken;
     std::string mRoomDir;
     std::string mKeyPassword;
+    std::string mBaseUsername;
     std::string mUsername;
+    std::string mDisplayName;
     std::string mClientId;
     std::mutex mMembersMutex;
     std::unordered_map<std::string, std::string> mMemberNamesById;
+    std::unordered_map<std::string, std::string> mMemberUsernamesById;
     std::unordered_map<std::string, std::string> mMemberPublicKeysById;
     std::unordered_map<std::string, std::string> mMemberFingerprintsById;
     std::unordered_set<std::string> mRecentRelayIds;

@@ -153,7 +153,9 @@ room-descriptor.json
 
 `entrance.scp` 是 AES-256-GCM 加密的 JSON 容器，解锁密钥由 Argon2id 从房间短语和容器 salt 派生。外层只包含 magic、version、KDF 参数、salt、nonce、ciphertext 和 tag；Root/Intermediate 公钥证书、准入 secret 和 room instance 信息只在解密后的 payload 中。
 
-房间级证书仍是标准 OpenSSL/X.509 证书。证书文本中包含版本号、序列号、签发者、使用者、有效期、公钥、Key Usage、Extended Key Usage、Subject Key Identifier、Authority Key Identifier 和签名算法等标准字段。SecureChat 额外把房间绑定信息写入证书本体：`O=SecureChat`，`serialNumber=<roomInstanceTokenDigest>`，`OU=Role:<role>`，`OU=Device:<deviceName>`，并在 Netscape Comment 扩展中写入完整 `roomInstanceTokenDigest`、`roomInstanceId` 和角色。当前采用的成员个人信息是用户在界面或 CLI 中填写的 `username`，以及程序读取到的本机设备名 `deviceName`；系统不会写入真实姓名、身份证明、操作系统登录密码、IP 地址或生物身份信息。
+房间级证书仍是标准 OpenSSL/X.509 证书。证书文本中包含版本号、序列号、签发者、使用者、有效期、公钥、Key Usage、Extended Key Usage、Subject Key Identifier、Authority Key Identifier 和签名算法等标准字段。SecureChat 额外把房间绑定信息写入证书本体：`O=SecureChat`，`serialNumber=<roomInstanceTokenDigest>`，`OU=Role:<role>`，`OU=Device:<deviceName>`，并在 Netscape Comment 扩展中写入完整 `roomInstanceTokenDigest`、`roomInstanceId` 和角色。当前采用的成员个人信息是用户在界面或 CLI 中填写的 `baseUsername`，以及程序读取到的本机设备名 `deviceName`；系统不会写入真实姓名、身份证明、操作系统登录密码、IP 地址或生物身份信息。
+
+成员名分为三类。`baseUsername` 是用户输入的原始用户名，可以重复；`system username` 是协议和证书签名使用的唯一用户名，格式为 `baseUsername_` 加成员公钥指纹前 16 位十六进制字符；`nickname/displayName` 只用于界面显示，可以重复。Server 的 system username 预算为 128 字节。同一个 room instance 内 system username 不能重复，重复连接会被拒绝；WinUI 成员列表只显示 nickname 或 baseUsername。
 
 Host 创建房间时先生成 Root、Intermediate 和 Host 的密钥对，再用 canonical room name、`roomInstanceId`、准入 secret、Root 公钥指纹、Intermediate 公钥指纹和 Host 公钥指纹派生 `roomInstanceToken`。随后生成 Root/Intermediate/Host 证书，并把 `roomInstanceTokenDigest` 写入证书 subject 和扩展。这样可以避免“token 依赖证书指纹，证书内容又依赖 token”的循环引用。
 

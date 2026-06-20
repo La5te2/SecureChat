@@ -64,7 +64,9 @@ private:
         std::string roomId;
         std::string clientId;
         std::string userId;
+        // username 是房间级 PKI 绑定的不可变身份名；displayName 是成员列表显示昵称。
         std::string username;
+        std::string displayName;
         std::string publicKey;
         std::string pendingRequestId;
         // 来自 join_room 的不透明 PKI identity 对象。Server 只保存它，

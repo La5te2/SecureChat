@@ -26,6 +26,7 @@ constexpr std::size_t maxPendingJoinsPerRoom = 32;
 constexpr std::size_t maxBadMessagesPerClient = 4;
 constexpr std::size_t maxPasswordBytes = 256;
 constexpr std::size_t maxRelayFieldBytes = 512 * 1024;
+constexpr std::size_t maxUsernameBytes = 128;
 constexpr std::size_t maxPublicKeyBytes = 128;
 constexpr std::size_t maxIdentityCertChainBytes = 128 * 1024;
 constexpr std::size_t maxIdentitySignatureBytes = 4096;
@@ -79,6 +80,13 @@ bool validName(const std::string& value, std::size_t maxLength) {
         if (c < 0x20 || c == 0x7f) return false;
     }
     return true;
+}
+
+std::string displayNameOrUsername(const json& data, const std::string& username) {
+    // nickname/displayName 只用于房间成员列表展示。
+    // 空值、控制字符或超长昵称都回退到 PKI 绑定的 username。
+    const auto nickname = data.value("nickname", "");
+    return validName(nickname, 64) ? nickname : username;
 }
 
 bool hasOnlyFields(const json& data, std::initializer_list<const char*> allowed) {
@@ -184,20 +192,22 @@ void requireFieldsForType(const json& data, const std::string& type) {
     // 信令属于公开网络输入。按类型保持 schema，
     // 避免未知字段变成意外协议扩展或伪造通道。
     if (type == "create_room") {
-        if (!hasOnlyFields(data, {"type", "roomId", "username", "publicKey", "identity"})) {
+        if (!hasOnlyFields(data, {"type", "roomId", "username", "nickname", "publicKey", "identity"})) {
             throw std::runtime_error("create_room has unknown field");
         }
         stringField(data, "roomId", 64, true);
-        stringField(data, "username", 64, true);
+        stringField(data, "username", maxUsernameBytes, true);
+        stringField(data, "nickname", 64, false);
         stringField(data, "publicKey", maxPublicKeyBytes, true);
         identityField(data, true);
     }
     else if (type == "join_room") {
-        if (!hasOnlyFields(data, {"type", "roomId", "username", "publicKey", "identity", "admissionPayload"})) {
+        if (!hasOnlyFields(data, {"type", "roomId", "username", "nickname", "publicKey", "identity", "admissionPayload"})) {
             throw std::runtime_error("join_room has unknown field");
         }
         stringField(data, "roomId", 64, true);
-        stringField(data, "username", 64, true);
+        stringField(data, "username", maxUsernameBytes, true);
+        stringField(data, "nickname", 64, false);
         stringField(data, "publicKey", maxPublicKeyBytes, true);
         identityField(data, false);
         boundedObjectField(data, "admissionPayload", maxCertPayloadBytes, false);
@@ -575,12 +585,13 @@ void SignalingServer::handleCreateRoom(rtc::WebSocket* key, const json& data) {
     // Server 不创建群密钥，也不成为成员。
     const std::string roomId = data.value("roomId", "");
     const std::string username = data.value("username", "host");
+    const std::string displayName = displayNameOrUsername(data, username);
     const std::string publicKey = data.value("publicKey", "");
     if (roomId.empty()) {
         sendToClient(key, {{"type", "error"}, {"message", "missing roomId"}});
         return;
     }
-    if (!validName(roomId, 64) || !validName(username, 64) || publicKey.empty()) {
+    if (!validName(roomId, 64) || !validName(username, maxUsernameBytes) || publicKey.empty()) {
         sendToClient(key, {{"type", "error"}, {"message", "invalid room or username"}});
         return;
     }
@@ -611,6 +622,7 @@ void SignalingServer::handleCreateRoom(rtc::WebSocket* key, const json& data) {
                 client->clientId = "host";
                 client->userId = account.userId;
                 client->username = account.username;
+                client->displayName = displayName;
                 client->publicKey = publicKey;
                 client->identity = data["identity"];
                 mRegistry.restoreRoom(roomId, account);
@@ -640,6 +652,7 @@ void SignalingServer::handleCreateRoom(rtc::WebSocket* key, const json& data) {
                 client->clientId = "host";
                 client->userId = account.userId;
                 client->username = account.username;
+                client->displayName = displayName;
                 client->publicKey = publicKey;
                 client->identity = data["identity"];
                 mRoomStore.markRoomOpen(roomId);
@@ -664,6 +677,7 @@ void SignalingServer::handleCreateRoom(rtc::WebSocket* key, const json& data) {
         {"roomId", roomId},
         {"userId", account.userId},
         {"username", account.username},
+        {"displayName", displayName},
         {"publicKey", publicKey}
     });
     broadcastRoomMembers(roomId);
@@ -677,13 +691,14 @@ void SignalingServer::handleJoinRoom(rtc::WebSocket* key, const json& data) {
     // Server 不直接把新连接放进 active member 集合；Host 必须显式 approve。
     const std::string roomId = data.value("roomId", "");
     const std::string username = data.value("username", "");
+    const std::string displayName = displayNameOrUsername(data, username);
     const std::string publicKey = data.value("publicKey", "");
     std::shared_ptr<rtc::WebSocket> clientWs;
     std::shared_ptr<rtc::WebSocket> hostWs;
     std::string pendingRequestId;
     std::string errorMessage;
 
-    if (!validName(roomId, 64) || !validName(username, 64) || publicKey.empty()) {
+    if (!validName(roomId, 64) || !validName(username, maxUsernameBytes) || publicKey.empty()) {
         sendToClient(key, {{"type", "error"}, {"message", "invalid room or username"}});
         return;
     }
@@ -720,6 +735,7 @@ void SignalingServer::handleJoinRoom(rtc::WebSocket* key, const json& data) {
                     {"roomId", roomId},
                     {"requestId", pendingRequestId},
                     {"username", username},
+                    {"displayName", displayName},
                     {"publicKey", publicKey}
                 };
                 if (data.contains("identity")) pending["identity"] = data["identity"];
@@ -729,6 +745,7 @@ void SignalingServer::handleJoinRoom(rtc::WebSocket* key, const json& data) {
                 client->roomId = roomId;
                 client->role = "pending";
                 client->username = username;
+                client->displayName = displayName;
                 client->publicKey = publicKey;
                 client->identity = data.contains("identity") ? data["identity"] : json::object();
                 client->pendingRequestId = pendingRequestId;
@@ -745,6 +762,7 @@ void SignalingServer::handleJoinRoom(rtc::WebSocket* key, const json& data) {
         {"type", "join_pending"},
         {"roomId", roomId},
         {"username", username},
+        {"displayName", displayName},
         {"requestId", pendingRequestId},
         {"message", hostWs ? "waiting for host approval" : "waiting for host to reconnect and approve"}
     });
@@ -754,6 +772,7 @@ void SignalingServer::handleJoinRoom(rtc::WebSocket* key, const json& data) {
             {"roomId", roomId},
             {"requestId", pendingRequestId},
             {"username", username},
+            {"displayName", displayName},
             {"publicKey", publicKey}
         };
         if (data.contains("identity")) pending["identity"] = data["identity"];
@@ -774,6 +793,7 @@ void SignalingServer::handleApproveJoin(rtc::WebSocket* key, const json& data) {
     std::string roomId;
     std::string clientId;
     std::string hostUsername;
+    std::string hostDisplayName;
     std::string hostPublicKey;
     std::string errorMessage;
     json pending;
@@ -801,6 +821,7 @@ void SignalingServer::handleApproveJoin(rtc::WebSocket* key, const json& data) {
                 else {
                     pending = pendingIt->second;
                     const auto username = pending.value("username", "");
+                    const auto displayName = pending.value("displayName", username);
                     const auto publicKey = pending.value("publicKey", "");
                     ClientState* pendingClient = nullptr;
                     for (auto& [_, state] : mClients) {
@@ -836,6 +857,7 @@ void SignalingServer::handleApproveJoin(rtc::WebSocket* key, const json& data) {
                             clientId = account.userId;
                             clientWs = pendingClient->ws;
                             hostUsername = sender->username;
+                            hostDisplayName = sender->displayName.empty() ? sender->username : sender->displayName;
                             hostPublicKey = sender->publicKey;
                             hostIdentity = sender->identity;
 
@@ -843,6 +865,7 @@ void SignalingServer::handleApproveJoin(rtc::WebSocket* key, const json& data) {
                             pendingClient->clientId = clientId;
                             pendingClient->userId = account.userId;
                             pendingClient->username = account.username;
+                            pendingClient->displayName = displayName;
                             pendingClient->publicKey = publicKey;
                             if (pending.contains("identity")) pendingClient->identity = pending["identity"];
                             pendingClient->role = "client";
@@ -872,8 +895,10 @@ void SignalingServer::handleApproveJoin(rtc::WebSocket* key, const json& data) {
         {"clientId", clientId},
         {"userId", account.userId},
         {"username", account.username},
+        {"displayName", pending.value("displayName", account.username)},
         {"publicKey", pending.value("publicKey", "")},
         {"hostUsername", hostUsername},
+        {"hostDisplayName", hostDisplayName.empty() ? hostUsername : hostDisplayName},
         {"hostPublicKey", hostPublicKey},
         {"approvalRequestId", requestId},
         {"approvalEpoch", data.value("epoch", 0ULL)},
@@ -890,6 +915,7 @@ void SignalingServer::handleApproveJoin(rtc::WebSocket* key, const json& data) {
         {"clientId", clientId},
         {"userId", account.userId},
         {"username", account.username},
+        {"displayName", pending.value("displayName", account.username)},
         {"publicKey", pending.value("publicKey", "")}
     };
     if (pending.contains("identity")) newClient["identity"] = pending["identity"];
@@ -1513,10 +1539,12 @@ SignalingServer::RoomSnapshot SignalingServer::roomSnapshotLocked(const std::str
         if (client.roomId != roomId) continue;
 
         if (client.role == "host") {
-            snapshot.members.push_back(client.username + " (Host)");
+            const auto displayName = client.displayName.empty() ? client.username : client.displayName;
+            snapshot.members.push_back(displayName + " (Host)");
             json info = {
                 {"id", chat::protocol::HostActorId},
                 {"username", client.username},
+                {"displayName", displayName},
                 {"role", "host"}
             };
             if (!client.publicKey.empty() && client.identity.is_object()) {
@@ -1531,10 +1559,12 @@ SignalingServer::RoomSnapshot SignalingServer::roomSnapshotLocked(const std::str
     for (auto& [_, client] : mClients) {
         if (client.roomId != roomId || client.role != "client") continue;
 
-        snapshot.members.push_back(client.username);
+        const auto displayName = client.displayName.empty() ? client.username : client.displayName;
+        snapshot.members.push_back(displayName);
         json info = {
             {"id", client.clientId},
             {"username", client.username},
+            {"displayName", displayName},
             {"role", "client"}
         };
         // memberInfos 不被接收者直接信任。

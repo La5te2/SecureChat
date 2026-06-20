@@ -154,7 +154,7 @@
                         x:Name="PrivateTargetBox"
                         Grid.Column="1"
                         MinWidth="128"
-                        PlaceholderText="To: name"
+                        PlaceholderText="To: Member"
                         VerticalAlignment="Center" />
                     <Button
                         x:Name="SendButton"
@@ -259,6 +259,7 @@
                         <ToggleSwitch x:Name="AutoPreviewImagesToggleSwitch" Header="Auto preview images" IsOn="True" Toggled="AttachmentPreviewSetting_Toggled" />
                         <ToggleSwitch x:Name="AutoLoadAudioToggleSwitch" Header="Auto load audio" Toggled="AttachmentPreviewSetting_Toggled" />
                         <TextBlock x:Name="RoomIdentityHeaderText" Text="Room Identity" FontWeight="SemiBold" />
+                        <TextBox x:Name="MemberDefaultNicknameBox" Header="Member default nickname" TextChanged="PersistedSetting_Changed" />
                         <PasswordBox x:Name="MemberKeyPassBox" Header="Member key passphrase" />
                         <TextBlock x:Name="ServerTlsHeaderText" Text="Server TLS" FontWeight="SemiBold" />
                         <Grid ColumnSpacing="8">
@@ -349,6 +350,66 @@
                         <Slider x:Name="MetaFontSizeSlider" Header="Label font size" Minimum="9" Maximum="16" Value="11" StepFrequency="1" ValueChanged="MetaTextStyle_Changed" />
                     </StackPanel>
                 </ScrollViewer>
+            </Border>
+        </Grid>
+
+        <Grid
+            x:Name="RoomInstanceOverlay"
+            Grid.ColumnSpan="4"
+            Background="#B3000000"
+            PointerPressed="RoomInstanceOverlay_PointerPressed"
+            Visibility="Collapsed">
+            <Border
+                x:Name="RoomInstancePanel"
+                Width="520"
+                MaxHeight="680"
+                Padding="18"
+                CornerRadius="8"
+                HorizontalAlignment="Center"
+                VerticalAlignment="Center"
+                PointerPressed="RoomInstancePanel_PointerPressed"
+                Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                BorderThickness="1">
+                <Grid Width="420" RowSpacing="14">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+
+                    <TextBlock x:Name="RoomInstanceTitleText" Text="Select Room Instance" FontWeight="SemiBold" />
+
+                    <ScrollViewer
+                        Grid.Row="1"
+                        VerticalScrollBarVisibility="Auto"
+                        VerticalScrollMode="Enabled"
+                        MaxHeight="540">
+                        <StackPanel x:Name="RoomInstanceListPanel" Spacing="8" />
+                    </ScrollViewer>
+
+                    <Grid Grid.Row="2" ColumnSpacing="8">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <Button
+                            x:Name="RoomInstanceConfirmButton"
+                            Content="Confirm"
+                            Click="RoomInstanceConfirm_Click"
+                            HorizontalAlignment="Stretch"
+                            Background="#005FB8"
+                            Foreground="White" />
+                        <Button
+                            x:Name="RoomInstanceCancelButton"
+                            Grid.Column="1"
+                            Content="Cancel"
+                            Click="RoomInstanceCancel_Click"
+                            HorizontalAlignment="Stretch"
+                            Background="#E6E6E6"
+                            Foreground="#1C1C1C" />
+                    </Grid>
+                </Grid>
             </Border>
         </Grid>
     </Grid>

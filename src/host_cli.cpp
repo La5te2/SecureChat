@@ -37,8 +37,8 @@ ChatCallbacks consoleCallbacks() {
 
 void printUsage() {
     std::cerr << "Usage:\n";
-    std::cerr << "  host --server <wss-url> --room-dir <dir> [username] [--key-pass <pass>] [--daemon]\n";
-    std::cerr << "Commands: /image <path>, /file <path>, /voice <path>, /to <member-name> <text|attachment-command>, /stop_session, /quit\n";
+    std::cerr << "  host --server <wss-url> --room-dir <dir> [username] [--nickname <name>] [--key-pass <pass>] [--daemon]\n";
+    std::cerr << "Commands: /image <path>, /file <path>, /voice <path>, /to <fingerprint-prefix> <text|attachment-command>, /list, /stop_session, /quit\n";
     std::cerr << "Options:\n";
     std::cerr << "  --daemon keeps the room running without reading stdin.\n";
     std::cerr << "  --server connects this Host as a visible group-owner member to an untrusted Server.\n";
@@ -66,7 +66,7 @@ std::vector<std::string> positionalArgs(const std::vector<std::string>& args) {
     positional.reserve(args.size());
     for (std::size_t i = 0; i < args.size(); ++i) {
         if (args[i] == "--daemon") continue;
-        if (args[i] == "--server" || args[i] == "--room-dir" || args[i] == "--key-pass") {
+        if (args[i] == "--server" || args[i] == "--room-dir" || args[i] == "--key-pass" || args[i] == "--nickname") {
             ++i;
             continue;
         }
@@ -148,6 +148,7 @@ int main(int argc, char** argv) {
     const auto serverUrl = serverUrlFromArgs(rawArgs);
     const auto roomDir = optionValue(rawArgs, "--room-dir");
     const auto keyPassword = optionValue(rawArgs, "--key-pass");
+    const auto nickname = optionValue(rawArgs, "--nickname");
     const auto args = positionalArgs(rawArgs);
     if (serverUrl.empty() || roomDir.empty() || args.size() > 2) {
         printUsage();
@@ -166,6 +167,8 @@ int main(int argc, char** argv) {
             serverUrl,
             material.roomName,
             material.username,
+            material.baseUsername,
+            nickname,
             std::move(identity),
             material.roomInstanceToken,
             roomDir);

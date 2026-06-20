@@ -34,6 +34,8 @@ public:
         std::string wsUrl,
         std::string roomId,
         std::string username,
+        std::string baseUsername,
+        std::string nickname,
         chat::pki_application::IdentityContext identity,
         std::string roomToken,
         std::string roomDir = {},
@@ -134,15 +136,16 @@ private:
     void setCurrentHostActorMetadata(Message& msg);
     // 返回 Client 显示名；缺失时回退到 id。
     std::string displayNameForClient(const std::string& id);
-    // 将可见 Client 名解析为 client id。
+    // 将至少 8 位证书指纹前缀解析为 client id。
     std::string resolveClientId(const std::string& token);
-    // 将 requestId 或成员名解析为 pending join requestId。
+    // 将精确 requestId 解析为 pending join requestId。
     std::string resolvePendingJoinId(const std::string& token);
     // 请求 Server 移除未通过 Host 侧身份检查的 Client。
     void rejectClient(const std::string& clientId, const std::string& reason);
     // 通过加密中继广播 Host 已验证的成员证书指纹。
     void announceVerifiedMember(
         const std::string& memberId,
+        const std::string& username,
         const std::string& displayName,
         const std::string& fingerprint,
         const std::string& subject,
@@ -156,7 +159,9 @@ private:
     // Server 把该 token 当作 roomId；人类可读 room id 只留在本地 UI 和 PKI 语义中。
     std::string mRoomToken;
     std::string mRoomDir;
+    std::string mBaseUsername;
     std::string mUsername;
+    std::string mDisplayName;
     rtc::WebSocket::Configuration mWsConfig;
     ChatCallbacks mCallbacks;
     std::shared_ptr<rtc::WebSocket> mWs;
@@ -165,6 +170,8 @@ private:
     // 连接/准入失败，而不是活动会话中断。
     std::atomic_bool mRoomCreated = false;
     std::mutex mClientsMutex;
+    // username 是 PKI/CSR 绑定名；mClientNames 是房间内显示昵称。
+    std::unordered_map<std::string, std::string> mClientUsernames;
     std::unordered_map<std::string, std::string> mClientNames;
     std::unordered_map<std::string, std::string> mClientPublicKeys;
     std::unordered_map<std::string, std::string> mClientIdentityFingerprints;

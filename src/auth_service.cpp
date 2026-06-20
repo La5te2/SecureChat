@@ -29,8 +29,8 @@ UserAccount AuthService::registerOrLogin(const std::string& username, const std:
 void AuthService::validateUsername(const std::string& username) {
     // 按 Unicode 码点数而不是字节数校验，避免中文显示名仅因 UTF-8 多字节编码被拒绝。
     const auto codepoints = decodeUtf8(username);
-    if (codepoints.empty() || codepoints.size() > 32) {
-        throw std::runtime_error("username must be 1-32 characters");
+    if (codepoints.empty() || codepoints.size() > 128) {
+        throw std::runtime_error("username must be 1-128 characters");
     }
 
     for (char32_t ch : codepoints) {
@@ -109,7 +109,7 @@ std::size_t AuthService::hashPassword(const std::string& username, const std::st
 }
 
 std::string AuthService::makeUserId(const std::string& username) {
-    // 该 id 在加密房间状态和调试路径中有意保持可读。
-    // UI 私发目标使用显示名；Server 日志会脱敏 id。
+    // clientId 是 Server 当前连接路由 id，不是用户身份本身。
+    // username 已经是房间级系统 username，因此不会退化为 user_<baseUsername>。
     return "user_" + username;
 }

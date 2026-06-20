@@ -6,6 +6,7 @@
 #include "common.hpp"
 
 #include <string>
+#include <vector>
 
 namespace chat::certs {
 
@@ -92,6 +93,9 @@ struct RoomMemberInstallResult {
 struct RoomRuntimeMaterial {
     std::string roomName;
     std::string canonicalRoomName;
+    // baseUsername 是用户在 CLI/WinUI 输入的原始名字。
+    // username 是房间内部唯一身份名：baseUsername + "_" + PKI 公钥指纹短码。
+    std::string baseUsername;
     std::string username;
     std::string roomInstanceToken;
     std::string roomInstanceTokenDigest;
@@ -103,6 +107,13 @@ struct RoomRuntimeMaterial {
     std::string identityKeyFile;
     std::string memberCsrBundleFile;
     bool identityCertReady = false;
+};
+
+struct LocalRoomDirInfo {
+    std::string roomDir;
+    std::string roomName;
+    std::string roomInstanceTokenDigest;
+    long long modifiedTimeUnixMs = 0;
 };
 
 // 生成 Host 的房间级 Root/Intermediate、Host 成员证书和加密 entrance.scp。
@@ -118,9 +129,9 @@ std::string roomDirForEntrance(
     const std::string& roomPhrase,
     const std::string& outputRoot = "logs/certs");
 
-// 按房间名、用户名和角色查找本机已有的 room-dir。
-// UI 的“加入房间”按钮使用它复用本机证书材料，不打开 entrance.scp 文件选择器。
-std::string findLocalRoomDir(
+// 列出所有匹配房间名、用户名和角色的本机 room-dir。WinUI 总是让用户
+// 显式选择 room instance，即使只有一个候选项，也避免同名房间自动选错。
+std::vector<LocalRoomDirInfo> listLocalRoomDirs(
     const std::string& roomName,
     const std::string& username,
     const std::string& role,

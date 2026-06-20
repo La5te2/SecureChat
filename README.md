@@ -22,7 +22,7 @@ SecureChat 分为三个运行角色。
 - Host 是创建房间的成员，也是房间生命周期管理者。Host 可以创建房间、关闭房间、禁言或驱逐当前房间成员，并发起新的群组密钥协商 epoch。
 - Client 是加入房间的普通成员。Client 参与成员身份认证、群组密钥协商、群聊消息收发和私发消息收发。
 
-同一个 Server 实例可以承载多个不同 room instance。Server 用 opaque room instance token 注册和路由，因此显示房间名可以重复；同一个 room instance token 不能重复。一台机器可以启动多个 Server，只要监听端口不同。
+同一个 Server 实例可以承载多个不同 room instance。Server 用 opaque room instance token 注册和路由，因此显示房间名可以重复；同一个 room instance token 不能重复。一台机器可以启动多个 Server，只要监听端口不同。同一个 Host 可以创建多个同名房间，每次创建都会生成新的 room instance token 和新的本地 room-dir；重连时 CLI 必须显式传入 `--room-dir`，WinUI 会弹出房间实例选择面板让用户确认具体实例。
 
 ## 安全模型
 
@@ -45,6 +45,8 @@ Host 和 Client 必须具备成员 PKI。成员证书用于证明长期身份，
 Host/Client 会验证证书链、证书有效期、Key Usage `digitalSignature`、签名算法一致性和签名内容。缺少有效 room-dir 或房间级 PKI 文件时，Host/Client 启动失败。
 
 成员私钥只在本机使用。WinUI 读取的是 room-dir 中的本机成员私钥文件，不会把私钥内容写入配置文件，也不会上传给 Server。
+
+成员身份分为三层。`baseUsername` 是用户在 CLI/WinUI 输入的原始用户名，可以和其他成员重复；`system username` 是房间级成员证书公钥指纹派生出的协议用户名，格式为 `baseUsername_` 加公钥指纹前 16 位十六进制字符，同一个 room instance 内不能重复；`nickname/displayName` 只用于界面显示，可以重复。Server 放行的 system username 长度预算为 128 字节。WinUI 成员列表显示 nickname 或 base username，不直接显示 system username。
 
 ### 贡献式 GKA
 
@@ -254,7 +256,7 @@ Linux：
 ./out/build/x64-linux-release/cert import-entrance --entrance logs/certs/<room-digest>/entrance.scp --phrase "use-a-long-random-room-phrase" --user bob --out logs/certs
 ```
 
-然后打开三个终端，先启动 Server，再启动 Host，最后启动 Client。Client 连接后会停留在 pending join。Host 在输入框或 CLI 标准输入中执行 `/approve bob` 后，会自动解密准入信令 envelope，校验 Client 的 CSR、room instance 绑定、设备/身份声明和 pending join proof，并在线签发成员证书响应；签发响应同样经 admission-encrypted envelope 返回。Client 安装响应后才会成为 active 成员并收到当前 group key。
+然后打开三个终端，先启动 Server，再启动 Host，最后启动 Client。Client 连接后会停留在 pending join。Host 在 CLI 标准输入中执行 `/list` 查看 pending requestId，再执行 `/approve <requestId>`；WinUI Host 可直接左键 pending 成员卡片允许加入。Host 会自动解密准入信令 envelope，校验 Client 的 CSR、room instance 绑定、设备/身份声明和 pending join proof，并在线签发成员证书响应；签发响应同样经 admission-encrypted envelope 返回。Client 安装响应后才会成为 active 成员并收到当前 group key。
 
 Windows：
 
@@ -365,27 +367,29 @@ WinUI 面向日常使用场景。
 
 1. 打开 WinUI。
 2. 如果连接本地/局域网自动生成的 WSS 证书，在设置面板选择 `Local Server TLS CA / 本地服务器 TLS 信任根`。
-3. Host 区域输入 Room、Server URL 和 User，点击 `Start Hosting`。WinUI 会自动生成 `logs/certs/<room-digest>/entrance.scp` 和房间级 Host 证书材料。
-4. Join 区域输入同一个 Room、Server URL 和当前 User，点击 `Join Room` 后选择 Host 分发的 `entrance.scp` 文件。
-5. Client 正确解析 `entrance.scp` 后进入 pending 状态。此时发送框禁用，成员列表只显示自己的灰色卡片。
-6. Host 界面会显示该 pending 成员的灰色卡片。左键允许加入，右键拒绝加入并封禁该申请指纹。
-7. 审批通过后，Host 签发成员证书响应，Client 安装证书并参与 GKA。发送栏留空 `To: member` 表示群发；填写成员名表示私发。
-8. 成员列表只显示成员名。点击已加入成员卡片复制完整证书指纹，右键成员卡片切换附件自动预览允许状态。
-9. Host 点击 `Stop Session` 会关闭房间并让其他成员退出。
+3. Host 区域输入 Room、Server URL 和 User，点击 `Create Room / 创建房间`。WinUI 会自动生成 `logs/certs/<room-digest>/entrance.scp` 和房间级 Host 证书材料。
+4. Host 或 Join 区域点击 `Join Room / 加入房间` 时，WinUI 会弹出房间实例选择面板；确认后才会连接。即使只有一个同名候选房间，也会要求确认。
+5. Client 首次加入时在 Join 区域点击 `Import Room / 导入房间`，选择 Host 分发的 `entrance.scp` 文件。
+6. Client 正确解析 `entrance.scp` 后进入 pending 状态。此时发送框禁用，成员列表只显示自己的灰色卡片。
+7. Host 界面会显示该 pending 成员的灰色卡片。左键允许加入，右键拒绝加入并封禁该申请指纹。
+8. 审批通过后，Host 签发成员证书响应，Client 安装证书并参与 GKA。发送栏留空 `To: Member / 私信对象` 表示群发；填写成员证书指纹前缀表示私发，前缀至少 8 位十六进制字符。
+9. 成员列表只显示成员名。点击已加入成员卡片复制证书指纹前 8 位，右键成员卡片切换附件自动预览允许状态。完整证书指纹保留在程序内部，Host 可以通过 `/list` 显式查看。
+10. Host 点击 `Stop Session` 会关闭房间并让其他成员退出。
 
-成员名用于图形界面展示和私发目标匹配。协议内部仍有 member id，用于路由、身份绑定和排障。
+成员名只用于图形界面展示，不用于私发目标匹配。私发目标使用证书指纹前缀，协议内部仍有连接路由 id，用于 Server relay、身份绑定和排障。
 
 ## CLI 命令
 
 Host 管理命令在 Host 输入框或 CLI 标准输入中发送：
 
 ```text
-/silence <成员名或成员id>
-/unsilence <成员名或成员id>
-/evict <成员名或成员id>
-/ban <成员名或成员id>
-/approve <成员名或requestId>
-/reject <成员名或requestId> [原因]
+/silence <fingerprint-prefix>
+/unsilence <fingerprint-prefix>
+/evict <fingerprint-prefix>
+/ban <fingerprint-prefix>
+/list
+/approve <requestId>
+/reject <requestId> [原因]
 /close_room
 ```
 
@@ -393,16 +397,18 @@ Host 管理命令在 Host 输入框或 CLI 标准输入中发送：
 
 `evict` 和 `ban` 会驱逐目标成员，并把该成员已验证证书指纹加入当前房间内存封禁集。封禁不写入磁盘，房间结束后失效。
 
-`approve` 会把已验证的 pending join 提升为 active 成员。`reject` 会拒绝 pending 成员，拒绝响应带 Host 签名。`close_room` 显式关闭当前 room instance。
+`list` 会显示 Host、active Client 和 pending join 的 display name、system username、证书指纹和 pending requestId。`approve` 会把已验证的 pending join 提升为 active 成员。`reject` 会拒绝 pending 成员，拒绝响应带 Host 签名。`close_room` 显式关闭当前 room instance。WinUI 不显示 requestId，点击 pending 成员卡片时会在内部使用 requestId。
 
 私发命令：
 
 ```text
-/to <成员名> <消息>
-/to <成员名> /image <path>
-/to <成员名> /file <path>
-/to <成员名> /voice <path>
+/to <fingerprint-prefix> <消息>
+/to <fingerprint-prefix> /image <path>
+/to <fingerprint-prefix> /file <path>
+/to <fingerprint-prefix> /voice <path>
 ```
+
+`fingerprint-prefix` 至少 8 位十六进制字符，大小写不敏感。WinUI 左键成员卡片会复制该成员证书指纹前 8 位，可直接粘贴到 `To: Member / 私信对象` 输入框。
 
 附件命令：
 
@@ -494,7 +500,7 @@ taskkill /PID <pid> /F
 
 ### Client 一直等待 group key
 
-先检查 Client 是否仍处于 pending join。新成员需要 Host 执行 `/approve <成员名或requestId>` 后才会成为 active 成员并收到当前 group key。然后检查 Host 是否仍在房间内，Server 是否仍在转发 `group_key` envelope，以及 Host/Client 是否使用同一套房间级 PKI 信任根。需要排障时可以临时启用日志：
+先检查 Client 是否仍处于 pending join。新成员需要 Host 在 WinUI 左键 pending 成员卡片，或在 CLI 执行 `/list` 查看 requestId 后执行 `/approve <requestId>`，才会成为 active 成员并收到当前 group key。然后检查 Host 是否仍在房间内，Server 是否仍在转发 `group_key` envelope，以及 Host/Client 是否使用同一套房间级 PKI 信任根。需要排障时可以临时启用日志：
 
 ```bash
 export SECURECHAT_SERVER_LOG_FILE=server.log
