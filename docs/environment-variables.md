@@ -55,7 +55,7 @@ Host/Client 不再读取全局成员 PKI 环境变量。CLI 的成员 trust stor
 
 | 变量 | 默认值 | 用途 |
 | --- | --- | --- |
-| `SECURECHAT_ATTACHMENT_MAX_BYTES` | `104857600` | 单个发送附件大小上限，默认 100 MB；图片、语音、文本附件共用同一个上限。 |
+| `SECURECHAT_ATTACHMENT_MAX_BYTES` | `104857600` | 单个发送附件大小上限，默认 100 MB；图片、WinUI 录音和普通文件共用同一个上限。 |
 | `SECURECHAT_LOGS_MAX_BYTES` | `536870912` | 接收附件缓存总量上限，默认 512 MB。 |
 
 示例：

@@ -59,19 +59,18 @@ bool hasAllowedExtension(const std::string& name, Kind kind) {
     case Kind::Voice:
         return ext == ".wav";
     case Kind::Text:
-        return ext == ".txt" || ext == ".md" || ext == ".markdown" ||
-               ext == ".log" || ext == ".csv" || ext == ".json" ||
-               ext == ".xml" || ext == ".yml" || ext == ".yaml" ||
-               ext == ".ini" || ext == ".conf" || ext == ".cfg";
+        // file 是通用附件通道。格式风险交给后续附件分级、隔离和沙箱处理，
+        // 传输层只负责大小、名称净化和端到端加密。
+        return true;
     }
     return false;
 }
 
 const char* extensionError(Kind kind) {
     switch (kind) {
-    case Kind::Image: return "image extension must be PNG, JPEG, or BMP";
+    case Kind::Image: return "image extension must be .png, .jpg, .jpeg, or .bmp";
     case Kind::Voice: return "voice extension must be WAV";
-    case Kind::Text: return "file extension is not in the supported text list";
+    case Kind::Text: return "";
     }
     return "file extension is not supported";
 }
@@ -212,7 +211,7 @@ std::uintmax_t pruneReceiveCacheFor(std::uintmax_t incomingBytes) {
 const char* defaultFileName(Kind kind) {
     switch (kind) {
     case Kind::Image: return "image";
-    case Kind::Text: return "file.txt";
+    case Kind::Text: return "file";
     case Kind::Voice: return "voice.wav";
     }
     return "file";
@@ -229,7 +228,7 @@ std::string limitError(Kind) {
 const char* label(Kind kind) {
     switch (kind) {
     case Kind::Image: return "image";
-    case Kind::Text: return "text";
+    case Kind::Text: return "file";
     case Kind::Voice: return "voice";
     }
     return "file";
@@ -240,11 +239,29 @@ bool hasPrefix(const std::vector<unsigned char>& bytes, const std::vector<unsign
            std::equal(magic.begin(), magic.end(), bytes.begin());
 }
 
-bool hasImageSignature(const std::vector<unsigned char>& bytes) {
+bool hasPngSignature(const std::vector<unsigned char>& bytes) {
     static const std::vector<unsigned char> png = {0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a};
+    return hasPrefix(bytes, png);
+}
+
+bool hasJpegSignature(const std::vector<unsigned char>& bytes) {
     static const std::vector<unsigned char> jpg = {0xff, 0xd8, 0xff};
+    return hasPrefix(bytes, jpg);
+}
+
+bool hasBmpSignature(const std::vector<unsigned char>& bytes) {
     static const std::vector<unsigned char> bmp = {'B', 'M'};
-    return hasPrefix(bytes, png) || hasPrefix(bytes, jpg) || hasPrefix(bytes, bmp);
+    return hasPrefix(bytes, bmp);
+}
+
+bool hasImageSignatureForName(const std::vector<unsigned char>& bytes, const std::string& name) {
+    // 图片通道必须同时满足扩展名和文件头。尤其 .jpg/.jpeg 只能是 JPEG，
+    // 避免把其他格式伪装成 JPEG 后进入图片预览路径。
+    const auto ext = extensionOf(name);
+    if (ext == ".png") return hasPngSignature(bytes);
+    if (ext == ".jpg" || ext == ".jpeg") return hasJpegSignature(bytes);
+    if (ext == ".bmp") return hasBmpSignature(bytes);
+    return false;
 }
 
 bool hasWaveSignature(const std::vector<unsigned char>& bytes) {
@@ -253,9 +270,9 @@ bool hasWaveSignature(const std::vector<unsigned char>& bytes) {
            bytes[8] == 'W' && bytes[9] == 'A' && bytes[10] == 'V' && bytes[11] == 'E';
 }
 
-bool hasExpectedSignature(const std::vector<unsigned char>& bytes, Kind kind) {
+bool hasExpectedSignature(const std::vector<unsigned char>& bytes, Kind kind, const std::string& name) {
     switch (kind) {
-    case Kind::Image: return hasImageSignature(bytes);
+    case Kind::Image: return hasImageSignatureForName(bytes, name);
     case Kind::Voice: return hasWaveSignature(bytes);
     case Kind::Text: return true;
     }
@@ -264,15 +281,15 @@ bool hasExpectedSignature(const std::vector<unsigned char>& bytes, Kind kind) {
 
 const char* signatureError(Kind kind) {
     switch (kind) {
-    case Kind::Image: return "image file header is not PNG, JPEG, or BMP";
+    case Kind::Image: return "image file header does not match its .png/.jpg/.jpeg/.bmp extension";
     case Kind::Voice: return "voice clip header is not WAV";
     case Kind::Text: return "file header is not supported";
     }
     return "file header is not supported";
 }
 
-void validateSignatureOrThrow(const std::vector<unsigned char>& bytes, Kind kind) {
-    if (!hasExpectedSignature(bytes, kind)) {
+void validateSignatureOrThrow(const std::vector<unsigned char>& bytes, Kind kind, const std::string& name) {
+    if (!hasExpectedSignature(bytes, kind, name)) {
         throw std::runtime_error(signatureError(kind));
     }
 }
@@ -477,10 +494,10 @@ ReceiveChunkResult ReceiveStore::appendChunk(const std::string& key, const rtc::
         bytes.push_back(static_cast<unsigned char>(byte));
     }
     // 在 UI 或转发路径把任意字节当作媒体处理前，拒绝伪装图片/语音。
-    // 正常发送使用 64 KB 首分片，足以立即验证 PNG/JPEG/BMP 和 WAV 文件头。
+    // 首分片足以立即验证 PNG/JPEG/BMP 和 WAV 文件头。
     if (slot.receivedSize == 0 && slot.kind != Kind::Text) {
         try {
-            validateSignatureOrThrow(bytes, slot.kind);
+            validateSignatureOrThrow(bytes, slot.kind, slot.name);
         }
         catch (...) {
             const auto cachePath = slot.path;
@@ -521,7 +538,7 @@ bool hasExpectedFileSignature(const std::string& filePath, Kind kind) {
     std::vector<unsigned char> header(16);
     file.read(reinterpret_cast<char*>(header.data()), static_cast<std::streamsize>(header.size()));
     header.resize(static_cast<std::size_t>(file.gcount()));
-    return hasExpectedSignature(header, kind);
+    return hasExpectedSignature(header, kind, filePath);
 }
 
 std::vector<unsigned char> readFileBytes(const std::string& filePath, Kind kind) {
@@ -539,7 +556,7 @@ std::vector<unsigned char> readFileBytes(const std::string& filePath, Kind kind)
     if (bytes.size() > maxBytes(kind)) {
         throw std::runtime_error(limitError(kind));
     }
-    validateSignatureOrThrow(bytes, kind);
+    validateSignatureOrThrow(bytes, kind, filePath);
     return bytes;
 }
 

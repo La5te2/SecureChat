@@ -405,7 +405,6 @@ Host 管理命令在 Host 输入框或 CLI 标准输入中发送：
 /to <fingerprint-prefix> <消息>
 /to <fingerprint-prefix> /image <path>
 /to <fingerprint-prefix> /file <path>
-/to <fingerprint-prefix> /voice <path>
 ```
 
 `fingerprint-prefix` 至少 8 位十六进制字符，大小写不敏感。WinUI 左键成员卡片会复制该成员证书指纹前 8 位，可直接粘贴到 `To: Member / 私信对象` 输入框。
@@ -415,7 +414,6 @@ Host 管理命令在 Host 输入框或 CLI 标准输入中发送：
 ```text
 /image <path>
 /file <path>
-/voice <path>
 ```
 
 ## 房间生命周期
@@ -432,9 +430,9 @@ Client 关闭进程或网络断开只表示当前连接离线，不自动吊销�
 
 支持的附件类型：
 
-- 图片：PNG、JPEG、BMP
-- 语音：WAV
-- 普通文本类文件：TXT、MD、LOG、CSV、JSON、XML、YAML、INI、CONF、CFG 等
+- 图片：PNG、JPG/JPEG、BMP；扩展名和文件头必须匹配。
+- 文件：任意格式，按普通附件接收，不自动预览或执行。
+- 语音：WinUI 按住录音生成的 WAV；CLI 不提供 `/voice <path>`。
 
 发送大小默认统一限制为 100 MB：
 
@@ -449,6 +447,8 @@ logs/images
 logs/voice
 logs/files
 ```
+
+音频文件仍可以通过 `/file <path>` 发送，但接收端会按普通文件处理，不进入语音自动播放路径。
 
 附件缓存默认总量上限为 512 MB：
 

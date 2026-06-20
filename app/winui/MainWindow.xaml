@@ -144,7 +144,8 @@
                         Width="96"
                         HorizontalAlignment="Center"
                         VerticalAlignment="Center"
-                        SelectedIndex="0">
+                        SelectedIndex="0"
+                        SelectionChanged="SendModeBox_SelectionChanged">
                         <ComboBoxItem Content="Text" Tag="Text" />
                         <ComboBoxItem Content="Image" Tag="Image" />
                         <ComboBoxItem Content="File" Tag="File" />
@@ -161,6 +162,10 @@
                         Grid.Column="3"
                         Content="Send"
                         Click="Send_Click"
+                        PointerPressed="SendButton_PointerPressed"
+                        PointerReleased="SendButton_PointerReleased"
+                        PointerCanceled="SendButton_PointerCanceled"
+                        PointerCaptureLost="SendButton_PointerCanceled"
                         HorizontalAlignment="Stretch"
                         VerticalAlignment="Center" />
                 </Grid>

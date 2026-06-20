@@ -29,8 +29,8 @@ Server 会校验 WebSocket 会话所属 room token 和 sender connection id，�
 当前数据通路包含：
 
 - 文本消息通过 `encrypted_relay` 转发。
-- `/image`、`/file`、`/voice` 的 metadata 通过 `image_meta`、`file_meta`、`voice_meta` 加密后转发。
-- `/image`、`/file`、`/voice` 的 binary chunk 通过 `image_binary`、`file_binary`、`voice_binary` 加密后转发。
+- `/image`、`/file` 和 WinUI 按住录音产生的 voice metadata 通过 `image_meta`、`file_meta`、`voice_meta` 加密后转发。
+- `/image`、`/file` 和 WinUI 按住录音产生的 voice binary chunk 通过 `image_binary`、`file_binary`、`voice_binary` 加密后转发。
 - Host/Client 使用 Server relay 数据通路，不建立 WebRTC PeerConnection/DataChannel。
 - Server 只处理当前 WSS relay 信令，不接受或转发 `offer`、`answer`、`ice`。
 
@@ -141,10 +141,9 @@ Server 不应可见：
 已实现：
 
 - 单个发送附件默认大小限制：100 MB，可用 `SECURECHAT_ATTACHMENT_MAX_BYTES` 覆盖。
-- 发送端和接收端都会检查扩展名白名单。
-- 图片文件头校验：PNG、JPEG、BMP。
-- 语音文件头校验：WAV。
-- 文本类文件按文本附件处理，不执行、不自动打开。
+- `file` 是任意格式附件通道，不限制扩展名；接收端按普通文件处理，不执行、不自动打开。
+- `image` 是图片语义通道，只接受 `.png`、`.jpg`、`.jpeg`、`.bmp`，并校验扩展名和文件头一致；`.jpg/.jpeg` 必须是 JPEG header。
+- `voice` 是 WinUI 本机按住录音生成的 WAV 通道；CLI 不再提供 `/voice <path>`，音频文件需要通过 `/file <path>` 作为普通文件发送。
 - 接收文件只写入项目运行目录下的 `logs/images`、`logs/voice`、`logs/files`。
 - 接收文件名会去除路径分隔符和 Windows 不允许的字符，限制长度，并处理 Windows 保留文件名，降低路径穿越和特殊文件名风险。
 - `logs/` 和子目录会尽量设置为 owner-only 权限。

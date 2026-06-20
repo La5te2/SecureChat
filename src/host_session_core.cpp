@@ -343,7 +343,7 @@ void HostSessionCore::sendLine(const std::string& line) {
         return;
     }
     if (line.rfind("/voice ", 0) == 0) {
-        sendVoice(trimCopy(line.substr(line.find(' ') + 1)));
+        chatEmit(mCallbacks.onError, "CLI /voice is disabled; send audio files with /file or use WinUI hold-to-talk");
         return;
     }
     const auto actor = currentHostActorName();
@@ -396,7 +396,7 @@ void HostSessionCore::sendLineTo(const std::string& target, const std::string& l
         return;
     }
     if (line.rfind("/voice ", 0) == 0) {
-        sendVoiceTo(targetNameInput, trimCopy(line.substr(line.find(' ') + 1)));
+        chatEmit(mCallbacks.onError, "CLI /voice is disabled; send audio files with /file or use WinUI hold-to-talk");
         return;
     }
 

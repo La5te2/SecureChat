@@ -17,6 +17,9 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using Windows.ApplicationModel.DataTransfer;
+using Windows.Media.Capture;
+using Windows.Media.MediaProperties;
+using Windows.Storage;
 using Windows.Storage.Pickers;
 using Windows.UI;
 using WinRT.Interop;
@@ -81,6 +84,15 @@ public sealed partial class MainWindow : Window
     private bool isClosing;
     private LocalRoomInstanceInfo? selectedRoomInstance;
     private System.Threading.Tasks.TaskCompletionSource<LocalRoomInstanceInfo?>? roomInstanceSelectionSource;
+    private MediaCapture? voiceCapture;
+    private StorageFile? activeVoiceRecordingFile;
+    private System.Threading.Tasks.Task? voiceStartTask;
+    private bool voiceRecording;
+    private bool voiceRecordingStopping;
+    private bool suppressVoiceClick;
+    private bool stopVoiceAfterStart;
+    private bool sendVoiceAfterStart;
+    private string voiceTargetAtRecordStart = "";
 
     private static readonly NativeMethods.ChatEventCallback NoOpCallback = (_, _, _) => { };
     // 附件预览状态只影响 WinUI 是否自动预览，不影响加解密和传输。
@@ -379,7 +391,73 @@ public sealed partial class MainWindow : Window
 
     private void Send_Click(object sender, RoutedEventArgs e)
     {
+        if (SelectedSendMode() == "Voice")
+        {
+            if (suppressVoiceClick)
+            {
+                suppressVoiceClick = false;
+                return;
+            }
+            AddLine("status", UiText("Hold the button to record voice.", "按住按钮录制语音。"));
+            return;
+        }
+
         SendSelectedMode();
+    }
+
+    private async void SendButton_PointerPressed(object sender, PointerRoutedEventArgs e)
+    {
+        if (SelectedSendMode() != "Voice" || !SendButton.IsEnabled) return;
+
+        e.Handled = true;
+        SendButton.CapturePointer(e.Pointer);
+        suppressVoiceClick = true;
+        stopVoiceAfterStart = false;
+        sendVoiceAfterStart = false;
+        voiceStartTask = StartVoiceRecordingAsync();
+        await voiceStartTask;
+        if (stopVoiceAfterStart)
+        {
+            await StopVoiceRecordingAsync(sendVoiceAfterStart);
+        }
+    }
+
+    private async void SendButton_PointerReleased(object sender, PointerRoutedEventArgs e)
+    {
+        if (SelectedSendMode() != "Voice") return;
+
+        e.Handled = true;
+        SendButton.ReleasePointerCapture(e.Pointer);
+        suppressVoiceClick = true;
+        if (voiceStartTask is not null && !voiceStartTask.IsCompleted)
+        {
+            stopVoiceAfterStart = true;
+            sendVoiceAfterStart = true;
+            return;
+        }
+        await StopVoiceRecordingAsync(send: true);
+    }
+
+    private async void SendButton_PointerCanceled(object sender, PointerRoutedEventArgs e)
+    {
+        if (SelectedSendMode() != "Voice") return;
+
+        e.Handled = true;
+        SendButton.ReleasePointerCapture(e.Pointer);
+        suppressVoiceClick = true;
+        if (voiceStartTask is not null && !voiceStartTask.IsCompleted)
+        {
+            stopVoiceAfterStart = true;
+            sendVoiceAfterStart = false;
+            return;
+        }
+        await StopVoiceRecordingAsync(send: false);
+    }
+
+    private void SendModeBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (refreshingLanguage) return;
+        UpdateSendButtonContent();
     }
 
     private void MessageBox_KeyDown(object sender, KeyRoutedEventArgs e)
@@ -409,7 +487,7 @@ public sealed partial class MainWindow : Window
         }
         if (mode == "Voice")
         {
-            _ = SendPickedFileAsync(FileKind.Voice);
+            AddLine("status", UiText("Hold the button to record voice.", "按住按钮录制语音。"));
             return;
         }
 
@@ -444,8 +522,7 @@ public sealed partial class MainWindow : Window
     private enum FileKind
     {
         Image,
-        File,
-        Voice
+        File
     }
 
     private async System.Threading.Tasks.Task SendPickedFileAsync(FileKind kind)
@@ -465,9 +542,6 @@ public sealed partial class MainWindow : Window
             FileKind.File => target.Length == 0
                 ? NativeMethods.chat_send_file(file.Path)
                 : NativeMethods.chat_send_file_to(target, file.Path),
-            FileKind.Voice => target.Length == 0
-                ? NativeMethods.chat_send_voice(file.Path)
-                : NativeMethods.chat_send_voice_to(target, file.Path),
             _ => 0
         };
     }
@@ -486,26 +560,114 @@ public sealed partial class MainWindow : Window
                 picker.FileTypeFilter.Add(".png");
                 picker.FileTypeFilter.Add(".bmp");
                 break;
-            case FileKind.Voice:
-                picker.FileTypeFilter.Add(".wav");
-                break;
             default:
-                picker.FileTypeFilter.Add(".txt");
-                picker.FileTypeFilter.Add(".md");
-                picker.FileTypeFilter.Add(".markdown");
-                picker.FileTypeFilter.Add(".log");
-                picker.FileTypeFilter.Add(".csv");
-                picker.FileTypeFilter.Add(".json");
-                picker.FileTypeFilter.Add(".xml");
-                picker.FileTypeFilter.Add(".yml");
-                picker.FileTypeFilter.Add(".yaml");
-                picker.FileTypeFilter.Add(".ini");
-                picker.FileTypeFilter.Add(".conf");
-                picker.FileTypeFilter.Add(".cfg");
+                // File 是任意字节附件通道。类型风险由后续附件隔离、
+                // 信任分级和沙箱处理，不在文件选择器里限制扩展名。
+                picker.FileTypeFilter.Add("*");
                 break;
         }
 
         return await picker.PickSingleFileAsync();
+    }
+
+    private async System.Threading.Tasks.Task StartVoiceRecordingAsync()
+    {
+        if (voiceRecording || voiceRecordingStopping || voiceStartTask is { IsCompleted: false }) return;
+
+        try
+        {
+            Directory.CreateDirectory(VoiceRecordingDirectory());
+            var folder = await StorageFolder.GetFolderFromPathAsync(VoiceRecordingDirectory());
+            var file = await folder.CreateFileAsync(
+                $"voice_{DateTimeOffset.Now:yyyyMMdd_HHmmss_fff}.wav",
+                CreationCollisionOption.GenerateUniqueName);
+
+            var capture = new MediaCapture();
+            await capture.InitializeAsync(new MediaCaptureInitializationSettings
+            {
+                StreamingCaptureMode = StreamingCaptureMode.Audio
+            });
+
+            var profile = MediaEncodingProfile.CreateWav(AudioEncodingQuality.Auto);
+            await capture.StartRecordToStorageFileAsync(profile, file);
+            voiceCapture = capture;
+            activeVoiceRecordingFile = file;
+            voiceTargetAtRecordStart = PrivateTargetBox.Text.Trim();
+            voiceRecording = true;
+            SendButton.Content = UiText("Release", "松开");
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or InvalidOperationException or IOException or COMException)
+        {
+            voiceCapture?.Dispose();
+            voiceCapture = null;
+            activeVoiceRecordingFile = null;
+            voiceRecording = false;
+            UpdateSendButtonContent();
+            AddLine("error", UiText("Voice recording failed: ", "语音录制失败：") + ex.Message);
+        }
+    }
+
+    private async System.Threading.Tasks.Task StopVoiceRecordingAsync(bool send)
+    {
+        if ((!voiceRecording && activeVoiceRecordingFile is null) || voiceRecordingStopping) return;
+
+        voiceRecordingStopping = true;
+        var capture = voiceCapture;
+        var file = activeVoiceRecordingFile;
+        voiceCapture = null;
+        activeVoiceRecordingFile = null;
+        voiceRecording = false;
+
+        try
+        {
+            if (capture is not null)
+            {
+                await capture.StopRecordAsync();
+                capture.Dispose();
+            }
+
+            if (file is null) return;
+            if (!send)
+            {
+                await file.DeleteAsync(StorageDeleteOption.PermanentDelete);
+                return;
+            }
+
+            var path = file.Path;
+            if (!File.Exists(path) || new FileInfo(path).Length <= 0)
+            {
+                await file.DeleteAsync(StorageDeleteOption.PermanentDelete);
+                AddLine("error", UiText("Voice recording is empty.", "语音录制为空。"));
+                return;
+            }
+
+            var target = voiceTargetAtRecordStart;
+            var ok = target.Length == 0
+                ? NativeMethods.chat_send_voice(path)
+                : NativeMethods.chat_send_voice_to(target, path);
+            if (ok == 0)
+            {
+                AddLine("error", UiText("Voice send failed.", "语音发送失败。"));
+            }
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or IOException or COMException or UnauthorizedAccessException)
+        {
+            AddLine("error", UiText("Voice recording failed: ", "语音录制失败：") + ex.Message);
+        }
+        finally
+        {
+            voiceRecordingStopping = false;
+            voiceTargetAtRecordStart = "";
+            stopVoiceAfterStart = false;
+            sendVoiceAfterStart = false;
+            voiceStartTask = null;
+            UpdateSendButtonContent();
+        }
+    }
+
+    private static string VoiceRecordingDirectory()
+    {
+        return Path.Combine(AppContext.BaseDirectory, "logs", "voice-recordings");
     }
 
     private void AddLine(string kind, string message)
@@ -2537,7 +2699,6 @@ public sealed partial class MainWindow : Window
 
             MessageBox.PlaceholderText = UiText("Type a message", "输入消息");
             PrivateTargetBox.PlaceholderText = UiText("To: Member", "私信对象");
-            SendButton.Content = UiText("Send", "发送");
             SetComboItemContent(SendModeBox, "Text", UiText("Texts", "文字"));
             SetComboItemContent(SendModeBox, "Image", UiText("Image", "图片"));
             SetComboItemContent(SendModeBox, "File", UiText("Files", "文件"));
@@ -2628,6 +2789,7 @@ public sealed partial class MainWindow : Window
             RestoreComboSelection(MessageFontComboBox, selectedMessageFont);
             RestoreComboSelection(MetaTextColorComboBox, selectedMetaTextColor);
             RestoreComboSelection(MetaFontComboBox, selectedMetaFont);
+            UpdateSendButtonContent();
 
             if (refreshMessages)
             {
@@ -2654,6 +2816,19 @@ public sealed partial class MainWindow : Window
                 return;
             }
         }
+    }
+
+    private void UpdateSendButtonContent()
+    {
+        if (SendButton is null) return;
+        if (voiceRecording)
+        {
+            SendButton.Content = UiText("Release", "松开");
+            return;
+        }
+        SendButton.Content = SelectedSendMode() == "Voice"
+            ? UiText("Hold", "按住")
+            : UiText("Send", "发送");
     }
 
     private static void RestoreComboSelection(ComboBox? comboBox, string tag)

@@ -335,7 +335,6 @@ Host/Client 连接 Nginx 入口：
 
 ```text
 /image <path>
-/voice <path>
 /file <path>
 ```
 
@@ -343,9 +342,10 @@ Host/Client 连接 Nginx 入口：
 
 ```text
 /to <fingerprint-prefix> /image <path>
-/to <fingerprint-prefix> /voice <path>
 /to <fingerprint-prefix> /file <path>
 ```
+
+`/file` 可发送任意格式文件。CLI 不提供 `/voice <path>`；音频文件如果需要发送，也按普通文件通过 `/file` 发送。WinUI 的 Voice 模式使用按住录音，不选择本地音频文件。
 
 Host 管理命令：
 

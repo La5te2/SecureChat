@@ -74,8 +74,9 @@ CHAT_API int CHAT_CALL chat_send_image_to(const char* target, const char* file_p
 CHAT_API int CHAT_CALL chat_send_file(const char* file_path);
 // 向证书指纹前缀匹配到的成员发送一个普通文件附件。
 CHAT_API int CHAT_CALL chat_send_file_to(const char* target, const char* file_path);
+// 发送前端本机按住录音生成的语音附件。CLI 不暴露 /voice <path>。
 CHAT_API int CHAT_CALL chat_send_voice(const char* file_path);
-// 向证书指纹前缀匹配到的成员发送一个语音附件。
+// 向证书指纹前缀匹配到的成员发送一个前端本机录音附件。
 CHAT_API int CHAT_CALL chat_send_voice_to(const char* target, const char* file_path);
 // 停止活动 Host 或 Client 会话，但不卸载 native 模块。
 CHAT_API void CHAT_CALL chat_stop();

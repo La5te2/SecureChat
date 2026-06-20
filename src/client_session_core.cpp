@@ -286,7 +286,7 @@ void ClientSessionCore::sendLine(const std::string& line) {
         return;
     }
     if (line.rfind("/voice ", 0) == 0) {
-        sendVoice(trimCopy(line.substr(line.find(' ') + 1)));
+        chatEmit(mCallbacks.onError, "CLI /voice is disabled; send audio files with /file or use WinUI hold-to-talk");
         return;
     }
 
@@ -347,7 +347,7 @@ void ClientSessionCore::sendLineTo(const std::string& target, const std::string&
         return;
     }
     if (line.rfind("/voice ", 0) == 0) {
-        sendVoiceTo(targetName, trimCopy(line.substr(line.find(' ') + 1)));
+        chatEmit(mCallbacks.onError, "CLI /voice is disabled; send audio files with /file or use WinUI hold-to-talk");
         return;
     }
 

@@ -94,10 +94,11 @@ internal static class NativeMethods
         [MarshalAs(UnmanagedType.LPUTF8Str)] string target,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string filePath);
 
+    // 语音路径由 WinUI 按住录音生成，不来自文件选择器。
     [DllImport("native.dll", CallingConvention = CallingConvention.StdCall)]
     internal static extern int chat_send_voice([MarshalAs(UnmanagedType.LPUTF8Str)] string filePath);
 
-    // Private voice attachment send.
+    // 私发 WinUI 录音附件。
     [DllImport("native.dll", CallingConvention = CallingConvention.StdCall)]
     internal static extern int chat_send_voice_to(
         [MarshalAs(UnmanagedType.LPUTF8Str)] string target,

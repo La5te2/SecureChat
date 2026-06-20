@@ -253,7 +253,7 @@
     ```
 
 - [x] 完成附件数据通路分离：让 Server 转发附件密文 chunk。
-  - `/image`、`/file`、`/voice` 的 metadata 和 binary chunk 已封装进 `encrypted_relay`。
+  - `/image`、`/file` 和 WinUI 按住录音产生的 voice metadata/binary chunk 已封装进 `encrypted_relay`。
   - Host/Client DataChannel 建连逻辑已从主流程移除。
   - Server 只看到 room/sender metadata、ciphertext 大小和转发时序，不能解密原始文件名、mime、文本内容或二进制内容。
 
@@ -306,7 +306,7 @@
   - Server 会用 WebSocket 会话状态覆盖 `roomId` 和 `senderId`；应用层 senderName、senderKind 和 targetId 都在密文 payload 内，AAD 由 Host/Client 本地隐式构造。
 - [x] 实现私发消息和附件。
   - `/to <member> <message>` 支持 Host/Client 私发文本。
-  - `/to <member> /image <path>`、`/to <member> /file <path>`、`/to <member> /voice <path>` 支持私发附件。
+  - `/to <member> /image <path>`、`/to <member> /file <path>` 支持 CLI 私发附件；WinUI Voice 可通过私信目标框发送按住录音。
   - WinUI 发送栏支持 `To: member` 目标输入；留空群发，填写成员名私发。
   - Server 广播外层密文；`targetId` 在加密 payload 内，接收端解密后检查目标，不属于自己的私发直接丢弃。
   - 私发正文和附件 chunk 额外使用发送者临时 X25519 key 与目标成员已验证 public key 派生 pairwise key，不降级为仅 room group key 私发。
@@ -319,13 +319,13 @@ PKI 身份认证现在强制绑定成员证书、临时 public key、GKA contrib
 
 目标：在保留图片、语音、文件功能的同时降低恶意文件风险。
 
-- [x] 保留扩展名和文件头校验。
-  - 图片：扩展名限制为 PNG/JPEG/BMP，并校验文件头。
-  - 语音：扩展名限制为 WAV，并校验 RIFF/WAVE 文件头。
-  - 文本附件：扩展名限制为 TXT/MD/LOG/CSV/JSON/XML/YAML/INI/CONF/CFG 等文本类。
+- [x] 保留附件语义校验。
+  - 图片：扩展名限制为 PNG/JPG/JPEG/BMP，并要求文件头与扩展名一致。
+  - 语音：只由 WinUI 按住录音生成 WAV，并校验 RIFF/WAVE 文件头；CLI 不提供 `/voice <path>`。
+  - 文件：作为通用任意文件附件通道，不限制扩展名或格式，后续由隔离和沙箱策略处理风险。
   - 发送端和接收端都会执行校验，native 校验是最终防线。
 - [x] 统一附件发送大小限制。
-  - 图片、语音、文本附件共用 `SECURECHAT_ATTACHMENT_MAX_BYTES`。
+  - 图片、语音、文件附件共用 `SECURECHAT_ATTACHMENT_MAX_BYTES`。
   - 默认单个附件上限为 100 MB。
 - [x] 确认文件名安全，避免路径穿越。
   - 接收端只取文件名，不信任发送方路径。
@@ -396,8 +396,8 @@ PKI 身份认证现在强制绑定成员证书、临时 public key、GKA contrib
   - signaling connected。
   - room joined。
   - encrypted relay ready。
-- [x] 文件选择器只显示支持格式，native 校验仍是最终防线。
-  - 状态：WinUI `FileOpenPicker` 限制为当前 native 支持的图片、WAV 和文本附件格式，native 校验仍是最终防线。
+- [x] 文件选择器和 native 校验语义一致。
+  - 状态：WinUI 图片选择器限制为图片格式；普通文件选择器允许任意文件；语音由 WinUI 按住录音生成，不再打开音频文件选择器。native 校验仍是最终防线。
 - [x] Host/Join 输入框不预填敏感或环境相关信息。
   - Host 和 Join 的 Room、Server URL、User 默认均为空。
   - Join 面板顺序已调整为 Room、Server URL、User、Password，与 Host 面板一致。
@@ -912,6 +912,13 @@ PKI 身份认证现在强制绑定成员证书、临时 public key、GKA contrib
 ## 阶段 16：附件隔离、信任分级和嵌入式跨平台沙箱
 
 目标：把附件从“安全接收和预览”推进到“分级信任、隔离落地、受控打开和证书绑定信任”。阶段 16 的核心不是要求用户自备 bubblewrap、Firejail 或其他外部沙箱，而是随 SecureChat 一起分发嵌入式附件沙箱能力。统一策略层负责判断附件风险，Windows/Linux 后端负责调用本项目自带的受限 helper 进程完成预览、检查或受控打开。附件来源信任绑定成员证书指纹，不绑定 IP、文件名或显示名；不同文件类型使用不同安全策略。
+
+- [x] 重构附件语义边界。
+  - `file` 是通用任意文件附件通道，不限制扩展名或格式；后续由附件分级、隔离目录、打开策略和沙箱负责处理风险。
+  - `image` 是图片语义通道，只接受 `.png`、`.jpg`、`.jpeg`、`.bmp`，并要求扩展名和文件头一致；`.jpg/.jpeg` 必须通过 JPEG header 校验。
+  - `voice` 是 WinUI 本机按住录音产生的语音通道，不再是“选择本地音频文件发送”的通道。
+  - CLI 取消 `/voice <path>`；音频文件如需作为文件发送，必须使用 `/file <path>`，接收端按普通文件处理。
+  - WinUI Voice 模式下发送按钮显示 `Hold/按住`，按下开始录音，松开发送，取消时丢弃录音。
 
 - [ ] 定义阶段 16 的依赖边界和非目标。
   - 阶段 16 依赖阶段 14 的房间级成员 PKI；附件来源信任统一绑定房间级成员证书指纹，不再基于旧的手动成员 PKI 路径提前落地。
