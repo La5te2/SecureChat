@@ -23,6 +23,8 @@ add_library(core STATIC
     src/console_utils.cpp
     src/cert_generation.cpp
     src/cert_utils.cpp
+    src/local_paths.cpp
+    src/local_message_store.cpp
     src/pki_application.cpp
     src/host_session_core.cpp
     src/client_session_core.cpp

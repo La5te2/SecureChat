@@ -168,6 +168,11 @@ HostSessionCore::HostSessionCore(
     // Host 同样拥有成员 X25519 密钥对，使 Client 能向 Host 发送真正的 pairwise 私信，
     // 而不把房间群密钥作为唯一密钥。
     mMemberKeys = chat::secure_relay::generateMemberKeyPair();
+    mPendingTransfers.setRoomContext(mRoomId, mRoomToken);
+    mMessageHistory = std::make_unique<chat::local_message::Store>(
+        mRoomId,
+        mRoomToken,
+        mUsername);
 }
 
 HostSessionCore::~HostSessionCore() {
@@ -324,6 +329,7 @@ void HostSessionCore::stopSignalingWorker() {
 
 // 解析一行 Host 输入，并发送聊天、命令或附件。
 void HostSessionCore::sendLine(const std::string& line) {
+    if (handleAttachmentTrustCommand(line)) return;
     if (handleHostCommand(line)) return;
 
     std::string directTarget;
@@ -367,6 +373,7 @@ void HostSessionCore::sendLine(const std::string& line) {
         "",
         mGroupKey);
     mWs->send(envelope.dump());
+    rememberTextHistory(msg, true);
     chatEmit(mCallbacks.onMessage, msg.toJson());
 }
 
@@ -406,6 +413,7 @@ void HostSessionCore::sendLineTo(const std::string& target, const std::string& l
     setCurrentHostActorMetadata(msg);
     markPrivateTarget(msg, targetId, targetName);
     if (sendRelayMessage(msg, chat::protocol::HostActorId, mDisplayName, chat::protocol::HostActorKind, targetId)) {
+        rememberTextHistory(msg, true);
         chatEmit(mCallbacks.onMessage, msg.toJson());
     }
 }
@@ -489,6 +497,49 @@ bool HostSessionCore::handleHostCommand(const std::string& line) {
     else {
         evictClient(target);
     }
+    return true;
+}
+
+bool HostSessionCore::handleAttachmentTrustCommand(const std::string& line) {
+    // 附件信任是本机预览策略。Host 输入该命令时只更新本地 UI 状态，
+    // 不会把“信任/不信任”广播给 Server 或其他成员。
+    std::istringstream input(trimCopy(line));
+    std::string command;
+    input >> command;
+    if (command != "/trust" && command != "/untrust") return false;
+
+    std::string target;
+    input >> target;
+    if (target.empty()) {
+        chatEmit(mCallbacks.onError, "Usage: " + command + " <fingerprint-prefix>");
+        return true;
+    }
+
+    const auto clientId = resolveClientId(target);
+    if (clientId.empty()) {
+        chatEmit(mCallbacks.onError, "Target fingerprint prefix not found: " + target);
+        return true;
+    }
+
+    std::string displayName = clientId;
+    std::string fingerprint;
+    {
+        std::lock_guard<std::mutex> lock(mClientsMutex);
+        if (auto it = mClientNames.find(clientId); it != mClientNames.end() && !it->second.empty()) {
+            displayName = it->second;
+        }
+        if (auto it = mClientIdentityFingerprints.find(clientId); it != mClientIdentityFingerprints.end()) {
+            fingerprint = it->second;
+        }
+    }
+    if (fingerprint.empty()) {
+        chatEmit(mCallbacks.onError, "Target member fingerprint is not available: " + target);
+        return true;
+    }
+
+    const auto action = command == "/trust" ? "trust" : "untrust";
+    chatEmit(mCallbacks.onStatus, "Attachment trust: " + std::string(action) +
+        " / " + displayName + " / " + clientId + " / " + fingerprint);
     return true;
 }
 
@@ -1742,6 +1793,7 @@ void HostSessionCore::handleRelayMessage(const Message& msg) {
     }
 
     if (msg.type == "text") {
+        rememberTextHistory(msg, false);
         chatEmit(mCallbacks.onMessage, msg.toJson());
         return;
     }
@@ -1812,6 +1864,21 @@ void HostSessionCore::handleRelayBinaryChunk(const std::string& senderKey, const
         mPendingTransfers.clear(senderKey);
         chatEmit(mCallbacks.onError, std::string("Encrypted attachment receive failed from ") + senderKey + ": " + e.what());
     }
+}
+
+void HostSessionCore::rememberTextHistory(const Message& msg, bool isOwn) {
+    if (!mMessageHistory || msg.type != "text") return;
+    try {
+        mMessageHistory->appendText(chat::local_message::makeTextRecord(msg, isOwn));
+    }
+    catch (const std::exception& e) {
+        chatEmit(mCallbacks.onStatus, std::string("Local message history warning: ") + e.what());
+    }
+}
+
+std::string HostSessionCore::messageHistoryJson(std::size_t limit) const {
+    if (!mMessageHistory) return "[]";
+    return mMessageHistory->historyJson(limit);
 }
 
 std::string HostSessionCore::currentHostActorName() {

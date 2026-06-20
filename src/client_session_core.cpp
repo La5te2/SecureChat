@@ -162,6 +162,11 @@ ClientSessionCore::ClientSessionCore(
     // Host/Client 启动必须具备 PKI 配置。
     // 环境变量缺失会在这里失败，且不会发送任何入房消息。
     mIdentity = std::move(identity);
+    mPendingTransfers.setRoomContext(mRoomId, mRoomToken);
+    mMessageHistory = std::make_unique<chat::local_message::Store>(
+        mRoomId,
+        mRoomToken,
+        mUsername);
 }
 
 ClientSessionCore::~ClientSessionCore() {
@@ -272,6 +277,7 @@ void ClientSessionCore::sendLine(const std::string& line) {
     }
 
     if (line.empty()) return;
+    if (handleAttachmentTrustCommand(line)) return;
     if (mClientId.empty()) {
         chatEmit(mCallbacks.onStatus, "Client identity is not ready yet");
         return;
@@ -312,6 +318,7 @@ void ClientSessionCore::sendLine(const std::string& line) {
             "",
             mGroupKey);
         mWs->send(envelope.dump());
+        rememberTextHistory(msg, true);
         chatEmit(mCallbacks.onMessage, msg.toJson());
     }
     catch (const std::exception& e) {
@@ -364,12 +371,56 @@ void ClientSessionCore::sendLineTo(const std::string& target, const std::string&
         }
         markPrivateTarget(msg, targetId, targetName);
         if (sendRelayMessage(msg, mClientId, mDisplayName, chat::protocol::ClientActorKind, targetId)) {
+            rememberTextHistory(msg, true);
             chatEmit(mCallbacks.onMessage, msg.toJson());
         }
     }
     catch (const std::exception& e) {
         chatEmit(mCallbacks.onError, std::string("Input failed: ") + e.what());
     }
+}
+
+bool ClientSessionCore::handleAttachmentTrustCommand(const std::string& line) {
+    // /trust 和 /untrust 是本机 UI 策略，不会改变房间成员资格或发送任何网络帧。
+    // 目标只接受证书指纹前缀，保持与私发 To: Member 相同的安全路由规则。
+    std::istringstream input(trimCopy(line));
+    std::string command;
+    input >> command;
+    if (command != "/trust" && command != "/untrust") return false;
+
+    std::string target;
+    input >> target;
+    if (target.empty()) {
+        chatEmit(mCallbacks.onError, "Usage: " + command + " <fingerprint-prefix>");
+        return true;
+    }
+
+    const auto memberId = resolveMemberId(target);
+    if (memberId.empty()) {
+        chatEmit(mCallbacks.onError, "Target fingerprint prefix not found: " + target);
+        return true;
+    }
+
+    std::string displayName = memberId;
+    std::string fingerprint;
+    {
+        std::lock_guard<std::mutex> lock(mMembersMutex);
+        if (auto it = mMemberNamesById.find(memberId); it != mMemberNamesById.end() && !it->second.empty()) {
+            displayName = it->second;
+        }
+        if (auto it = mMemberFingerprintsById.find(memberId); it != mMemberFingerprintsById.end()) {
+            fingerprint = it->second;
+        }
+    }
+    if (fingerprint.empty()) {
+        chatEmit(mCallbacks.onError, "Target member fingerprint is not available: " + target);
+        return true;
+    }
+
+    const auto action = command == "/trust" ? "trust" : "untrust";
+    chatEmit(mCallbacks.onStatus, "Attachment trust: " + std::string(action) +
+        " / " + displayName + " / " + memberId + " / " + fingerprint);
+    return true;
 }
 
 Message ClientSessionCore::parseInput(const std::string& line) {
@@ -627,6 +678,7 @@ void ClientSessionCore::handleRelayMessage(const Message& msg) {
     }
 
     if (msg.type == "text") {
+        rememberTextHistory(msg, false);
         chatEmit(mCallbacks.onMessage, msg.toJson());
         return;
     }
@@ -697,6 +749,21 @@ void ClientSessionCore::handleRelayBinaryChunk(const std::string& senderKey, con
         mPendingTransfers.clear(senderKey);
         chatEmit(mCallbacks.onError, std::string("Encrypted attachment receive failed from ") + senderKey + ": " + e.what());
     }
+}
+
+void ClientSessionCore::rememberTextHistory(const Message& msg, bool isOwn) {
+    if (!mMessageHistory || msg.type != "text") return;
+    try {
+        mMessageHistory->appendText(chat::local_message::makeTextRecord(msg, isOwn));
+    }
+    catch (const std::exception& e) {
+        chatEmit(mCallbacks.onStatus, std::string("Local message history warning: ") + e.what());
+    }
+}
+
+std::string ClientSessionCore::messageHistoryJson(std::size_t limit) const {
+    if (!mMessageHistory) return "[]";
+    return mMessageHistory->historyJson(limit);
 }
 
 // 以加密元数据加后续加密中继分片的形式发送图片。

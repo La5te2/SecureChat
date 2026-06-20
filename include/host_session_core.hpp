@@ -5,6 +5,7 @@
 #include "attachment_transfer.hpp"
 #include "common.hpp"
 #include "events.hpp"
+#include "local_message_store.hpp"
 #include "pki_application.hpp"
 #include "secure_relay.hpp"
 #include "websocket_config.hpp"
@@ -66,9 +67,13 @@ public:
     bool sendImageTo(const std::string& target, const std::string& filePath);
     bool sendTextFileTo(const std::string& target, const std::string& filePath);
     bool sendVoiceTo(const std::string& target, const std::string& filePath);
+    // 返回当前 room instance 的本机文本历史 JSON。WinUI 重进房间时用它重放气泡。
+    std::string messageHistoryJson(std::size_t limit = 500) const;
 private:
     // 处理普通输入框中输入的 Host 专用房间管理命令。
     bool handleHostCommand(const std::string& line);
+    // 处理本机附件预览信任命令。该状态只影响当前 UI/CLI，不进入网络协议。
+    bool handleAttachmentTrustCommand(const std::string& line);
     // 批准一个已验证的 pending join，使 Server 将其提升为 active Client。
     void approvePendingJoin(const std::string& token);
     // 拒绝一个 pending join，并把签名原因返回给申请者。
@@ -128,6 +133,8 @@ private:
     void handleRelayMessage(const Message& msg);
     // 将一个加密附件分片重组成本地缓存文件。
     void handleRelayBinaryChunk(const std::string& senderKey, const Message& msg);
+    // 将已显示的文本消息写入本机历史；失败只报告状态，不影响收发。
+    void rememberTextHistory(const Message& msg, bool isOwn);
     // 返回当前活动 Host 聊天 actor 标签。
     std::string currentHostActorName();
     // 添加稳定 actor 身份元数据，同时保持 from/displayName 可读。
@@ -206,4 +213,5 @@ private:
     std::unordered_map<std::string, json> mPendingGkaContributions;
     // 核心附件接收状态，以加密中继发送者 actor id 为键。
     chat::attachment::ReceiveStore mPendingTransfers;
+    std::unique_ptr<chat::local_message::Store> mMessageHistory;
 };

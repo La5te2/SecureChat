@@ -34,6 +34,9 @@ internal static class NativeMethods
         int outputJsonSize);
 
     [DllImport("native.dll", CallingConvention = CallingConvention.StdCall)]
+    internal static extern int chat_get_message_history(IntPtr outputJson, int outputJsonSize);
+
+    [DllImport("native.dll", CallingConvention = CallingConvention.StdCall)]
     internal static extern int chat_host_start(
         [MarshalAs(UnmanagedType.LPUTF8Str)] string serverUrl,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string roomDir,

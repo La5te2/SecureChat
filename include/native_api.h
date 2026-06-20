@@ -34,6 +34,10 @@ CHAT_API int CHAT_CALL chat_list_local_room_dirs(
     const char* role,
     char* output_json,
     int output_json_size);
+// 返回当前 Host/Client 会话的本机文本历史 JSON 数组；传空 buffer 时返回所需字节数。
+CHAT_API int CHAT_CALL chat_get_message_history(
+    char* output_json,
+    int output_json_size);
 // 从 room-dir 加载 room token 和房间级 PKI 后启动 Host。
 CHAT_API int CHAT_CALL chat_host_start(
     const char* server_url,

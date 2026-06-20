@@ -440,13 +440,15 @@ Client 关闭进程或网络断开只表示当前连接离线，不自动吊销�
 export SECURECHAT_ATTACHMENT_MAX_BYTES=104857600
 ```
 
-接收文件保存到当前工作目录：
+接收文件保存到当前工作目录，并按 room instance 分层。目录名统一使用 `<原始房间名>_<roomInstanceTokenDigest前8位>`，与 `logs/certs` 的房间材料目录规则一致：
 
 ```text
-logs/images
-logs/voice
-logs/files
+logs/images/<room>_<digest8>
+logs/voice/<room>_<digest8>
+logs/files/<room>_<digest8>
 ```
+
+接收端保存附件后会做基础隔离标记。Windows 写入 Mark-of-the-Web（MotW）Zone.Identifier；Linux/Unix 移除 owner/group/others 执行位。该保护是 best-effort，文件系统不支持对应能力时不会阻断聊天，但 SecureChat 自身不会自动打开任意 `file` 附件。
 
 音频文件仍可以通过 `/file <path>` 发送，但接收端会按普通文件处理，不进入语音自动播放路径。
 
@@ -456,9 +458,21 @@ logs/files
 export SECURECHAT_LOGS_MAX_BYTES=536870912
 ```
 
-WinUI 对附件预览采用当前房间内的本机 UI 策略。成员默认 Allowed，成员卡片为绿色；右键成员卡片切换为 Blocked 后，图片和音频只显示“附件已接收”，不会自动进入本地解码器。Blocked 只保存在当前房间内存中，退出、断开或切换房间后清空。
+WinUI 对附件预览采用当前房间内的本机 UI 策略。成员默认 Allowed，成员卡片为绿色；右键成员卡片切换为 Blocked 后，图片和音频只显示“附件已接收”，不会自动进入本地解码器。CLI 可使用 `/trust <fingerprint-prefix>` 和 `/untrust <fingerprint-prefix>` 切换同一套本机策略，指纹前缀至少 8 位十六进制字符。Blocked 只保存在当前房间内存中，退出、断开或切换房间后清空。
 
 附件已经实现应用层端到端加密。接收成员本机会解密并缓存附件，因此成员设备、用户手动打开文件、图片/音频解码器和本地文件系统仍是信任边界。文件扩展名和文件头校验只能降低误传或伪装风险，不等于杀毒或沙箱隔离。
+
+## 本地文本历史
+
+WinUI 和 CLI 使用同一套 C++ 本地消息历史模块。当前只保存已经在本端成功解密并显示的 `text` message，不保存附件内容、附件元数据、status/error/log、成员私钥、群密钥或完整 room instance token。
+
+本地文本历史路径为：
+
+```text
+logs/texts/<room>_<roomInstanceTokenDigest前8位>/<systemUsername>.sqlite3
+```
+
+SQLite 中保存发送者、actor id、显示类型、正文、原始 message JSON 和 `isOwn`。WinUI 重进房间后会读取该库刷新聊天区域，并直接使用 `isOwn` 决定消息在右侧还是左侧，因此不会因为 nickname 重复或 Host 固定 actor id 导致左右方向错误。
 
 ## 环境变量
 

@@ -1,6 +1,8 @@
 // 附件传输实现。它校验本地文件、净化入站名称、分片载荷并保存接收附件缓存。
 #include "attachment_transfer.hpp"
 
+#include "local_paths.hpp"
+
 #include <openssl/evp.h>
 
 #include <algorithm>
@@ -178,7 +180,7 @@ std::uintmax_t pruneReceiveCacheFor(std::uintmax_t incomingBytes) {
     for (const auto& dir : managedReceiveDirectories(root)) {
         if (!std::filesystem::exists(dir, ec)) continue;
 
-        for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
+        for (const auto& entry : std::filesystem::recursive_directory_iterator(dir, ec)) {
             if (ec) break;
             if (!entry.is_regular_file(ec)) continue;
             const auto size = entry.file_size(ec);
@@ -294,6 +296,27 @@ void validateSignatureOrThrow(const std::vector<unsigned char>& bytes, Kind kind
     }
 }
 
+void applyReceivedFileProtection(const std::string& path) {
+#ifdef _WIN32
+    // Windows Mark-of-the-Web。使用 ADS 标记网络来源，使资源管理器和部分解析器
+    // 后续能把该文件视为来自网络区域。文件系统不支持 ADS 时静默降级。
+    std::ofstream zone(pathFromUtf8(path + ":Zone.Identifier"), std::ios::binary | std::ios::trunc);
+    if (zone) {
+        zone << "[ZoneTransfer]\r\nZoneId=3\r\nHostUrl=SecureChat\r\n";
+    }
+#else
+    // POSIX 上保守移除执行位，避免收到的脚本/二进制直接变成可执行文件。
+    std::error_code ec;
+    auto p = pathFromUtf8(path);
+    auto perms = std::filesystem::status(p, ec).permissions();
+    if (ec) return;
+    perms &= ~std::filesystem::perms::owner_exec;
+    perms &= ~std::filesystem::perms::group_exec;
+    perms &= ~std::filesystem::perms::others_exec;
+    std::filesystem::permissions(p, perms, std::filesystem::perm_options::replace, ec);
+#endif
+}
+
 } // 匿名命名空间
 
 std::filesystem::path pathFromUtf8(const std::string& path) {
@@ -341,6 +364,16 @@ std::string receiveDirectory(Kind kind) {
     const auto root = receiveRootDirectory();
     ensurePrivateDirectory(root);
     auto dir = root / leaf;
+    ensurePrivateDirectory(dir);
+    return pathToUtf8(dir);
+}
+
+std::string receiveDirectory(Kind kind, const std::string& roomName, const std::string& roomToken) {
+    if (roomName.empty() || roomToken.empty()) return receiveDirectory(kind);
+
+    // 接收附件按 room instance 二次分层，避免同名文件和同名房间实例互相混淆。
+    const auto leaf = kind == Kind::Image ? "images" : (kind == Kind::Voice ? "voice" : "files");
+    auto dir = chat::local_paths::attachmentDirectory(leaf, roomName, roomToken);
     ensurePrivateDirectory(dir);
     return pathToUtf8(dir);
 }
@@ -413,6 +446,12 @@ std::string makeTransferId() {
     return out.str();
 }
 
+void ReceiveStore::setRoomContext(const std::string& roomName, const std::string& roomToken) {
+    std::lock_guard<std::mutex> lock(mMutex);
+    mRoomName = roomName;
+    mRoomToken = roomToken;
+}
+
 ReceiveSlot ReceiveStore::stage(
     const std::string& key,
     Kind kind,
@@ -438,7 +477,7 @@ ReceiveSlot ReceiveStore::stage(
     slot.kind = kind;
     slot.transferId = transferId;
     slot.name = safeTransferName(name, fallback);
-    slot.path = transferPath(receiveDirectory(kind), slot.name, fallback);
+    slot.path = transferPath(receiveDirectory(kind, mRoomName, mRoomToken), slot.name, fallback);
     slot.expectedSize = expectedSize;
     slot.receivedSize = 0;
 
@@ -521,6 +560,9 @@ ReceiveChunkResult ReceiveStore::appendChunk(const std::string& key, const rtc::
             std::filesystem::remove(pathFromUtf8(cachePath));
             throw std::runtime_error(signatureError(slot.kind));
         }
+    }
+    if (result.complete) {
+        applyReceivedFileProtection(slot.path);
     }
     result.slot = slot;
     if (result.complete) {

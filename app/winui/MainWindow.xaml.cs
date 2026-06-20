@@ -117,6 +117,17 @@ public sealed partial class MainWindow : Window
         public string roomInstanceTokenDigest { get; set; } = "";
         public long modifiedTimeUnixMs { get; set; }
     }
+    private sealed class MessageHistoryRecord
+    {
+        public long id { get; set; }
+        public long createdAt { get; set; }
+        public bool isOwn { get; set; }
+        public string sender { get; set; } = "";
+        public string actorId { get; set; } = "";
+        public string kind { get; set; } = "message";
+        public string body { get; set; } = "";
+        public string messageJson { get; set; } = "";
+    }
     private const int InitialWindowWidth = 1180;
     private const int InitialWindowHeight = 760;
     // These caps only protect local WinUI preview/decoder paths. The protocol
@@ -703,6 +714,7 @@ public sealed partial class MainWindow : Window
         return message.StartsWith("client ws://", StringComparison.OrdinalIgnoreCase) ||
             message.StartsWith("client wss://", StringComparison.OrdinalIgnoreCase) ||
             message.StartsWith("Clients can join with:", StringComparison.OrdinalIgnoreCase) ||
+            message.StartsWith("Attachment trust:", StringComparison.OrdinalIgnoreCase) ||
             message.StartsWith("PKI identity ready:", StringComparison.OrdinalIgnoreCase) ||
             message.StartsWith("PKI member verified:", StringComparison.OrdinalIgnoreCase) ||
             message.StartsWith("GKA contribution verified:", StringComparison.OrdinalIgnoreCase) ||
@@ -1090,6 +1102,43 @@ public sealed partial class MainWindow : Window
         if (parts.Length < 3) return false;
 
         MarkVerifiedMember(parts[0], parts[1], parts[2], parts.Length >= 4 ? parts[3] : "");
+        return true;
+    }
+
+    private bool TryApplyAttachmentTrustStatus(string message)
+    {
+        // /trust 与 /untrust 由 C++ core 解析指纹前缀后回传到 UI。
+        // WinUI 只更新本机附件预览策略，不把该状态持久化或发送给其他成员。
+        const string prefix = "Attachment trust: ";
+        if (!message.StartsWith(prefix, StringComparison.Ordinal)) return false;
+
+        var parts = message[prefix.Length..]
+            .Split(" / ", 4, StringSplitOptions.TrimEntries);
+        if (parts.Length < 4) return false;
+
+        var action = parts[0];
+        var displayName = parts[1];
+        var memberId = parts[2];
+        var fingerprint = parts[3];
+        if (!action.Equals("trust", StringComparison.OrdinalIgnoreCase) &&
+            !action.Equals("untrust", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        MarkVerifiedMember(displayName, memberId, fingerprint);
+        var key = PrimaryParticipantKey(ParticipantLabel(displayName, memberId));
+        if (key.Length == 0) return true;
+
+        if (action.Equals("untrust", StringComparison.OrdinalIgnoreCase))
+        {
+            blockedAttachmentMembers.Add(key);
+        }
+        else
+        {
+            blockedAttachmentMembers.Remove(key);
+        }
+        RefreshParticipants();
         return true;
     }
 
@@ -1536,6 +1585,65 @@ public sealed partial class MainWindow : Window
         MessagesScrollViewer.ChangeView(null, MessagesScrollViewer.ScrollableHeight, null);
     }
 
+    private void ReloadMessageHistory()
+    {
+        var rows = LoadMessageHistory();
+        MessagesPanel.Children.Clear();
+        foreach (var row in rows)
+        {
+            if (string.IsNullOrWhiteSpace(row.body)) continue;
+            var content = new TextBlock
+            {
+                Text = row.body,
+                TextWrapping = TextWrapping.Wrap,
+                IsTextSelectionEnabled = true,
+                MaxWidth = 600,
+                HorizontalAlignment = HorizontalAlignment.Left
+            };
+            RenderBubble(
+                string.IsNullOrWhiteSpace(row.kind) ? "message" : row.kind,
+                row.sender,
+                content,
+                row.isOwn,
+                true);
+        }
+    }
+
+    private List<MessageHistoryRecord> LoadMessageHistory()
+    {
+        var required = NativeMethods.chat_get_message_history(IntPtr.Zero, 0);
+        if (required <= 0) return new List<MessageHistoryRecord>();
+
+        var buffer = Marshal.AllocHGlobal(required);
+        try
+        {
+            var written = NativeMethods.chat_get_message_history(buffer, required);
+            if (written < 0)
+            {
+                Marshal.FreeHGlobal(buffer);
+                buffer = IntPtr.Zero;
+                required = -written;
+                buffer = Marshal.AllocHGlobal(required);
+                written = NativeMethods.chat_get_message_history(buffer, required);
+            }
+            if (written <= 1 || written > required) return new List<MessageHistoryRecord>();
+
+            var bytes = new byte[written - 1];
+            Marshal.Copy(buffer, bytes, 0, bytes.Length);
+            var json = Encoding.UTF8.GetString(bytes);
+            return JsonSerializer.Deserialize<List<MessageHistoryRecord>>(json) ?? new List<MessageHistoryRecord>();
+        }
+        catch (Exception ex)
+        {
+            AddLine("error", UiText("Failed to load local message history: ", "加载本地聊天记录失败：") + ex.Message);
+            return new List<MessageHistoryRecord>();
+        }
+        finally
+        {
+            if (buffer != IntPtr.Zero) Marshal.FreeHGlobal(buffer);
+        }
+    }
+
     private string SelectedSendMode()
     {
         return SendModeBox.SelectedItem is ComboBoxItem item
@@ -1738,6 +1846,7 @@ public sealed partial class MainWindow : Window
             SetSessionMode(SessionMode.Host);
             AddParticipant(HostUserBox.Text.Trim());
             MarkLocalIdentityIfPossible();
+            ReloadMessageHistory();
             ShowInfo(message, InfoBarSeverity.Success);
             return;
         }
@@ -1754,6 +1863,7 @@ public sealed partial class MainWindow : Window
         {
             SetSessionMode(SessionMode.Join);
             MarkLocalIdentityIfPossible();
+            ReloadMessageHistory();
             ShowInfo(message, InfoBarSeverity.Success);
             return;
         }
@@ -1803,6 +1913,7 @@ public sealed partial class MainWindow : Window
 
         TryRememberLocalIdentityStatus(message);
         TryMarkJoinedLocalMemberStatus(message);
+        if (TryApplyAttachmentTrustStatus(message)) return;
         if (TryMarkVerifiedMemberStatus(message)) return;
 
         const string membersPrefix = "Room members: ";

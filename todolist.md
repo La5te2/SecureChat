@@ -333,7 +333,7 @@ PKI 身份认证现在强制绑定成员证书、临时 public key、GKA contrib
   - Windows 保留名会回退到默认文件名。
   - 接收文件名会限制长度，并在本地缓存名前加入时间和唯一序号，避免同名覆盖。
 - [x] 附件进入 `logs/`，不自动执行、不自动打开。
-  - 接收目录固定为 `logs/images`、`logs/voice`、`logs/files`。
+  - 接收目录按 room instance 分层：`logs/images/<room>_<roomInstanceTokenDigest前8位>`、`logs/voice/<room>_<roomInstanceTokenDigest前8位>`、`logs/files/<room>_<roomInstanceTokenDigest前8位>`。
   - UI 不执行附件；普通文件只显示附件提示。
   - 图片和语音先按附件卡片展示，预览动作只触发本地图片/音频解码器，不启动外部程序。
 - [x] 增加 WinUI 附件预览安全策略。
@@ -872,12 +872,15 @@ PKI 身份认证现在强制绑定成员证书、临时 public key、GKA contrib
   - 新 epoch 必须绑定最新 room instance token、成员集合、控制动作和 transcript 摘要。
   - 已实现 Host 离线期间不批准 pending join；Host 重新连接后 Server 会转交积压 pending join，Host 再显式 approve/reject。
 
-- [x] 明确不做聊天消息持久化。
-  - 出于安全边界考虑，阶段 15 不把解密后的文本、附件元数据或附件内容写入房间消息历史数据库。
+- [x] 实现本机文本消息历史。
+  - Host/Client 只把本端已经成功发送或成功解密显示的 `text` message 写入本机 SQLite。
+  - 本机文本历史路径为 `logs/texts/<room>_<roomInstanceTokenDigest前8位>/<systemUsername>.sqlite3`，避免同一 base username 在不同房间级身份下互相覆盖。
+  - SQLite 保存 sender、actor id、display kind、正文、原始 message JSON 和 `isOwn`，WinUI 重进房间时用 `isOwn` 恢复左右气泡方向。
+  - 不保存附件内容、附件元数据、status/error/log、成员私钥、Root/Intermediate 私钥、`K_G`、pairwise key、admission secret 或完整 room instance token。
   - Server 侧 SQLite 只保存 room instance open/closed 状态和 pending join 队列，不保存聊天明文、附件明文、`K_G` 或成员私钥。
   - Host/Client 的本地房间证书目录仍使用 `hash(roomInstanceToken)` 隔离房间级证书和 CSR 材料。
-  - 附件接收缓存保持现有临时落地逻辑；更细的附件隔离、信任状态和安全事件记录留到阶段 16。
-  - 房间 closed 后，Host/Client 只接受签名关闭事件并停止当前会话，不提供可追加的本地聊天历史文件。
+  - 附件接收缓存也使用 `<room>_<roomInstanceTokenDigest前8位>` 隔离；更细的附件隔离、信任状态和安全事件记录留到阶段 16。
+  - 房间 closed 后，Host/Client 只接受签名关闭事件并停止当前会话；本机历史可读取，但关闭后的房间不能继续追加新会话消息。
 
 - [x] 设计 Server 侧最小持久化状态。
   - Server 可以评估使用 SQLite 保存 room instance token、open/closed 状态、Host 最近连接状态和 pending join 队列；Server 默认状态目录与用户端 `logs/` 分离。
@@ -906,7 +909,7 @@ PKI 身份认证现在强制绑定成员证书、临时 public key、GKA contrib
   - 已实现 Host 显式 stop session：发送签名 `close_room`，Server 标记 closed 并广播 `room_closed`。
   - 已实现 Host 离线期间新成员申请停留在 pending；Host 重连后 Server 转交积压 pending join。
   - 已实现 Client 对 Host 身份变化的拒绝路径：`room_members` 和 `group_key` 中 Host 公钥或证书指纹变化会导致 Client 关闭会话。
-  - 已完成 Windows 构建验证；本地 WSS smoke 覆盖 Server、Alice Host、Bob Client、pending join、`/approve bob`、GKA epoch、Bob 发消息到 Host。
+  - 已完成 Windows 构建验证；本地 WSS smoke 覆盖 Server、Alice Host、Bob Client、pending join、`/list` 查看 pending requestId、`/approve <requestId>`、GKA epoch、Bob 发消息到 Host。
   - 完整 transcript fork 检测、阈值 Host 重入和多方 capability 验证属于阶段 13 长期自治协议方向。
 
 ## 阶段 16：附件隔离、信任分级和嵌入式跨平台沙箱
@@ -919,6 +922,12 @@ PKI 身份认证现在强制绑定成员证书、临时 public key、GKA contrib
   - `voice` 是 WinUI 本机按住录音产生的语音通道，不再是“选择本地音频文件发送”的通道。
   - CLI 取消 `/voice <path>`；音频文件如需作为文件发送，必须使用 `/file <path>`，接收端按普通文件处理。
   - WinUI Voice 模式下发送按钮显示 `Hold/按住`，按下开始录音，松开发送，取消时丢弃录音。
+
+- [x] 增加接收附件基础隔离和本机信任切换。
+  - 所有接收附件落地后都会执行 best-effort 隔离标记：Windows 写入 MotW Zone.Identifier，Linux/Unix 移除执行位。
+  - 普通 `file` 附件不自动打开；图片和语音仍受 WinUI 自动预览开关、结构校验和成员预览状态限制。
+  - WinUI 继续使用右键成员卡片切换 Allowed/Blocked；CLI 增加 `/trust <fingerprint-prefix>` 和 `/untrust <fingerprint-prefix>`。
+  - trust/untrust 只接受至少 8 位证书指纹前缀，只改变本机附件预览策略，不发送给 Server，不改变成员资格或房间级 PKI。
 
 - [ ] 定义阶段 16 的依赖边界和非目标。
   - 阶段 16 依赖阶段 14 的房间级成员 PKI；附件来源信任统一绑定房间级成员证书指纹，不再基于旧的手动成员 PKI 路径提前落地。

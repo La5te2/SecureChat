@@ -144,11 +144,13 @@ Server 不应可见：
 - `file` 是任意格式附件通道，不限制扩展名；接收端按普通文件处理，不执行、不自动打开。
 - `image` 是图片语义通道，只接受 `.png`、`.jpg`、`.jpeg`、`.bmp`，并校验扩展名和文件头一致；`.jpg/.jpeg` 必须是 JPEG header。
 - `voice` 是 WinUI 本机按住录音生成的 WAV 通道；CLI 不再提供 `/voice <path>`，音频文件需要通过 `/file <path>` 作为普通文件发送。
-- 接收文件只写入项目运行目录下的 `logs/images`、`logs/voice`、`logs/files`。
+- 接收文件只写入项目运行目录下的房间级附件缓存，路径形如 `logs/images/<room>_<roomInstanceTokenDigest前8位>`、`logs/voice/<room>_<roomInstanceTokenDigest前8位>`、`logs/files/<room>_<roomInstanceTokenDigest前8位>`。
 - 接收文件名会去除路径分隔符和 Windows 不允许的字符，限制长度，并处理 Windows 保留文件名，降低路径穿越和特殊文件名风险。
 - `logs/` 和子目录会尽量设置为 owner-only 权限。
-- 新附件接收前会检查 `logs/` 缓存总量，超限时只在 `logs/images`、`logs/voice`、`logs/files` 中删除最旧缓存文件。
+- 接收端保存附件后执行基础隔离标记。Windows 写入 Mark-of-the-Web（MotW）Zone.Identifier；Linux/Unix 移除 owner/group/others 执行位。文件系统不支持对应能力时静默降级。
+- 新附件接收前会检查 `logs/` 缓存总量，超限时递归扫描 `logs/images`、`logs/voice`、`logs/files` 下的房间级缓存并删除最旧缓存文件。
 - WinUI 成员默认 Allowed，成员卡片为绿色；右键成员卡片可切换为 Blocked 红色状态，禁止该成员附件自动预览。
+- CLI 可使用 `/trust <fingerprint-prefix>` 和 `/untrust <fingerprint-prefix>` 切换同一套本机附件预览策略。指纹前缀至少 8 位十六进制字符，和私发目标规则一致。
 - WinUI 提供自动预览图片、自动加载音频两个开关。
 - WinUI 预览前会再次检查图片尺寸、总像素数、文件大小，以及 WAV 采样率、声道数、时长和 chunk 结构。
 
@@ -170,6 +172,7 @@ WinUI 的附件预览策略是本机 UI 状态，不参与 PKI 验证或密钥�
 
 - Allowed：默认状态，成员卡片为绿色；图片/音频按设置面板的自动预览开关处理。
 - Blocked：本机用户右键成员卡片后进入该状态，成员卡片为红色；图片/音频只显示附件卡片，不自动进入本地解码器。再次右键恢复 Allowed。
+- CLI 中 `/untrust <fingerprint-prefix>` 等效于把该成员切换为 Blocked，`/trust <fingerprint-prefix>` 等效于恢复 Allowed。
 - 自己本地选择并发送的附件按“本地文件”处理，不证明该成员可信。
 
 默认配置为：图片自动预览开、音频自动加载关。因此默认情况下，Allowed 成员发来的图片可在结构校验通过后自动预览，音频仍显示附件卡片；Blocked 成员始终不自动预览。

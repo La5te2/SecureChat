@@ -5,6 +5,7 @@
 #include "attachment_transfer.hpp"
 #include "common.hpp"
 #include "events.hpp"
+#include "local_message_store.hpp"
 #include "pki_application.hpp"
 #include "secure_relay.hpp"
 #include "websocket_config.hpp"
@@ -64,6 +65,8 @@ public:
     bool sendImageTo(const std::string& target, const std::string& filePath);
     bool sendTextFileTo(const std::string& target, const std::string& filePath);
     bool sendVoiceTo(const std::string& target, const std::string& filePath);
+    // 返回当前 room instance 的本机文本历史 JSON。WinUI 重进房间时用它重放气泡。
+    std::string messageHistoryJson(std::size_t limit = 500) const;
 
 private:
     // 排队一次本地关闭，并携带用户可见原因。
@@ -104,6 +107,10 @@ private:
     void handleRelayMessage(const Message& msg);
     // 将一个加密附件分片重组成本地缓存文件。
     void handleRelayBinaryChunk(const std::string& senderKey, const Message& msg);
+    // 将已显示的文本消息写入本机历史；失败只报告状态，不影响收发。
+    void rememberTextHistory(const Message& msg, bool isOwn);
+    // 处理本机附件预览信任命令。该状态只影响当前 UI/CLI，不进入网络协议。
+    bool handleAttachmentTrustCommand(const std::string& line);
     // 将原始控制台/UI 输入转换为协议消息。
     Message parseInput(const std::string& line);
     // 根据至少 8 位证书指纹前缀解析成员 id。
@@ -149,4 +156,5 @@ private:
     std::atomic_bool mStopped = false;
     // 核心附件接收状态，以发送者 actor id 为键。
     chat::attachment::ReceiveStore mPendingTransfers;
+    std::unique_ptr<chat::local_message::Store> mMessageHistory;
 };
