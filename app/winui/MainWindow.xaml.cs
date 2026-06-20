@@ -19,8 +19,6 @@ using System.Text;
 using System.Text.Json;
 using System.Threading;
 using Windows.ApplicationModel.DataTransfer;
-using Windows.Media.Capture;
-using Windows.Media.MediaProperties;
 using Windows.Storage;
 using Windows.Storage.Pickers;
 using Windows.UI;
@@ -87,8 +85,7 @@ public sealed partial class MainWindow : Window
     private int closeExitStarted;
     private LocalRoomInstanceInfo? selectedRoomInstance;
     private System.Threading.Tasks.TaskCompletionSource<LocalRoomInstanceInfo?>? roomInstanceSelectionSource;
-    private MediaCapture? voiceCapture;
-    private StorageFile? activeVoiceRecordingFile;
+    private string activeVoiceRecordingPath = "";
     private System.Threading.Tasks.Task? voiceStartTask;
     private bool voiceRecording;
     private bool voiceRecordingStopping;
@@ -237,17 +234,14 @@ public sealed partial class MainWindow : Window
 
     private void DisposeVoiceCaptureForExit()
     {
-        // 关闭窗口时不再等待 StopRecordAsync。等待媒体栈可能拖住退出；
-        // 直接 Dispose 释放麦克风设备句柄，未完成的临时录音文件留给 OS 清理。
-        var capture = voiceCapture;
-        voiceCapture = null;
-        activeVoiceRecordingFile = null;
+        // 关闭窗口时直接关闭 WinMM 录音别名，避免麦克风句柄拖住退出。
+        activeVoiceRecordingPath = "";
         voiceRecording = false;
         voiceRecordingStopping = false;
         voiceStartTask = null;
         try
         {
-            capture?.Dispose();
+            CloseVoiceRecorder();
         }
         catch
         {
@@ -276,6 +270,12 @@ public sealed partial class MainWindow : Window
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool TerminateProcess(IntPtr hProcess, uint exitCode);
+
+    [DllImport("winmm.dll", CharSet = CharSet.Unicode)]
+    private static extern int mciSendString(string command, StringBuilder? returnString, int returnLength, IntPtr hwndCallback);
+
+    [DllImport("winmm.dll", CharSet = CharSet.Unicode)]
+    private static extern bool mciGetErrorString(int errorCode, StringBuilder errorText, int errorTextSize);
 
     private static bool IsWssServerUrl(string value)
     {
@@ -627,37 +627,30 @@ public sealed partial class MainWindow : Window
         return await picker.PickSingleFileAsync();
     }
 
-    private async System.Threading.Tasks.Task StartVoiceRecordingAsync()
+    private System.Threading.Tasks.Task StartVoiceRecordingAsync()
     {
-        if (voiceRecording || voiceRecordingStopping || voiceStartTask is { IsCompleted: false }) return;
+        if (voiceRecording || voiceRecordingStopping || voiceStartTask is { IsCompleted: false })
+        {
+            return System.Threading.Tasks.Task.CompletedTask;
+        }
 
         try
         {
             Directory.CreateDirectory(VoiceRecordingDirectory());
-            var folder = await StorageFolder.GetFolderFromPathAsync(VoiceRecordingDirectory());
-            var file = await folder.CreateFileAsync(
-                $"voice_{DateTimeOffset.Now:yyyyMMdd_HHmmss_fff}.wav",
-                CreationCollisionOption.GenerateUniqueName);
+            var file = UniqueVoiceRecordingPath();
 
-            var capture = new MediaCapture();
-            await capture.InitializeAsync(new MediaCaptureInitializationSettings
-            {
-                StreamingCaptureMode = StreamingCaptureMode.Audio
-            });
-
-            var profile = MediaEncodingProfile.CreateWav(AudioEncodingQuality.Auto);
-            await capture.StartRecordToStorageFileAsync(profile, file);
-            voiceCapture = capture;
-            activeVoiceRecordingFile = file;
+            CloseVoiceRecorder();
+            SendMciCommand($"open new type waveaudio alias {VoiceRecorderAlias}");
+            SendMciCommand($"record {VoiceRecorderAlias}");
+            activeVoiceRecordingPath = file;
             voiceTargetAtRecordStart = PrivateTargetBox.Text.Trim();
             voiceRecording = true;
             SendButton.Content = UiText("Release", "松开");
         }
         catch (Exception ex) when (ex is UnauthorizedAccessException or InvalidOperationException or IOException or COMException)
         {
-            voiceCapture?.Dispose();
-            voiceCapture = null;
-            activeVoiceRecordingFile = null;
+            CloseVoiceRecorder();
+            activeVoiceRecordingPath = "";
             voiceRecording = false;
             if (!isClosing)
             {
@@ -665,40 +658,48 @@ public sealed partial class MainWindow : Window
                 AddLine("error", UiText("Voice recording failed: ", "语音录制失败：") + ex.Message);
             }
         }
+        return System.Threading.Tasks.Task.CompletedTask;
     }
 
-    private async System.Threading.Tasks.Task StopVoiceRecordingAsync(bool send)
+    private System.Threading.Tasks.Task StopVoiceRecordingAsync(bool send)
     {
-        if ((!voiceRecording && activeVoiceRecordingFile is null) || voiceRecordingStopping) return;
+        if ((!voiceRecording && string.IsNullOrWhiteSpace(activeVoiceRecordingPath)) || voiceRecordingStopping)
+        {
+            return System.Threading.Tasks.Task.CompletedTask;
+        }
 
         voiceRecordingStopping = true;
-        var capture = voiceCapture;
-        var file = activeVoiceRecordingFile;
-        voiceCapture = null;
-        activeVoiceRecordingFile = null;
+        var path = activeVoiceRecordingPath;
+        activeVoiceRecordingPath = "";
         voiceRecording = false;
 
         try
         {
-            if (capture is not null)
+            try
             {
-                await capture.StopRecordAsync();
-                capture.Dispose();
+                SendMciCommand($"stop {VoiceRecorderAlias}");
             }
+            catch
+            {
+                // 录音设备在极短点击或权限变化时可能已经停止；继续尝试关闭别名。
+            }
+            if (send)
+            {
+                SendMciCommand($"save {VoiceRecorderAlias} \"{path}\"");
+            }
+            CloseVoiceRecorder();
 
-            if (file is null) return;
             if (!send)
             {
-                await file.DeleteAsync(StorageDeleteOption.PermanentDelete);
-                return;
+                DeleteFileIfExists(path);
+                return System.Threading.Tasks.Task.CompletedTask;
             }
 
-            var path = file.Path;
             if (!File.Exists(path) || new FileInfo(path).Length <= 0)
             {
-                await file.DeleteAsync(StorageDeleteOption.PermanentDelete);
+                DeleteFileIfExists(path);
                 AddLine("error", UiText("Voice recording is empty.", "语音录制为空。"));
-                return;
+                return System.Threading.Tasks.Task.CompletedTask;
             }
 
             var target = voiceTargetAtRecordStart;
@@ -712,6 +713,8 @@ public sealed partial class MainWindow : Window
         }
         catch (Exception ex) when (ex is InvalidOperationException or IOException or COMException or UnauthorizedAccessException)
         {
+            CloseVoiceRecorder();
+            DeleteFileIfExists(path);
             if (!isClosing)
             {
                 AddLine("error", UiText("Voice recording failed: ", "语音录制失败：") + ex.Message);
@@ -729,11 +732,49 @@ public sealed partial class MainWindow : Window
                 UpdateSendButtonContent();
             }
         }
+        return System.Threading.Tasks.Task.CompletedTask;
     }
 
     private static string VoiceRecordingDirectory()
     {
         return Path.Combine(AppContext.BaseDirectory, "logs", "voice-recordings");
+    }
+
+    private static string UniqueVoiceRecordingPath()
+    {
+        return Path.Combine(
+            VoiceRecordingDirectory(),
+            $"voice_{DateTimeOffset.Now:yyyyMMdd_HHmmss_fff}_{Guid.NewGuid():N}.wav");
+    }
+
+    private const string VoiceRecorderAlias = "securechat_voice";
+
+    private static void SendMciCommand(string command)
+    {
+        var error = mciSendString(command, null, 0, IntPtr.Zero);
+        if (error == 0) return;
+
+        var text = new StringBuilder(256);
+        var message = mciGetErrorString(error, text, text.Capacity)
+            ? text.ToString()
+            : "unknown multimedia error";
+        throw new InvalidOperationException(message);
+    }
+
+    private static void CloseVoiceRecorder()
+    {
+        _ = mciSendString($"close {VoiceRecorderAlias}", null, 0, IntPtr.Zero);
+    }
+
+    private static void DeleteFileIfExists(string path)
+    {
+        try
+        {
+            if (!string.IsNullOrWhiteSpace(path) && File.Exists(path)) File.Delete(path);
+        }
+        catch
+        {
+        }
     }
 
     private void AddLine(string kind, string message)
@@ -1290,7 +1331,9 @@ public sealed partial class MainWindow : Window
 
     private bool IsPendingParticipant(string participant)
     {
-        return ParticipantTrustKeys(participant).Any(key => pendingParticipants.Contains(key));
+        var normalized = participant.Trim();
+        return pendingParticipants.Contains(normalized) ||
+            ParticipantTrustKeys(participant).Any(key => pendingParticipants.Contains(key));
     }
 
     private void AddPendingParticipant(string name, string requestId = "")
@@ -1314,43 +1357,67 @@ public sealed partial class MainWindow : Window
     {
         if (string.IsNullOrWhiteSpace(token)) return;
         var normalized = token.Trim();
-        if (pendingJoinNamesByRequestId.TryGetValue(normalized, out var name)) {
-            pendingJoinNamesByRequestId.Remove(normalized);
-            var key = pendingParticipants.FirstOrDefault(participant =>
-                pendingJoinRequestIdByParticipant.TryGetValue(participant, out var requestId) &&
-                string.Equals(requestId, token.Trim(), StringComparison.OrdinalIgnoreCase));
-            if (!string.IsNullOrWhiteSpace(key))
-            {
-                pendingJoinRequestIdByParticipant.Remove(key);
-                normalized = key;
-            }
-            else
-            {
-                normalized = name;
-            }
-        }
-        else
+
+        // pending 成员内部 key 是 "display / requestId"，界面只显示 display。
+        // Host 可能收到 requestId、requestId 前缀、display 或 "display / id" 等不同状态文本，
+        // 因此删除时同时匹配完整 key、显示名和 requestId。
+        var keysToRemove = pendingParticipants
+            .Where(participant => PendingParticipantMatches(participant, normalized))
+            .ToList();
+
+        if (pendingJoinNamesByRequestId.TryGetValue(normalized, out var name))
         {
-            var key = pendingParticipants.FirstOrDefault(participant =>
-                pendingJoinRequestIdByParticipant.TryGetValue(participant, out var requestId) &&
-                requestId.StartsWith(normalized, StringComparison.OrdinalIgnoreCase));
-            if (!string.IsNullOrWhiteSpace(key))
-            {
-                pendingJoinRequestIdByParticipant.Remove(key);
-                normalized = key;
-            }
-            pendingJoinRequestIdByParticipant.Remove(normalized);
+            keysToRemove.AddRange(pendingParticipants
+                .Where(participant => string.Equals(ParticipantDisplayName(participant), name, StringComparison.OrdinalIgnoreCase)));
         }
-        pendingParticipants.RemoveWhere(key => string.Equals(key, normalized, StringComparison.OrdinalIgnoreCase));
-        RemoveParticipant(normalized);
+
+        foreach (var key in keysToRemove.Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            pendingParticipants.Remove(key);
+            participants.Remove(key);
+            if (pendingJoinRequestIdByParticipant.TryGetValue(key, out var requestId))
+            {
+                pendingJoinNamesByRequestId.Remove(requestId);
+            }
+            pendingJoinRequestIdByParticipant.Remove(key);
+        }
+        pendingJoinNamesByRequestId.Remove(normalized);
+        pendingJoinRequestIdByParticipant.Remove(normalized);
         RefreshParticipants();
+    }
+
+    private bool PendingParticipantMatches(string participant, string token)
+    {
+        if (string.IsNullOrWhiteSpace(participant) || string.IsNullOrWhiteSpace(token)) return false;
+        var normalizedParticipant = participant.Trim();
+        var normalizedToken = token.Trim();
+        if (string.Equals(normalizedParticipant, normalizedToken, StringComparison.OrdinalIgnoreCase)) return true;
+
+        var displayName = ParticipantDisplayName(normalizedParticipant);
+        var tokenDisplayName = ParticipantDisplayName(normalizedToken);
+        if (!string.IsNullOrWhiteSpace(displayName) &&
+            string.Equals(displayName, normalizedToken, StringComparison.OrdinalIgnoreCase)) return true;
+        if (!string.IsNullOrWhiteSpace(displayName) &&
+            !string.IsNullOrWhiteSpace(tokenDisplayName) &&
+            string.Equals(displayName, tokenDisplayName, StringComparison.OrdinalIgnoreCase)) return true;
+
+        if (pendingJoinRequestIdByParticipant.TryGetValue(normalizedParticipant, out var requestId))
+        {
+            return string.Equals(requestId, normalizedToken, StringComparison.OrdinalIgnoreCase) ||
+                requestId.StartsWith(normalizedToken, StringComparison.OrdinalIgnoreCase);
+        }
+        return false;
     }
 
     private string PendingRequestIdForParticipant(string participant)
     {
-        return pendingJoinRequestIdByParticipant.TryGetValue(participant.Trim(), out var requestId)
-            ? requestId
-            : "";
+        var normalized = participant.Trim();
+        if (pendingJoinRequestIdByParticipant.TryGetValue(normalized, out var requestId)) return requestId;
+        foreach (var key in ParticipantTrustKeys(participant))
+        {
+            if (pendingJoinRequestIdByParticipant.TryGetValue(key, out requestId)) return requestId;
+        }
+        return "";
     }
 
     private void ApprovePendingParticipant(string participant)
@@ -2018,16 +2085,25 @@ public sealed partial class MainWindow : Window
             return;
         }
 
-        AddStatusName(message, "Client joined: ");
-        AddStatusName(message, "Player joined: ");
+        const string pendingApprovedPrefix = "Pending join approved: ";
+        if (message.StartsWith(pendingApprovedPrefix, StringComparison.Ordinal))
+        {
+            RemovePendingParticipant(message[pendingApprovedPrefix.Length..].Trim());
+            return;
+        }
+
+        AddStatusName(message, "Client joined: ", removePending: true);
+        AddStatusName(message, "Player joined: ", removePending: true);
         RemoveStatusName(message, "Client left: ");
         RemoveStatusName(message, "Player left: ");
     }
 
-    private void AddStatusName(string message, string prefix)
+    private void AddStatusName(string message, string prefix, bool removePending = false)
     {
         if (!message.StartsWith(prefix, StringComparison.Ordinal)) return;
-        AddParticipant(message[prefix.Length..].Trim());
+        var name = message[prefix.Length..].Trim();
+        if (removePending) RemovePendingParticipant(name);
+        AddParticipant(name);
     }
 
     private void RemoveStatusName(string message, string prefix)
@@ -2157,10 +2233,10 @@ public sealed partial class MainWindow : Window
 
         var mode = sessionMode switch
         {
-            SessionMode.Host => UiText("server", "服务端"),
+            SessionMode.Host => UiText("client (host)", "客户端（群主）"),
             SessionMode.Join => UiText("client", "客户端"),
-            SessionMode.PendingJoin => UiText("pending", "等待加入"),
-            SessionMode.ConnectingHost => UiText("connecting server", "正在连接服务端"),
+            SessionMode.PendingJoin => UiText("client pending", "客户端等待加入"),
+            SessionMode.ConnectingHost => UiText("connecting client (host)", "正在连接客户端（群主）"),
             SessionMode.ConnectingJoin => UiText("connecting client", "正在连接客户端"),
             _ => UiText("not connected", "未连接")
         };

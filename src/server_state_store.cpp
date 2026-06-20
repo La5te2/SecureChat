@@ -3,8 +3,12 @@
 
 #include <sqlite3.h>
 
+#include <chrono>
 #include <cstdlib>
+#include <ctime>
 #include <filesystem>
+#include <iomanip>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 
@@ -19,9 +23,28 @@ std::filesystem::path pathFromUtf8(const std::string& value) {
     return std::filesystem::u8path(value);
 }
 
+std::string timestampForFile() {
+    const auto now = std::chrono::system_clock::now();
+    const auto seconds = std::chrono::time_point_cast<std::chrono::seconds>(now);
+    const auto millis = std::chrono::duration_cast<std::chrono::milliseconds>(now - seconds).count();
+    const auto timeValue = std::chrono::system_clock::to_time_t(now);
+
+    std::tm local{};
+#ifdef _WIN32
+    localtime_s(&local, &timeValue);
+#else
+    localtime_r(&timeValue, &local);
+#endif
+
+    std::ostringstream out;
+    out << std::put_time(&local, "%Y%m%d-%H%M%S")
+        << '-' << std::setw(3) << std::setfill('0') << millis;
+    return out.str();
+}
+
 std::string defaultDbPath() {
     const auto configured = envValue("SECURECHAT_SERVER_STATE_DB");
-    return configured.empty() ? "server/state/server-state.sqlite3" : configured;
+    return configured.empty() ? ("server/state/" + timestampForFile() + ".sqlite3") : configured;
 }
 
 void execSql(sqlite3* db, const char* sql) {

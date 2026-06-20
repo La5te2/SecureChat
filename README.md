@@ -420,7 +420,7 @@ Host 管理命令在 Host 输入框或 CLI 标准输入中发送：
 
 当前已拆分 Host 断线和显式关闭。Host 关闭 WinUI、结束 Host 进程、按 Ctrl+C 或网络瞬断只表示 Host disconnected，Server 保留房间 open 状态和 pending join 队列，Client 只看到 Host 暂离状态。Host 使用 WinUI 的 `Stop Session`、CLI 的 `/stop_session` 或 `/close_room` 时才发送带 Host 签名的 `close_room`，Server 广播 `room_closed` 并关闭该 room instance。
 
-Server 使用 SQLite 保存 room instance 的 open/closed 状态和 pending join 原始请求，默认路径为 `server/state/server-state.sqlite3`，可通过 `SECURECHAT_SERVER_STATE_DB` 覆盖。Server 不保存聊天明文、附件明文、成员私钥、Root/Intermediate 私钥、群密钥或 entrance secret。
+Server 使用 SQLite 保存 room instance 的 open/closed 状态和 pending join 原始请求，默认路径为 `server/state/<timestamp>.sqlite3`，每次启动生成一个新的状态库，避免重启覆盖旧状态；也可通过 `SECURECHAT_SERVER_STATE_DB` 显式指定固定路径。Server 不保存聊天明文、附件明文、成员私钥、Root/Intermediate 私钥、群密钥或 entrance secret。
 
 Server 进程停止或重启只表示中继暂时不可用，不会把 open 房间标记为 closed。房间进入 closed 状态只能来自 Host 在线发送的签名 `close_room`。
 

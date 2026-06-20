@@ -825,7 +825,7 @@ PKI 身份认证现在强制绑定成员证书、临时 public key、GKA contrib
   - Server 可以保存待转发的 opaque pending join 请求，但不能解释 CSR 或成员证书语义。
   - Server 对 closed 房间拒绝新消息、新入房申请和新成员状态写入。
   - Server 需要区分 Host disconnected、Host rejoined、room closed 和 member disconnected 四类事件。
-  - 已实现 Server SQLite `ServerStateStore`：默认写入 `server/state/server-state.sqlite3`，保存 open/closed room instance 状态和 pending join 原始请求，Server 重启后可恢复 open 房间标记和 pending join 队列。
+  - 已实现 Server SQLite `ServerStateStore`：默认写入 `server/state/<timestamp>.sqlite3`，保存 open/closed room instance 状态和 pending join 原始请求；如需固定状态库，可通过 `SECURECHAT_SERVER_STATE_DB` 指定路径。
 
 - [x] 重新定义 Host 连接和关闭行为。
   - Host 建房成功后，Server 把 room instance 标记为 open。

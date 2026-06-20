@@ -621,7 +621,7 @@ void HostSessionCore::approvePendingJoin(const std::string& token) {
             {{"signResponse", signResponse}});
     }
     mWs->send(msg.dump());
-    chatEmit(mCallbacks.onStatus, "Pending join approved: " + username);
+    chatEmit(mCallbacks.onStatus, "Pending join approved: " + username + " / " + requestId);
 }
 
 void HostSessionCore::rejectPendingJoin(const std::string& token, const std::string& reason) {
@@ -1553,7 +1553,8 @@ void HostSessionCore::handleSignalingMessage(const std::string& s) {
                 }
             }
             if (!clientId.empty()) {
-                chatEmit(mCallbacks.onStatus, "Client joined: " + (displayName.empty() ? username : displayName));
+                chatEmit(mCallbacks.onStatus, "Client joined: " +
+                    (displayName.empty() ? username : displayName) + " / " + clientId);
                 // 新成员加入意味着需要新的房间群密钥，
                 // 该成员只能通过已验证公钥收到当前密钥版本。
                 rotateGroupKey("member joined");
