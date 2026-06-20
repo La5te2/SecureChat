@@ -250,12 +250,22 @@ void ClientSessionCore::start() {
     mWs->open(mWsUrl);
 }
 
-// 关闭信令 WebSocket 和本地传输状态。
-void ClientSessionCore::stop() {
+void ClientSessionCore::requestStopNoJoin() {
     mStopped.store(true);
     if (mWs && !mWs->isClosed()) {
         mWs->close();
     }
+    {
+        std::lock_guard<std::mutex> lock(mSignalingQueueMutex);
+        mSignalingWorkerStopping.store(true);
+        mSignalingQueue.clear();
+    }
+    mSignalingQueueCv.notify_all();
+}
+
+// 关闭信令 WebSocket 和本地传输状态。
+void ClientSessionCore::stop() {
+    requestStopNoJoin();
     stopSignalingWorker();
     requestShutdown("Stopped");
 }
@@ -1034,7 +1044,11 @@ void ClientSessionCore::requestShutdown(const std::string& reason) {
         if (mWs && !mWs->isClosed()) {
             mWs->close();
         }
-        mSignalingWorkerStopping.store(true);
+        {
+            std::lock_guard<std::mutex> lock(mSignalingQueueMutex);
+            mSignalingWorkerStopping.store(true);
+            mSignalingQueue.clear();
+        }
         mSignalingQueueCv.notify_all();
         chatEmit(mCallbacks.onStatus, reason);
     }
@@ -1072,7 +1086,11 @@ void ClientSessionCore::signalingWorkerLoop() {
 }
 
 void ClientSessionCore::stopSignalingWorker() {
-    mSignalingWorkerStopping.store(true);
+    {
+        std::lock_guard<std::mutex> lock(mSignalingQueueMutex);
+        mSignalingWorkerStopping.store(true);
+        mSignalingQueue.clear();
+    }
     mSignalingQueueCv.notify_all();
     if (mSignalingThread.joinable() &&
         mSignalingThread.get_id() != std::this_thread::get_id()) {

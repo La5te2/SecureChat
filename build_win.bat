@@ -62,12 +62,17 @@ cmake --build "%BUILD_DIR%" --config %CONFIG%
 if errorlevel 1 exit /b 1
 
 for %%F in (
+    "%BUILD_DIR%\server.exe"
+    "%BUILD_DIR%\host.exe"
+    "%BUILD_DIR%\client.exe"
     "%BUILD_DIR%\cert.exe"
     "%BUILD_DIR%\native.dll"
     "%BUILD_DIR%\datachannel.dll"
     "%BUILD_DIR%\juice.dll"
     "%BUILD_DIR%\libcrypto-3-x64.dll"
     "%BUILD_DIR%\libssl-3-x64.dll"
+    "%BUILD_DIR%\sqlite3.dll"
+    "%BUILD_DIR%\argon2.dll"
 ) do (
     if not exist "%%~F" (
         echo ERROR: Required native output is missing: %%~F

@@ -26,11 +26,16 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Content Include="..\..\out\build\x64-release\server.exe" Link="server.exe" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\..\out\build\x64-release\host.exe" Link="host.exe" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\..\out\build\x64-release\client.exe" Link="client.exe" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\..\out\build\x64-release\cert.exe" Link="cert.exe" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="..\..\out\build\x64-release\native.dll" Link="native.dll" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="..\..\out\build\x64-release\datachannel.dll" Link="datachannel.dll" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="..\..\out\build\x64-release\juice.dll" Link="juice.dll" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="..\..\out\build\x64-release\libcrypto-3-x64.dll" Link="libcrypto-3-x64.dll" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="..\..\out\build\x64-release\libssl-3-x64.dll" Link="libssl-3-x64.dll" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="..\..\out\build\x64-release\argon2.dll" Link="argon2.dll" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\..\out\build\x64-release\sqlite3.dll" Link="sqlite3.dll" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

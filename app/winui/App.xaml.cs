@@ -15,7 +15,7 @@ public partial class App : Application
     public App()
     {
         InitializeComponent();
-        // 三类托管异常都写入 cr/，方便验收或调试时定位 UI 崩溃来源。
+        // 三类托管异常都写入 crash-report/，方便定位 UI 崩溃来源。
         UnhandledException += (_, e) => WriteCrashReport("Application.UnhandledException", e.Exception);
         AppDomain.CurrentDomain.UnhandledException += (_, e) =>
             WriteCrashReport("AppDomain.UnhandledException", e.ExceptionObject as Exception);
@@ -38,7 +38,7 @@ public partial class App : Application
         try
         {
             // 日志写在程序目录下，避免依赖额外服务；写失败时吞掉异常，防止二次崩溃。
-            var directory = Path.Combine(AppContext.BaseDirectory, "cr");
+            var directory = Path.Combine(AppContext.BaseDirectory, "crash-report");
             Directory.CreateDirectory(directory);
             var fileName = DateTime.Now.ToString("yyyyMMdd_HHmmss_fff") + ".log";
             var path = Path.Combine(directory, fileName);

@@ -49,6 +49,8 @@ public:
     void start();
     // 停止信令连接和活动房间状态。
     void stop();
+    // 请求停止但不等待 worker 线程退出。WinUI 进程关闭时使用它避免 UI 被 native join 拖住。
+    void requestStopNoJoin();
     // 显式关闭当前 room instance。普通 stop 只表示 Host 本地离线。
     void closeRoom();
     // 返回该 Host 会话是否已经被请求停止。
@@ -116,6 +118,7 @@ private:
     void sendGkaRequestToClients();
     // 启动/停止 Host 侧看门狗，用于处理拖延 GKA epoch 的成员。
     void startGkaTimeoutWorker();
+    void requestGkaTimeoutStop();
     void stopGkaTimeoutWorker();
     // 等待待处理 GKA 截止时间，并驱逐一直未贡献的成员。
     void gkaTimeoutLoop();

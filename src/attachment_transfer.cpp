@@ -61,7 +61,7 @@ bool hasAllowedExtension(const std::string& name, Kind kind) {
     case Kind::Voice:
         return ext == ".wav";
     case Kind::Text:
-        // file 是通用附件通道。格式风险交给后续附件分级、隔离和沙箱处理，
+        // file 是通用附件通道。格式风险交给后续附件分级、隔离和权限管控处理，
         // 传输层只负责大小、名称净化和端到端加密。
         return true;
     }

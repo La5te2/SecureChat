@@ -178,12 +178,9 @@ HostSessionCore::HostSessionCore(
 HostSessionCore::~HostSessionCore() {
     // 析构可能发生在 UI 关闭期间。
     // 关闭传输并 join watchdog，但不再发送面向用户的 "Session stopped" 事件。
-    mStopped.store(true);
+    requestStopNoJoin();
     stopSignalingWorker();
     stopGkaTimeoutWorker();
-    if (mWs && !mWs->isClosed()) {
-        mWs->close();
-    }
 }
 
 // 替换该会话使用的 UI/CLI 事件回调。
@@ -245,15 +242,25 @@ void HostSessionCore::start() {
     mWs->open(mWsUrl);
 }
 
-// 关闭所有 Host 持有的传输，并标记会话已停止。
-void HostSessionCore::stop() {
-    if (mStopped.exchange(true)) return;
-    stopSignalingWorker();
-    stopGkaTimeoutWorker();
+void HostSessionCore::requestStopNoJoin() {
+    mStopped.store(true);
     if (mWs && !mWs->isClosed()) {
         mWs->close();
     }
+    {
+        std::lock_guard<std::mutex> lock(mSignalingQueueMutex);
+        mSignalingWorkerStopping.store(true);
+        mSignalingQueue.clear();
+    }
+    mSignalingQueueCv.notify_all();
+    requestGkaTimeoutStop();
+}
 
+// 关闭所有 Host 持有的传输，并标记会话已停止。
+void HostSessionCore::stop() {
+    requestStopNoJoin();
+    stopSignalingWorker();
+    stopGkaTimeoutWorker();
     chatEmit(mCallbacks.onStatus, "Session stopped");
 }
 
@@ -319,7 +326,11 @@ void HostSessionCore::signalingWorkerLoop() {
 }
 
 void HostSessionCore::stopSignalingWorker() {
-    mSignalingWorkerStopping.store(true);
+    {
+        std::lock_guard<std::mutex> lock(mSignalingQueueMutex);
+        mSignalingWorkerStopping.store(true);
+        mSignalingQueue.clear();
+    }
     mSignalingQueueCv.notify_all();
     if (mSignalingThread.joinable() &&
         mSignalingThread.get_id() != std::this_thread::get_id()) {
@@ -931,9 +942,9 @@ void HostSessionCore::startGkaTimeoutWorker() {
     }
 }
 
-void HostSessionCore::stopGkaTimeoutWorker() {
-    // 取消所有待处理 epoch 并 join 看门狗，
-    // 避免关闭后留下持有回调或 WebSocket 状态的后台线程。
+void HostSessionCore::requestGkaTimeoutStop() {
+    // 取消所有待处理 epoch 并唤醒看门狗。该函数不 join 线程，
+    // WinUI shutdown 可以先快速返回，把等待工作留给后台清理。
     {
         std::lock_guard<std::mutex> lock(mGkaMutex);
         mGkaTimeoutStop = true;
@@ -942,6 +953,12 @@ void HostSessionCore::stopGkaTimeoutWorker() {
         mPendingGkaContributions.clear();
     }
     mGkaCv.notify_all();
+}
+
+void HostSessionCore::stopGkaTimeoutWorker() {
+    // 取消所有待处理 epoch 并 join 看门狗，
+    // 避免关闭后留下持有回调或 WebSocket 状态的后台线程。
+    requestGkaTimeoutStop();
     if (mGkaTimeoutThread.joinable() &&
         mGkaTimeoutThread.get_id() != std::this_thread::get_id()) {
         mGkaTimeoutThread.join();

@@ -14,7 +14,7 @@
 - 不可信 Server 和信令/中继服务只处理 opaque room token、连接状态、密文长度和转发时序等必要元数据。
 - 成员身份、房间准入、密钥协商、成员变更和控制消息都绑定房间实例状态，防止跨房间替换、重放和降级。
 - Host 负责创建房间和显式关闭房间；长期方向中，Host 的权力逐步被 capability、多签、阈值确认和成员本地验证约束。
-- 附件在本地按来源证书、文件类型和风险等级隔离处理，后续通过嵌入式沙箱支持敏感内容和危险性附件的受控传递。
+- 附件在本地按来源证书标识来源，所有 file 附件默认按有风险文件隔离落地，后续通过平台权限标记、隔离目录和受控打开策略支持敏感内容和危险性附件的传递。
 - 系统设计保持可解释、可复现和可测试，避免把安全性建立在无法审计的隐藏假设上。
 
 这意味着云服务器最终是可替换的不可信协调者和密文中继，而不是聊天信任根；Host 是某个房间实例的创建者和治理角色，而不是所有成员必须永久信任的中心。
@@ -322,7 +322,7 @@ PKI 身份认证现在强制绑定成员证书、临时 public key、GKA contrib
 - [x] 保留附件语义校验。
   - 图片：扩展名限制为 PNG/JPG/JPEG/BMP，并要求文件头与扩展名一致。
   - 语音：只由 WinUI 按住录音生成 WAV，并校验 RIFF/WAVE 文件头；CLI 不提供 `/voice <path>`。
-  - 文件：作为通用任意文件附件通道，不限制扩展名或格式，后续由隔离和沙箱策略处理风险。
+  - 文件：作为通用任意文件附件通道，不限制扩展名或格式，后续由隔离目录、权限标记和打开策略处理风险。
   - 发送端和接收端都会执行校验，native 校验是最终防线。
 - [x] 统一附件发送大小限制。
   - 图片、语音、文件附件共用 `SECURECHAT_ATTACHMENT_MAX_BYTES`。
@@ -589,7 +589,7 @@ PKI 身份认证现在强制绑定成员证书、临时 public key、GKA contrib
 
 ## 阶段 13：自治安全通信协议指导原则
 
-目标：阶段 13 开始进入课程项目完成后的长期协议演进部分，用来和前 12 个工程实现与课程收尾阶段切割。长期目标不是继续堆叠功能，而是把 SecureChat 逐步演化为 trust-minimized autonomous secure communication system。用户最终只需要信任自己的本地客户端、自己的私钥、本地策略和公开协议规则；其他成员、Host、Server、中继和网络路径都只能通过可验证证明、状态哈希链、capability、多签/阈值机制和资源预算参与系统。该阶段只定义指导思想、数学约束和验证准则，不直接实现 `entrance.scp`、Server 房间持久化或附件沙箱，避免和后续阶段重复。
+目标：阶段 13 开始进入课程项目完成后的长期协议演进部分，用来和前 12 个工程实现与课程收尾阶段切割。长期目标不是继续堆叠功能，而是把 SecureChat 逐步演化为 trust-minimized autonomous secure communication system。用户最终只需要信任自己的本地客户端、自己的私钥、本地策略和公开协议规则；其他成员、Host、Server、中继和网络路径都只能通过可验证证明、状态哈希链、capability、多签/阈值机制和资源预算参与系统。该阶段只定义指导思想、数学约束和验证准则，不直接实现 `entrance.scp`、Server 房间持久化或附件权限管控，避免和后续阶段重复。
 
 - **长期自治系统目标。**
   - 系统不能消灭所有信任，只能把信任从“相信某个人或某台服务器”转为“验证数学证明、协议状态和本地策略”。
@@ -912,124 +912,59 @@ PKI 身份认证现在强制绑定成员证书、临时 public key、GKA contrib
   - 已完成 Windows 构建验证；本地 WSS smoke 覆盖 Server、Alice Host、Bob Client、pending join、`/list` 查看 pending requestId、`/approve <requestId>`、GKA epoch、Bob 发消息到 Host。
   - 完整 transcript fork 检测、阈值 Host 重入和多方 capability 验证属于阶段 13 长期自治协议方向。
 
-## 阶段 16：附件隔离、信任分级和嵌入式跨平台沙箱
+## 阶段 16：附件隔离和跨平台权限管控
 
-目标：把附件从“安全接收和预览”推进到“分级信任、隔离落地、受控打开和证书绑定信任”。阶段 16 的核心不是要求用户自备 bubblewrap、Firejail 或其他外部沙箱，而是随 SecureChat 一起分发嵌入式附件沙箱能力。统一策略层负责判断附件风险，Windows/Linux 后端负责调用本项目自带的受限 helper 进程完成预览、检查或受控打开。附件来源信任绑定成员证书指纹，不绑定 IP、文件名或显示名；不同文件类型使用不同安全策略。
+目标：把附件处理收束为“所有 file 附件默认有风险”。来源证书只用于判断“谁发来的”，不用于证明文件安全，也不让文件获得自动打开、自动运行或解除隔离的权利。阶段 16 不做附件风险分级数据库，不做本地附件 SQLite 审计台账，不做独立附件处理进程；当前重点是安全落地、默认隔离、明确提示、预览前校验和跨平台权限标记。
 
 - [x] 重构附件语义边界。
-  - `file` 是通用任意文件附件通道，不限制扩展名或格式；后续由附件分级、隔离目录、打开策略和沙箱负责处理风险。
+  - `file` 是通用任意文件附件通道，不限制扩展名或格式；接收端一律按有风险文件处理。
   - `image` 是图片语义通道，只接受 `.png`、`.jpg`、`.jpeg`、`.bmp`，并要求扩展名和文件头一致；`.jpg/.jpeg` 必须通过 JPEG header 校验。
   - `voice` 是 WinUI 本机按住录音产生的语音通道，不再是“选择本地音频文件发送”的通道。
   - CLI 取消 `/voice <path>`；音频文件如需作为文件发送，必须使用 `/file <path>`，接收端按普通文件处理。
   - WinUI Voice 模式下发送按钮显示 `Hold/按住`，按下开始录音，松开发送，取消时丢弃录音。
 
-- [x] 增加接收附件基础隔离和本机信任切换。
+- [x] 增加接收附件基础隔离和本机预览控制。
   - 所有接收附件落地后都会执行 best-effort 隔离标记：Windows 写入 MotW Zone.Identifier，Linux/Unix 移除执行位。
   - 普通 `file` 附件不自动打开；图片和语音仍受 WinUI 自动预览开关、结构校验和成员预览状态限制。
   - WinUI 继续使用右键成员卡片切换 Allowed/Blocked；CLI 增加 `/trust <fingerprint-prefix>` 和 `/untrust <fingerprint-prefix>`。
-  - trust/untrust 只接受至少 8 位证书指纹前缀，只改变本机附件预览策略，不发送给 Server，不改变成员资格或房间级 PKI。
+  - trust/untrust 只影响图片和语音是否允许自动预览，不影响 `file` 附件打开策略，不发送给 Server，不改变成员资格或房间级 PKI。
 
-- [ ] 定义阶段 16 的依赖边界和非目标。
-  - 阶段 16 依赖阶段 14 的房间级成员 PKI；附件来源信任统一绑定房间级成员证书指纹，不再基于旧的手动成员 PKI 路径提前落地。
-  - 阶段 16 依赖阶段 15 的 room instance 本地状态；附件信任、TTL、隔离状态和安全事件都限定在当前 room instance 的本机状态中。
-  - 附件信任是本机 UI 和本机文件打开策略，不是跨房间证书吊销机制。
-  - 附件信任不依赖 mTLS，不改变 Server 不可信 relay 边界，也不授予成员绕过 GKA、PKI、transcript 或资源预算的权限。
-  - 第一轮不实现内核驱动、内核回调、全局杀毒引擎、企业 EDR 或强制系统级策略。
-  - 第一轮必须实现随项目发布的嵌入式附件沙箱 helper；外部沙箱工具只能作为开发调试或增强选项，不能成为普通用户的运行前提。
-  - 沙箱不可用时必须降级为保守策略，例如只保存、不自动预览、不自动打开，而不是直接正常打开高风险文件。
-  - 阶段 16 可以把 SQLite 从当前 Server 房间状态库扩展为本机 room-local 状态索引库，但 SQLite 不承担秘密保密职责。
-  - SQLite 中只保存可索引状态、审计事件、附件元数据和策略结果；完整 `roomInstanceToken`、admission secret、成员私钥、群密钥、附件明文内容继续留在加密材料或加密附件文件中。
+- [ ] 明确阶段 16 的依赖边界和非目标。
+  - 阶段 16 使用阶段 14 的房间级成员 PKI 来标识附件来源，但不把来源可信等同于文件安全。
+  - 阶段 16 不做跨房间附件信任，不做证书吊销系统，不做 mTLS 依赖，不改变 Server 不可信 relay 边界。
+  - 阶段 16 不引入附件安全 SQLite。附件元数据只保存在当前消息显示和接收流程需要的内存对象中，退出后不额外保留附件审计台账。
+  - 阶段 16 不实现杀毒、社区 hash 黑名单、企业 EDR、内核回调或系统级强制策略。
+  - 平台权限能力不可用时必须降级为保守策略，例如只保存、不自动预览、不自动打开。
 
-- [ ] 定义附件安全元数据模型。
-  - 为每个接收附件记录 source member fingerprint、room instance、message id、原始文件名、净化后文件名、mime、扩展名、大小、hash、接收时间和加密消息来源。
-  - source member fingerprint 必须来自房间级成员证书链验证结果，不能来自显示名、用户名、IP 地址、Server 连接 id 或用户手工输入的别名。
-  - 记录 attachment risk class、quarantine state、preview state、open policy、trust decision 和 TTL。
-  - 记录文件当前所在位置，例如 quarantine cache、preview cache、trusted media cache 或 blocked cache，用于区分“已接收”“可预览”“待确认打开”和“阻止”。
-  - 元数据保存在本机状态中；不上传 Server，不形成跨房间全局画像。
-  - 引入 room-local SQLite 作为非秘密状态索引库，例如 `logs/state/<room_name>_<roomInstanceTokenDigest前8位>.sqlite3`。
-  - SQLite 可记录附件元数据、来源证书指纹、隔离状态、预览/打开策略、信任 TTL、blocked/trusted 来源、沙箱运行结果、用户确认记录和安全事件日志。
-  - SQLite 可保存本机房间索引，例如 room name、room instance digest、role、创建/导入时间、最后连接时间和最近一次 Host 连接状态，便于 WinUI 选择房间实例。
-  - SQLite 不保存聊天明文、附件明文、`K_G`、pairwise key、成员私钥、Root/Intermediate 私钥、admission secret 或完整 room instance token。
-
-- [ ] 定义附件类型分级。
-  - A 级展示类：`.txt`、`.md`、`.log`、`.jpg`、`.png`、`.bmp`、`.mp3`、`.wav` 等低风险展示文件。
-  - B 级复杂解析器类：`.pdf`、`.docx`、`.xlsx`、`.pptx` 等依赖复杂外部解析器的文档文件。
-  - C 级执行类：`.exe`、`.dll`、`.msi`、`.ps1`、`.js`、`.vbs`、`.bat`、`.cmd`、ELF、shell script 等可执行文件或脚本。
-  - 未识别扩展名、扩展名和文件头不一致、超大文件或解析异常文件默认按 C 级或阻止处理。
-  - A 级文件强调用户体验，可以在来源受信且结构校验通过时自动预览；B 级文件强调外部解析器风险，默认保留隔离；C 级文件强调执行风险，默认阻止自动运行。
-  - 文件分级不能只看扩展名，至少结合 magic bytes、MIME 推断、大小限制、结构检查结果和文件名净化结果。
-
-- [ ] 设计证书绑定信任和权能分离策略。
-  - 用户点击“信任来源”时，记录房间级成员证书序列号、证书指纹或公钥指纹，不记录 IP、文件名或显示名。
-  - 默认不提供永久信任；信任状态限定在当前 room instance 的本机范围内，并带 TTL，例如 24 小时或用户自定义有效期。
-  - 证书过期、被本机标记为不可信、指纹变化或验证失败时，自动挂起该来源的信任策略。
-  - 信任证书不等于信任所有文件类型。
-  - A 级文件在来源受信且校验通过时，可降低提示强度或允许自动预览。
-  - B 级文件即使来源受信，也保持隔离标记或低权限打开策略。
-  - C 级文件永远不能因来源受信而自动运行、自动提权或静默解除保护。
-  - UI 中的“信任此来源”应解释为“降低来自该证书持有人的文档和媒体提示强度”；执行类文件仍需要此次运行确认。
-  - 附件状态区分为来源未知、来源已验证、来源受信、来源阻止、来源受信但待运行确认，避免把“证书可信”和“文件安全”混成一个状态。
-
-- [ ] 设计统一打开策略抽象。
-  - 定义 `AttachmentOpenPolicy`，输入 attachment metadata、risk class、source trust、platform capability 和用户动作，输出允许预览、允许打开、需要确认、阻止或只保存。
-  - 定义 `AttachmentSecurityBackend`，由 Windows/Linux 后端报告本项目自带能力，例如 MotW、low integrity、restricted token、Job Object、AppContainer、Linux namespace、seccomp、noexec cache。
-  - 增加 `sandbox.exe` 作为阶段 16 的独立附件沙箱进程；它独立于 `server.exe`、`host.exe`、`client.exe` 和阶段 14 的 `cert.exe`。
-  - `sandbox.exe` 的核心实现放入 `sandbox_helper.cpp/.hpp`；平台相关代码可以继续拆分为 `sandbox_helper_win.cpp` 和 `sandbox_helper_linux.cpp`，但对上层暴露同一个 runner 接口。
-  - 定义 `AttachmentSandboxRunner`，统一启动 SecureChat 自带的 `sandbox.exe`，并通过 JSON manifest 或二进制 manifest 传入附件路径、风险等级、允许操作和资源限制。
-  - 定义 `OpenResult`，记录实际采取的隔离方式、降级原因、用户确认和错误信息。
-  - 策略层必须独立于 UI，CLI/WinUI 都能调用同一套判断逻辑。
-  - sandbox helper 和主进程隔离；helper 不读取成员私钥、room key、entrance.scp 或聊天数据库，只接收待处理附件和最小化策略参数。
+- [ ] 设计统一打开策略。
+  - `file` 附件默认只显示“附件已接收”和本地路径提示，不自动调用系统关联程序。
+  - 用户主动打开文件前，UI 应明确显示来源成员、文件名、大小、缓存路径和“网络来源附件”提示。
+  - 来源 Allowed 只降低图片/语音预览限制，不降低 `file` 附件打开提示强度。
+  - 来源 Blocked 时，图片/语音也只显示附件卡片，不自动进入本地解码器。
+  - 策略层必须独立于 UI，CLI/WinUI 都能复用同一套“只保存、可预览、需手动打开、阻止”的判断。
 
 - [ ] Windows 附件落地和打开策略。
   - 为所有网络来源附件写入 MotW，也就是 `Zone.Identifier` alternate data stream。
-  - 接收目录和文件尽量设置低完整性级别，降低外部解析器漏洞利用后的权限。
-  - 附件先落入隔离目录；只有满足策略后才迁移到预览缓存或用户选择的保存位置，迁移行为必须记录到附件安全事件日志。
-  - A 级图片/音频优先走 WinUI 内置预览和现有结构校验，不自动调用外部程序。
-  - B 级文档默认保留 MotW 和低完整性策略，打开前显示来源、证书状态和风险等级。
-  - C 级执行/脚本文件默认阻止自动打开；用户确认也只表示“此次打开/运行”，不做静默提权或系统级提权。
-  - 原始设想中的“物理迁移+权限提升”保留为后续待评估方向；第一轮只做隔离目录到受控位置的物理迁移，不实现自动提升完整性级别。
-  - 脚本类文件即使解除 MotW，也要阻止危险运行参数，例如禁止 `-ExecutionPolicy Bypass` 这类绕过路径。
-  - 第一轮实现 SecureChat 自有 Windows sandbox helper，使用 restricted token、低完整性级别和 Job Object 限制子进程权限、生命周期和资源占用。
-  - 后续可评估 AppContainer 或更严格的 SecureChat 自有预览 helper；外部任意默认程序不能假设受 SecureChat 完全控制。
+  - 接收目录和文件尽量设置保守访问权限，降低外部解析器漏洞利用后的影响范围。
+  - 图片/语音优先走 WinUI 内置预览和现有结构校验，不自动调用外部程序。
+  - `file` 附件保留 MotW；即使来源 Allowed，也不静默解除 MotW，不自动运行，不自动提权。
+  - 用户主动打开脚本或可执行文件时，不提供绕过系统安全策略的参数或快捷入口。
 
 - [ ] Linux 附件落地和打开策略。
   - 接收目录使用专用缓存目录和严格权限，默认不授予可执行权限。
-  - C 级文件即使来源受信，也必须显式确认才可改变执行权限或运行。
-  - 附件先落入隔离目录；只有满足策略后才迁移到预览缓存或用户选择的保存位置，迁移行为必须记录到附件安全事件日志。
-  - 第一轮实现 SecureChat 自有 Linux sandbox helper，使用 user namespace、mount namespace、PID namespace、no_new_privs、seccomp-bpf、只读 bind mount 和资源限制构造最小隔离环境。
-  - Linux helper 的行为可以参考 bubblewrap 的默认拒绝思路，但不能要求用户预装 bubblewrap；helper 只绑定必要文件，只读挂载附件，限制 HOME、网络、进程、设备和临时目录暴露。
-  - Flatpak/xdg-desktop-portal、AppArmor 和 Firejail 只作为后续增强或发行版适配项，不作为普通用户必须安装的依赖。
-  - 沙箱能力不可用时，Linux 后端降级为只保存、无执行位、打开前强提示。
+  - `file` 附件即使来源 Allowed，也必须显式确认才可改变执行权限或运行。
+  - 图片/语音优先走 WinUI 内置预览和现有结构校验，不自动调用外部程序。
+  - 权限管控能力不可用时，Linux 后端降级为只保存、无执行位、打开前强提示。
 
 - [ ] 设计 WinUI/CLI 交互。
-  - 附件卡片显示来源成员、证书状态、文件类型等级、大小、hash、隔离状态和是否需要二次确认。
-  - “信任此来源”提示说明：可降低来自该证书持有人的文档和媒体提示强度；可执行文件仍需二次确认。
-  - 成员信任设置支持查看、撤销和 TTL 到期提示。
-  - 对 C 级文件使用更明确的确认流程，避免用户误以为“来源可信”等于“可以安全执行”。
-  - CLI 提供 `attachments list`、`attachments inspect <id>`、`attachments trust-source <id>`、`attachments block-source <id>`、`attachments open <id>` 等候选命令。
-
-- [ ] 设计紧急制动机制。
-  - 证书过期、本机不再信任或验证失败时，撤销该来源自动信任。
-  - 房间级成员证书状态异常时，将该来源的未打开附件退回隔离状态，已预览缓存停止自动预览。
-  - 预留附件 hash denylist 接口。
-  - 若后续接入杀毒引擎、社区黑名单或企业策略，命中后直接阻止打开，不受来源信任覆盖。
-  - 预留网络行为诱饵和异常行为检测接口，用于后续识别附件打开后的横向移动或异常访问尝试。
-  - 预留内核回调或系统级策略接口作为长期研究方向；第一轮不实现内核态组件，避免把附件安全阶段扩大成操作系统安全项目。
-  - 记录本机安全事件日志，用于用户排查和撤销信任。
-
-- [ ] 按实现顺序推进。
-  - 等阶段 14 房间级成员 PKI 和阶段 15 room instance 本地状态完成后，先实现附件安全元数据和风险分级。
-  - 再实现统一 `AttachmentOpenPolicy` 和无沙箱时的保守默认策略。
-  - 然后实现 `sandbox_helper.cpp/.hpp`、`sandbox.exe`、`AttachmentSandboxRunner` 和跨平台 helper manifest，确保主进程与附件处理进程隔离。
-  - 再实现 Windows MotW、低完整性、restricted token、Job Object 和 WinUI 风险状态。
-  - 再实现 Linux no-exec 缓存、namespace/seccomp helper 和沙箱能力自检。
-  - 最后补充可选 portal/AppArmor/Firejail/AppContainer 评估。
+  - 附件卡片显示来源成员、附件类型、大小和本地缓存路径。
+  - `file` 附件卡片使用统一风险提示，不按扩展名做 A/B/C 等级。
+  - WinUI 右键成员卡片和 CLI `/trust`、`/untrust` 只控制图片/语音自动预览。
+  - CLI 暂不增加附件审计命令；如后续需要“隔离区管理器”，再单独设计本地索引。
 
 - [ ] 补充测试矩阵。
-  - 测试不同证书来源和不同文件类型组合。
-  - 测试 MotW 写入、解除、保留和 UI 状态。
-  - 测试 sandbox helper 不能读取成员私钥、room key、entrance.scp 或聊天数据库。
-  - 测试低完整性、restricted token、Job Object、no-exec cache、namespace/seccomp helper 和沙箱不可用降级。
-  - 测试证书过期、本机不信任、TTL 到期后的信任撤销。
-  - 测试可执行文件不会因来源受信而自动提权或静默运行。
-  - 测试未知扩展名、扩展名伪装、超大文件、异常图片和异常音频的阻止路径。
+  - 测试 MotW 写入、保留和文件系统不支持 ADS 时的降级行为。
+  - 测试 Linux/Unix 接收文件去执行位。
+  - 测试 `file` 附件不会自动打开。
+  - 测试图片扩展名和文件头不一致时拒绝进入图片通道。
+  - 测试 WinUI/CLI trust/untrust 只影响图片/语音预览，不影响 file 附件打开策略。

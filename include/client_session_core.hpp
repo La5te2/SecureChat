@@ -49,6 +49,8 @@ public:
     void start();
     // 停止信令连接和活动传输状态。
     void stop();
+    // 请求停止但不等待 worker 线程退出。WinUI 进程关闭时使用它避免 UI 被 native join 拖住。
+    void requestStopNoJoin();
     // 返回该 Client 会话是否已经被请求停止。
     bool shouldStop() const;
     // 向 Host 发送文本或附件命令。

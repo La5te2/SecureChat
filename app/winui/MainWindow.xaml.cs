@@ -10,12 +10,14 @@ using Microsoft.UI.Xaml.Media.Imaging;
 using Microsoft.UI.Text;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
+using System.Threading;
 using Windows.ApplicationModel.DataTransfer;
 using Windows.Media.Capture;
 using Windows.Media.MediaProperties;
@@ -82,6 +84,7 @@ public sealed partial class MainWindow : Window
     private ImageBrush? chatBackgroundBrush;
     private string? chatBackgroundPath;
     private bool isClosing;
+    private int closeExitStarted;
     private LocalRoomInstanceInfo? selectedRoomInstance;
     private System.Threading.Tasks.TaskCompletionSource<LocalRoomInstanceInfo?>? roomInstanceSelectionSource;
     private MediaCapture? voiceCapture;
@@ -194,9 +197,10 @@ public sealed partial class MainWindow : Window
 
     private void MainWindow_Closed(object sender, WindowEventArgs args)
     {
-        if (isClosing) return;
+        if (Interlocked.Exchange(ref closeExitStarted, 1) != 0) return;
         isClosing = true;
         infoBarTimer.Stop();
+        DisposeVoiceCaptureForExit();
 
         try
         {
@@ -218,18 +222,60 @@ public sealed partial class MainWindow : Window
             }
             finally
             {
-                Environment.Exit(0);
+                TerminateCurrentProcess();
             }
         });
 
-        // native WebSocket 关闭偶尔会等待网络释放；这里设置一个兜底退出，
-        // 防止用户点关闭后窗口长时间卡住。
+        // native shutdown 已经只发停止请求，不应长时间阻塞。
+        // 这里保留很短的看门狗，防止底层库异常卡住时留下 WinUI 幽灵进程。
         System.Threading.Tasks.Task.Run(async () =>
         {
-            await System.Threading.Tasks.Task.Delay(1200);
-            Environment.Exit(0);
+            await System.Threading.Tasks.Task.Delay(500).ConfigureAwait(false);
+            TerminateCurrentProcess();
         });
     }
+
+    private void DisposeVoiceCaptureForExit()
+    {
+        // 关闭窗口时不再等待 StopRecordAsync。等待媒体栈可能拖住退出；
+        // 直接 Dispose 释放麦克风设备句柄，未完成的临时录音文件留给 OS 清理。
+        var capture = voiceCapture;
+        voiceCapture = null;
+        activeVoiceRecordingFile = null;
+        voiceRecording = false;
+        voiceRecordingStopping = false;
+        voiceStartTask = null;
+        try
+        {
+            capture?.Dispose();
+        }
+        catch
+        {
+        }
+    }
+
+    private static void TerminateCurrentProcess()
+    {
+        try
+        {
+            if (OperatingSystem.IsWindows() && TerminateProcess(GetCurrentProcess(), 0))
+            {
+                return;
+            }
+            using var process = Process.GetCurrentProcess();
+            process.Kill(entireProcessTree: true);
+        }
+        catch
+        {
+            Environment.FailFast("SecureChat could not terminate after window close.");
+        }
+    }
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr GetCurrentProcess();
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool TerminateProcess(IntPtr hProcess, uint exitCode);
 
     private static bool IsWssServerUrl(string value)
     {
@@ -572,8 +618,8 @@ public sealed partial class MainWindow : Window
                 picker.FileTypeFilter.Add(".bmp");
                 break;
             default:
-                // File 是任意字节附件通道。类型风险由后续附件隔离、
-                // 信任分级和沙箱处理，不在文件选择器里限制扩展名。
+                // File 是任意字节附件通道。接收端一律按有风险文件隔离处理，
+                // 不在发送端文件选择器里限制扩展名。
                 picker.FileTypeFilter.Add("*");
                 break;
         }
@@ -613,8 +659,11 @@ public sealed partial class MainWindow : Window
             voiceCapture = null;
             activeVoiceRecordingFile = null;
             voiceRecording = false;
-            UpdateSendButtonContent();
-            AddLine("error", UiText("Voice recording failed: ", "语音录制失败：") + ex.Message);
+            if (!isClosing)
+            {
+                UpdateSendButtonContent();
+                AddLine("error", UiText("Voice recording failed: ", "语音录制失败：") + ex.Message);
+            }
         }
     }
 
@@ -663,7 +712,10 @@ public sealed partial class MainWindow : Window
         }
         catch (Exception ex) when (ex is InvalidOperationException or IOException or COMException or UnauthorizedAccessException)
         {
-            AddLine("error", UiText("Voice recording failed: ", "语音录制失败：") + ex.Message);
+            if (!isClosing)
+            {
+                AddLine("error", UiText("Voice recording failed: ", "语音录制失败：") + ex.Message);
+            }
         }
         finally
         {
@@ -672,7 +724,10 @@ public sealed partial class MainWindow : Window
             stopVoiceAfterStart = false;
             sendVoiceAfterStart = false;
             voiceStartTask = null;
-            UpdateSendButtonContent();
+            if (!isClosing)
+            {
+                UpdateSendButtonContent();
+            }
         }
     }
 
@@ -683,6 +738,8 @@ public sealed partial class MainWindow : Window
 
     private void AddLine(string kind, string message)
     {
+        if (isClosing) return;
+
         // Every native callback enters here. Status updates refresh room state;
         // attachment callbacks render media; encrypted chat JSON becomes bubbles.
         UpdateSessionStatus(kind, message);
@@ -920,7 +977,7 @@ public sealed partial class MainWindow : Window
 
     private void ValidateWavPreview(string path, long sizeBytes)
     {
-        // WAV 解析只读取文件头和 chunk 结构，不做杀毒或复杂格式沙箱。
+        // WAV 解析只读取文件头和 chunk 结构，不做杀毒或复杂格式隔离。
         if (sizeBytes <= 0) throw new InvalidDataException("empty audio file");
         if (sizeBytes > MaxPreviewAudioBytes) throw new InvalidDataException("audio is too large for inline preview");
 

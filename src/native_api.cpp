@@ -161,7 +161,7 @@ void writeNativeCrashReport(const std::string& source, const std::string& detail
     if (writing.test_and_set()) return;
 
     try {
-        const auto directory = moduleDirectory() / "cr";
+        const auto directory = moduleDirectory() / "crash-report";
         std::filesystem::create_directories(directory);
         const auto path = directory / (timestampForFile() + "_native.log");
         std::ofstream file(path, std::ios::out | std::ios::trunc);
@@ -266,14 +266,29 @@ void clearRetiredObjectsForShutdown() {
     gRetiredHostSessions.clear();
 }
 
+enum class RetireMode {
+    BlockingStop,
+    RequestStopOnly
+};
+
 // 停止当前会话，并把对象移到旁路队列中等待回调排空。
-void retireActiveObjects() {
+void retireActiveObjects(RetireMode mode) {
     if (gHostSession) {
-        gHostSession->stop();
+        if (mode == RetireMode::BlockingStop) {
+            gHostSession->stop();
+        }
+        else {
+            gHostSession->requestStopNoJoin();
+        }
         gRetiredHostSessions.push_back(std::move(gHostSession));
     }
     if (gPlSession) {
-        gPlSession->stop();
+        if (mode == RetireMode::BlockingStop) {
+            gPlSession->stop();
+        }
+        else {
+            gPlSession->requestStopNoJoin();
+        }
         gRetiredPlSessions.push_back(std::move(gPlSession));
     }
     trimRetiredObjects();
@@ -384,7 +399,7 @@ int CHAT_CALL chat_host_start(
         initLoggerOnce();
         {
             std::lock_guard<std::recursive_mutex> lock(gMutex);
-            retireActiveObjects();
+            retireActiveObjects(RetireMode::BlockingStop);
         }
 
         const std::string serverUrl = safeString(server_url);
@@ -429,7 +444,7 @@ int CHAT_CALL chat_host_start(
     }
     catch (const std::exception& e) {
         std::lock_guard<std::recursive_mutex> lock(gMutex);
-        retireActiveObjects();
+        retireActiveObjects(RetireMode::BlockingStop);
         emitEvent("error", e.what());
         return 0;
     }
@@ -485,7 +500,7 @@ int CHAT_CALL chat_join_start(
         initLoggerOnce();
         {
             std::lock_guard<std::recursive_mutex> lock(gMutex);
-            retireActiveObjects();
+            retireActiveObjects(RetireMode::BlockingStop);
         }
 
         const std::string serverUrl = safeString(url);
@@ -533,7 +548,7 @@ int CHAT_CALL chat_join_start(
     }
     catch (const std::exception& e) {
         std::lock_guard<std::recursive_mutex> lock(gMutex);
-        retireActiveObjects();
+        retireActiveObjects(RetireMode::BlockingStop);
         emitEvent("error", e.what());
         return 0;
     }
@@ -824,7 +839,7 @@ int CHAT_CALL chat_send_voice_to(const char* target, const char* file_path) {
 void CHAT_CALL chat_stop() {
     installNativeCrashHandlersOnce();
     std::lock_guard<std::recursive_mutex> lock(gMutex);
-    retireActiveObjects();
+    retireActiveObjects(RetireMode::BlockingStop);
     emitEvent("status", "Session stopped");
 }
 
@@ -845,7 +860,7 @@ void CHAT_CALL chat_close_room() {
 
     if (clientSession) {
         std::lock_guard<std::recursive_mutex> lock(gMutex);
-        retireActiveObjects();
+        retireActiveObjects(RetireMode::BlockingStop);
         emitEvent("status", "Session stopped");
         return;
     }
@@ -860,7 +875,7 @@ void CHAT_CALL chat_shutdown() {
         std::lock_guard<std::recursive_mutex> lock(gMutex);
         gCallback = nullptr;
         gUserData = nullptr;
-        retireActiveObjects();
+        retireActiveObjects(RetireMode::RequestStopOnly);
     }
 
     // WebSocket close 回调可能在 stop() 之后到达。
