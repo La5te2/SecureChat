@@ -11,7 +11,6 @@
 #include <cctype>
 #include <chrono>
 #include <cstddef>
-#include <fstream>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -49,14 +48,6 @@ std::string trimCopy(std::string value) {
     if (first == std::string::npos) return "";
     const auto last = value.find_last_not_of(" \t\r\n");
     return value.substr(first, last - first + 1);
-}
-
-std::string readTextFile(const std::string& path) {
-    std::ifstream file(path, std::ios::binary);
-    if (!file) throw std::runtime_error("failed to open file: " + path);
-    std::ostringstream buffer;
-    buffer << file.rdbuf();
-    return buffer.str();
 }
 
 bool parseDirectPrefix(const std::string& line, std::string& target, std::string& body) {
@@ -539,7 +530,7 @@ void HostSessionCore::approvePendingJoin(const std::string& token) {
                 pending["joinProof"],
                 username,
                 publicKey);
-            signResponse = json::parse(readTextFile(result.signResponseFile));
+            signResponse = result.signResponse;
         }
         catch (const std::exception& e) {
             chatEmit(mCallbacks.onError, "Pending certificate signing failed: " + username + ": " + e.what());

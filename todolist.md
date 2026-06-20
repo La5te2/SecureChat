@@ -360,9 +360,10 @@ PKI 身份认证现在强制绑定成员证书、临时 public key、GKA contrib
 - [x] 优先使用隐藏输入和 stdin 管道传递 Host/Client 密码。
   - Host/Client 交互模式默认隐藏读取密码。
   - Host/Client daemon 模式通过 stdin 接收密码，不继承 `SECURECHAT_ROOM_PASSWORD`。
-- [x] 默认不保存 daemon stdout/stderr 日志。
+- [x] 收束 daemon stdout/stderr 日志。
   
-  - `SECURECHAT_SERVER_LOG_FILE`、`SECURECHAT_LOG_FILE`、`SECURECHAT_CLIENT_LOG_FILE` 只用于临时排障。
+  - Server daemon 默认写入 `server/logs/server.log`，可通过 `SECURECHAT_SERVER_LOG_ENABLED=0` 关闭输出。
+  - Host/Client daemon 日志仍只用于临时排障。
 - [x] 不用 root 长期运行。
   - `start_server.sh` 默认拒绝 root 运行；确需临时诊断时才设置 `SECURECHAT_ALLOW_ROOT=1`。
   - `docs/deployment-hardening.md` 已给出 `securechat` 专用用户部署步骤。
@@ -377,7 +378,7 @@ PKI 身份认证现在强制绑定成员证书、临时 public key、GKA contrib
 - [x] 提供可选 systemd 服务模板。
   - `deploy/securechat-server.service` 已给出非 root 用户、失败重启和基础权限收敛配置。
   - systemd 是 Linux 服务管理器，只改善进程监督和权限边界；它不会提供通信内容保密，不能替代 WSS 或应用层 E2EE。
-- [x] 如果临时启用日志，排障后删除日志；长期日志轮转不是当前默认路径。
+- [x] 排障后按需删除日志；长期日志轮转不是当前默认路径。
   
   - `docs/deployment-hardening.md` 已给出 `server.log`、`host.log`、`client.log` 清理命令。
 
@@ -696,15 +697,17 @@ PKI 身份认证现在强制绑定成员证书、临时 public key、GKA contrib
 - [x] 定义 room instance 和文件边界。
   - `room name` 只作为用户输入和界面显示名称，不作为唯一密码学身份。
   - Host 创建房间时生成高熵 `roomInstanceId` 和至少 256-bit 的准入 secret。
-  - Host 先生成房间级 Root/Intermediate/Host 密钥对，再用 canonical room name、`roomInstanceId`、准入 secret、Root 公钥指纹、Intermediate 公钥指纹和 Host 公钥指纹派生 `roomInstanceToken`。
+  - Host 先生成房间级 Root/Intermediate/Host 密钥对，再用 canonical room name、`roomInstanceId`、准入 secret、Root 公钥指纹、Intermediate 公钥指纹和 Host 公钥指纹构造带长度前缀的 canonical 字段序列，并对该序列计算 SHA-256 派生 `roomInstanceToken`。
   - Root/Intermediate/Host 成员证书生成时把 `roomInstanceTokenDigest`、`roomInstanceId`、角色和设备名写入 X.509 subject 或扩展，避免证书内容和 token 互相依赖造成循环。
   - 同名房间在不同时间、不同 Host 或不同 Server 上创建时，必须拥有不同的 `roomInstanceToken`。
   - 项目级 `certs/` 只保存 Server TLS 证书、本地 TLS 开发 CA 或公开配置材料。
-  - 房间级准入材料、成员证书、CSR 和私钥材料都放入 `logs/certs/<digest(roomInstanceToken)>/`。
+  - 房间级准入材料、成员证书、CSR 和私钥材料都放入 `logs/certs/<原始房间名>_<roomInstanceTokenDigest前8位>/`。
+  - 原始房间名必须能直接作为本机文件夹名使用；包含路径分隔符、Windows 保留字符、控制字符、结尾空格或结尾点号时拒绝创建或导入。
+  - 必须持久化的运行材料写入本机加密二进制 `room-state.scb`；在线主流程不生成 `room-runtime.json`、`room-descriptor.json`、`*.csr.json` 或 `*-sign-response.json` 明文中间文件。
 
 - [x] 定义 `entrance.scp` 加密容器格式。
   - `.scp` 是 SecureChat PEM 的项目后缀，用于保存 SecureChat 自定义房间准入容器，不使用标准 PEM 明文格式保存准入材料。
-  - `entrance.scp` 外层只保留 magic、version、KDF 参数、salt、nonce 和 ciphertext/tag，不包含明文 room name、准入 secret、Root/Intermediate 证书或 room instance token。
+  - `entrance.scp` 外层是二进制容器，只保留 magic、version、KDF 标识、AEAD 标识、KDF 参数、长度字段、salt、nonce 和 ciphertext/tag，不包含明文 room name、准入 secret、Root/Intermediate 证书或 room instance token。
   - `entrance.scp` 明文 payload 解密后包含 room name 校验信息、`roomInstanceToken` 摘要、准入 secret、Root CA 公钥证书、Intermediate CA 公钥证书、用途、版本和有效期。
   - `entrance.scp` 明文 payload 同时保存 Root/Intermediate fingerprint 和 signed room descriptor；Client 导入时必须交叉验证 payload、descriptor 和证书实际 fingerprint 一致。
   - `entrance.scp` 绝不能包含 Root CA 私钥、Intermediate CA 私钥、Host 私钥或任何成员私钥。
@@ -717,7 +720,7 @@ PKI 身份认证现在强制绑定成员证书、临时 public key、GKA contrib
   - 房间短语不是传统意义上的 trapdoor；它作为 KDF 输入，配合 `entrance.scp` 内部 salt 派生解密密钥。
   - 固定形式：`K_entrance = Argon2id(normalize(roomPhrase), salt, params)`，再用 AEAD 解密 `entrance.scp` payload。
   - KDF 固定使用 vcpkg `argon2` 提供的 Argon2id；如果当前依赖无法接入，则拒绝创建或导入 `entrance.scp`，不提供 PBKDF2 等降级 fallback。
-  - Argon2id 参数写入 `entrance.scp` 外层头部，例如 memory cost、iterations、parallelism、salt 长度和输出长度，便于后续调参和算法升级。
+  - Argon2id 参数写入 `entrance.scp` 二进制头部，例如 memory cost、iterations、parallelism、salt 长度、nonce 长度、tag 长度和 ciphertext 长度，便于后续调参和算法升级。
   - 默认参数目标是让合法用户本机解锁一次耗时约 200ms 到 1s，同时让离线猜测攻击为每个候选短语付出内存和时间成本。
   - `entrance.scp` 头部保留 KDF version 和 Argon2id 参数版本；实现只接受明确支持的 Argon2id version，未知 version 或非 Argon2id KDF 直接拒绝，避免静默降级。
   - AEAD 优先使用 AES-256-GCM；AAD 绑定 magic、version、KDF 参数和用途，防止跨格式或降级解析。
@@ -730,9 +733,9 @@ PKI 身份认证现在强制绑定成员证书、临时 public key、GKA contrib
   - Host 创建房间时只输入房间名、Server URL 和个人用户名。
   - 程序本地生成本房间的 Root CA、Intermediate CA、Host 成员私钥、Host 成员证书、Host 设备/身份声明和 signed room descriptor。
   - signed room descriptor 绑定 canonical room name、`roomInstanceId`、`roomInstanceTokenDigest`、Root/Intermediate/Host 证书指纹、公钥指纹、Host 用户名和 Host 设备名。
-  - 程序导出 `logs/certs/<digest(roomInstanceToken)>/entrance.scp`，供 Host 通过短期可信渠道分发给准备加入的成员。
+  - 程序导出 `logs/certs/<原始房间名>_<digest前8位>/entrance.scp`，供 Host 通过短期可信渠道分发给准备加入的成员。
   - Host 本地保存 Root/Intermediate 私钥和 Host 私钥；这些私钥只留在 Host 设备或后续定义的安全备份机制中。
-  - 已实现 `cert.exe create-entrance`：生成房间级 Root/Intermediate、Host key/cert、签名 `room-descriptor.json` 和 AES-256-GCM 加密的 `entrance.scp`。
+  - 已实现 `cert.exe create-entrance`：生成房间级 Root/Intermediate、Host key/cert、AES-256-GCM 加密的 `entrance.scp` 和本机加密 `room-state.scb`。
   - 已实现房间级证书 schema：证书保留标准 OpenSSL/X.509 字段，并写入 `O=SecureChat`、`serialNumber=<roomInstanceTokenDigest>`、角色、设备名和 Netscape Comment。
 
 - [x] 实现 Client 导入 entrance 和本地生成成员材料。
@@ -745,7 +748,7 @@ PKI 身份认证现在强制绑定成员证书、临时 public key、GKA contrib
   - Client 本机生成成员私钥、CSR、设备/身份声明和本房间成员证书存放目录。
   - 成员私钥生成时读取用户配置的成员私钥口令；口令为空则生成无口令私钥，口令非空则生成加密私钥。
   - 成员私钥口令只用于保护本机房间级成员私钥，不参与房间准入材料分发，也不发送给 Server、Host 或其他成员。
-  - Client 只在当前流程中使用 `entrance.scp` 解出的准入 secret 派生入房 token 和准入信令加密 key；该 secret 只写入本机受限 `room-runtime.json`，不写入普通长期配置。
+  - Client 只在当前流程中使用 `entrance.scp` 解出的准入 secret 派生入房 token 和准入信令加密 key；该 secret 只写入本机加密 `room-state.scb`，不写入普通长期配置。
   - 已实现 `cert.exe inspect-entrance` 和 `cert.exe import-entrance`：使用 Argon2id 解锁 `entrance.scp`，验证 descriptor 签名、证书 fingerprint 和 room instance 绑定，导出 Root/Intermediate 公钥证书，并在 Client 本机生成成员私钥和 CSR。
   - WinUI 导入流程通过文件选择器选择 `entrance.scp`，native 导入过程校验 room name、descriptor、Root/Intermediate fingerprint、有效期和用途；导入结果通过状态事件反馈。
 
@@ -761,7 +764,7 @@ PKI 身份认证现在强制绑定成员证书、临时 public key、GKA contrib
   - 签发记录绑定 room instance token、成员公钥指纹、成员名、设备名、证书序列号、有效期和签发者指纹。
   - 后续增强可以把 Host 单签升级为多签或阈值签名，但最小实现先由当前房间 Host 审批。
   - 已实现 `cert.exe sign-csr`：Host 使用房间级 Intermediate CA 签发 Client CSR，并输出成员证书、成员证书链和签名响应。
-  - 已实现 `cert.exe install-sign-response`：Client 验证签名响应、CSR hash、成员 public key、证书链和 room instance 绑定后安装成员证书链。
+  - 签发响应由联机 admission-encrypted payload 返回，Client 在线验证 CSR hash、成员 public key、证书链和 room instance 绑定后自动安装成员证书链，不再鼓励落地明文签发响应文件。
   - CSR bundle 和 pending join proof 已通过 admission-encrypted payload 经 Server 在线转发，Host 审批绑定 pending join id、CSR hash、Client public key、room instance token 和签发响应。
 
 - [x] 更新 Host/Client/WinUI 接入方式。
@@ -769,9 +772,9 @@ PKI 身份认证现在强制绑定成员证书、临时 public key、GKA contrib
   - `cert.exe` 可以在现有 `cert_generation.cpp/.hpp` 基础上继续扩展；证书生成、证书链验证、房间级 CA、CSR 和 entrance 容器逻辑应沉入可复用核心代码，避免只写在 CLI 外壳中。
   - 已新增 `cert.exe`，并把入口容器、CSR 和成员签发逻辑放入 `cert_generation.cpp/.hpp`，CLI 只负责参数解析。
   - 已实现 Host/Client CLI `--room-dir`，由房间证书目录自动填充当前所需 PKI 环境和 room instance token，作为开发和自动化入口。
-  - 已实现 native API `chat_host_start_auto` 和 `chat_join_start_auto`：WinUI 不显示 room-dir，Host 点击启动房间时自动创建 `logs/certs/<digest>/entrance.scp`，Client 点击加入房间时选择 Host 分发的 `entrance.scp`。
+  - 已实现 native API `chat_host_start_auto` 和 `chat_join_start_auto`：WinUI 不显示 room-dir，Host 点击启动房间时自动创建 `logs/certs/<原始房间名>_<digest前8位>/entrance.scp`，Client 点击加入房间时选择 Host 分发的 `entrance.scp`。
   - 已实现 WinUI Client pending 状态：进入 pending 前不能发送消息或附件，只显示等待加入；Host 看到灰色 pending 成员卡片后可左键 approve、右键 reject。
-  - 已实现 CSR 在线审批：Client 导入 entrance 后本机生成成员私钥和 CSR，CSR bundle、pending join proof 和 Host 签发响应均通过 admission-encrypted payload 传输，Client 安装响应后再参与 GKA。
+  - 已实现 CSR 在线审批：Client 导入 entrance 后本机生成成员私钥和 CSR，CSR bundle、pending join proof 和 Host 签发响应均通过 admission-encrypted payload 传输，签发响应在线内存生成并发送，不落盘为 JSON，Client 安装响应后再参与 GKA。
   - 已清理 CLI 和 WinUI 中由用户手写的 room password 输入框；Host/Client 只通过 room-dir 读取 room instance token。
   - WinUI 和 CLI 中的 trust store、成员证书链、成员私钥显式路径在 entrance 流程落地后移除，由程序按 room instance 自动读取。
   - 成员私钥口令输入保留；该口令可以写入本地 config，避免用户每次进入房间都重复输入。
@@ -822,7 +825,7 @@ PKI 身份认证现在强制绑定成员证书、临时 public key、GKA contrib
   - Server 可以保存待转发的 opaque pending join 请求，但不能解释 CSR 或成员证书语义。
   - Server 对 closed 房间拒绝新消息、新入房申请和新成员状态写入。
   - Server 需要区分 Host disconnected、Host rejoined、room closed 和 member disconnected 四类事件。
-  - 已实现 Server SQLite `ServerRoomStore`：保存 open/closed room instance 状态和 pending join 原始请求，Server 重启后可恢复 open 房间标记和 pending join 队列。
+  - 已实现 Server SQLite `ServerStateStore`：默认写入 `server/state/server-state.sqlite3`，保存 open/closed room instance 状态和 pending join 原始请求，Server 重启后可恢复 open 房间标记和 pending join 队列。
 
 - [x] 重新定义 Host 连接和关闭行为。
   - Host 建房成功后，Server 把 room instance 标记为 open。
@@ -877,7 +880,7 @@ PKI 身份认证现在强制绑定成员证书、临时 public key、GKA contrib
   - 房间 closed 后，Host/Client 只接受签名关闭事件并停止当前会话，不提供可追加的本地聊天历史文件。
 
 - [x] 设计 Server 侧最小持久化状态。
-  - Server 可以评估使用 SQLite 保存 room instance token、open/closed 状态、Host 最近连接状态和 pending join 队列。
+  - Server 可以评估使用 SQLite 保存 room instance token、open/closed 状态、Host 最近连接状态和 pending join 队列；Server 默认状态目录与用户端 `logs/` 分离。
   - Server SQLite 不保存聊天明文、附件明文、成员私钥、Root/Intermediate 私钥、群密钥或 entrance secret。
   - Server 重启后可恢复 open 房间的状态标记，但不能恢复自己未保存也不应保存的应用层密钥。
   - Server 持久化只服务可用性和断线恢复，不改变 Server 不可信安全边界。
@@ -918,6 +921,8 @@ PKI 身份认证现在强制绑定成员证书、临时 public key、GKA contrib
   - 第一轮不实现内核驱动、内核回调、全局杀毒引擎、企业 EDR 或强制系统级策略。
   - 第一轮必须实现随项目发布的嵌入式附件沙箱 helper；外部沙箱工具只能作为开发调试或增强选项，不能成为普通用户的运行前提。
   - 沙箱不可用时必须降级为保守策略，例如只保存、不自动预览、不自动打开，而不是直接正常打开高风险文件。
+  - 阶段 16 可以把 SQLite 从当前 Server 房间状态库扩展为本机 room-local 状态索引库，但 SQLite 不承担秘密保密职责。
+  - SQLite 中只保存可索引状态、审计事件、附件元数据和策略结果；完整 `roomInstanceToken`、admission secret、成员私钥、群密钥、附件明文内容继续留在加密材料或加密附件文件中。
 
 - [ ] 定义附件安全元数据模型。
   - 为每个接收附件记录 source member fingerprint、room instance、message id、原始文件名、净化后文件名、mime、扩展名、大小、hash、接收时间和加密消息来源。
@@ -925,7 +930,10 @@ PKI 身份认证现在强制绑定成员证书、临时 public key、GKA contrib
   - 记录 attachment risk class、quarantine state、preview state、open policy、trust decision 和 TTL。
   - 记录文件当前所在位置，例如 quarantine cache、preview cache、trusted media cache 或 blocked cache，用于区分“已接收”“可预览”“待确认打开”和“阻止”。
   - 元数据保存在本机状态中；不上传 Server，不形成跨房间全局画像。
-  - 后续本地状态 SQLite 落地后，附件元数据可以写入 `logs/state/<hash(roomInstanceToken)>.sqlite3`。
+  - 引入 room-local SQLite 作为非秘密状态索引库，例如 `logs/state/<room_name>_<roomInstanceTokenDigest前8位>.sqlite3`。
+  - SQLite 可记录附件元数据、来源证书指纹、隔离状态、预览/打开策略、信任 TTL、blocked/trusted 来源、沙箱运行结果、用户确认记录和安全事件日志。
+  - SQLite 可保存本机房间索引，例如 room name、room instance digest、role、创建/导入时间、最后连接时间和最近一次 Host 连接状态，便于 WinUI 选择房间实例。
+  - SQLite 不保存聊天明文、附件明文、`K_G`、pairwise key、成员私钥、Root/Intermediate 私钥、admission secret 或完整 room instance token。
 
 - [ ] 定义附件类型分级。
   - A 级展示类：`.txt`、`.md`、`.log`、`.jpg`、`.png`、`.bmp`、`.mp3`、`.wav` 等低风险展示文件。

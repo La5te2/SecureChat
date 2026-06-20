@@ -414,9 +414,9 @@ SignalingServer::SignalingServer(uint16_t port) {
 
     {
         std::lock_guard<std::mutex> lock(mMutex);
-        for (const auto& roomId : mRoomStore.loadOpenRooms()) {
+        for (const auto& roomId : mStateStore.loadOpenRooms()) {
             auto& room = mRooms[roomId];
-            for (const auto& pending : mRoomStore.loadPendingJoins(roomId)) {
+            for (const auto& pending : mStateStore.loadPendingJoins(roomId)) {
                 room.pendingJoins[pending.requestId] = pending.payload;
             }
             std::cout << "[signal] restored open room state: " << roomId
@@ -468,7 +468,7 @@ void SignalingServer::closeAllRooms(const std::string& reason) {
                 }
             }
             mRegistry.closeRoom(roomId);
-            mRoomStore.markRoomClosed(roomId);
+            mStateStore.markRoomClosed(roomId);
         }
         mRooms.clear();
     }
@@ -626,12 +626,12 @@ void SignalingServer::handleCreateRoom(rtc::WebSocket* key, const json& data) {
                 client->publicKey = publicKey;
                 client->identity = data["identity"];
                 mRegistry.restoreRoom(roomId, account);
-                mRoomStore.markRoomOpen(roomId);
+                mStateStore.markRoomOpen(roomId);
                 hostReattached = true;
             }
         }
         else {
-            if (mRoomStore.roomState(roomId) == "closed") {
+            if (mStateStore.roomState(roomId) == "closed") {
                 ws = client->ws;
                 roomClosed = true;
             }
@@ -655,7 +655,7 @@ void SignalingServer::handleCreateRoom(rtc::WebSocket* key, const json& data) {
                 client->displayName = displayName;
                 client->publicKey = publicKey;
                 client->identity = data["identity"];
-                mRoomStore.markRoomOpen(roomId);
+                mStateStore.markRoomOpen(roomId);
             }
         }
     }
@@ -709,7 +709,7 @@ void SignalingServer::handleJoinRoom(rtc::WebSocket* key, const json& data) {
         auto roomIt = mRooms.find(roomId);
         if (!client || roomIt == mRooms.end()) {
             clientWs = client ? client->ws : nullptr;
-            errorMessage = mRoomStore.roomState(roomId) == "closed" ? "room closed" : "room not found";
+            errorMessage = mStateStore.roomState(roomId) == "closed" ? "room closed" : "room not found";
         }
         else {
             auto& room = roomIt->second;
@@ -741,7 +741,7 @@ void SignalingServer::handleJoinRoom(rtc::WebSocket* key, const json& data) {
                 if (data.contains("identity")) pending["identity"] = data["identity"];
                 if (data.contains("admissionPayload")) pending["admissionPayload"] = data["admissionPayload"];
                 room.pendingJoins[pendingRequestId] = pending;
-                mRoomStore.addPendingJoin(roomId, pendingRequestId, pending);
+                mStateStore.addPendingJoin(roomId, pendingRequestId, pending);
                 client->roomId = roomId;
                 client->role = "pending";
                 client->username = username;
@@ -833,7 +833,7 @@ void SignalingServer::handleApproveJoin(rtc::WebSocket* key, const json& data) {
                     if (!pendingClient || !pendingClient->ws || pendingClient->ws->isClosed()) {
                         errorMessage = "pending client is no longer connected";
                         roomIt->second.pendingJoins.erase(pendingIt);
-                        mRoomStore.removePendingJoin(roomId, requestId);
+                        mStateStore.removePendingJoin(roomId, requestId);
                     }
                     else {
                         bool duplicateActiveName = false;
@@ -872,7 +872,7 @@ void SignalingServer::handleApproveJoin(rtc::WebSocket* key, const json& data) {
                             pendingClient->pendingRequestId.clear();
 
                             roomIt->second.pendingJoins.erase(pendingIt);
-                            mRoomStore.removePendingJoin(roomId, requestId);
+                            mStateStore.removePendingJoin(roomId, requestId);
                         }
                     }
                 }
@@ -961,7 +961,7 @@ void SignalingServer::handleRejectPendingJoin(rtc::WebSocket* key, const json& d
                         }
                     }
                     roomIt->second.pendingJoins.erase(pendingIt);
-                    mRoomStore.removePendingJoin(roomId, requestId);
+                    mStateStore.removePendingJoin(roomId, requestId);
                 }
             }
         }
@@ -1127,7 +1127,7 @@ void SignalingServer::handleCloseRoom(rtc::WebSocket* key, const json& data) {
                 }
                 mRooms.erase(roomIt);
                 mRegistry.closeRoom(roomId);
-                mRoomStore.markRoomClosed(roomId);
+                mStateStore.markRoomClosed(roomId);
                 for (auto it = mClients.begin(); it != mClients.end();) {
                     if (it->second.roomId == roomId) {
                         it = mClients.erase(it);
@@ -1403,7 +1403,7 @@ void SignalingServer::cleanup(rtc::WebSocket* key) {
             }
             else if (role == "pending" && !pendingRequestId.empty()) {
                 room.pendingJoins.erase(pendingRequestId);
-                mRoomStore.removePendingJoin(roomId, pendingRequestId);
+                mStateStore.removePendingJoin(roomId, pendingRequestId);
                 notifyHost = room.host;
             }
         }

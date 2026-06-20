@@ -137,7 +137,7 @@ unset SECURECHAT_TLS_CERT_FILE SECURECHAT_TLS_KEY_FILE
   --out logs\certs
 ```
 
-该命令会在 `logs/certs/<hash(roomInstanceToken)>/` 下生成：
+该命令会在 `logs/certs/<原始房间名>_<roomInstanceTokenDigest前8位>/` 下生成。原始房间名必须能直接作为本机文件夹名使用，包含 `\ / : * ? " < > |`、控制字符、结尾空格或结尾点号时会被拒绝。
 
 ```text
 entrance.scp
@@ -148,16 +148,18 @@ intermediate-ca-key.pem
 host-key.pem
 host-cert.pem
 host-chain.pem
-room-descriptor.json
+room-state.scb
 ```
 
-`entrance.scp` 是 AES-256-GCM 加密的 JSON 容器，解锁密钥由 Argon2id 从房间短语和容器 salt 派生。外层只包含 magic、version、KDF 参数、salt、nonce、ciphertext 和 tag；Root/Intermediate 公钥证书、准入 secret 和 room instance 信息只在解密后的 payload 中。
+`entrance.scp` 是 AES-256-GCM 加密的二进制准入容器，解锁密钥由 Argon2id 从房间短语和容器 salt 派生。外层使用固定 magic、version、KDF 标识、AEAD 标识、KDF 参数、长度字段、salt、nonce、ciphertext 和 tag；Root/Intermediate 公钥证书、准入 secret 和 room instance 信息只在解密后的 JSON payload 中。二进制外层减少了短期分发渠道把 `.scp` 当作文本文件改写的可能性。
+
+`room-state.scb` 是本机私有运行材料，使用 `logs/certs/.securechat-local-state-key` 中的 256-bit 本机随机 key 经 AES-256-GCM 加密。它保存 Host/Client 重连所需的 room instance token、admission secret、签名 descriptor、CSR bundle 等内部对象。在线主流程不再生成 `room-runtime.json`、`room-descriptor.json`、`*.csr.json` 或 `*-sign-response.json` 明文中间文件。
 
 房间级证书仍是标准 OpenSSL/X.509 证书。证书文本中包含版本号、序列号、签发者、使用者、有效期、公钥、Key Usage、Extended Key Usage、Subject Key Identifier、Authority Key Identifier 和签名算法等标准字段。SecureChat 额外把房间绑定信息写入证书本体：`O=SecureChat`，`serialNumber=<roomInstanceTokenDigest>`，`OU=Role:<role>`，`OU=Device:<deviceName>`，并在 Netscape Comment 扩展中写入完整 `roomInstanceTokenDigest`、`roomInstanceId` 和角色。当前采用的成员个人信息是用户在界面或 CLI 中填写的 `baseUsername`，以及程序读取到的本机设备名 `deviceName`；系统不会写入真实姓名、身份证明、操作系统登录密码、IP 地址或生物身份信息。
 
 成员名分为三类。`baseUsername` 是用户输入的原始用户名，可以重复；`system username` 是协议和证书签名使用的唯一用户名，格式为 `baseUsername_` 加成员公钥指纹前 16 位十六进制字符；`nickname/displayName` 只用于界面显示，可以重复。Server 的 system username 预算为 128 字节。同一个 room instance 内 system username 不能重复，重复连接会被拒绝；WinUI 成员列表只显示 nickname 或 baseUsername。
 
-Host 创建房间时先生成 Root、Intermediate 和 Host 的密钥对，再用 canonical room name、`roomInstanceId`、准入 secret、Root 公钥指纹、Intermediate 公钥指纹和 Host 公钥指纹派生 `roomInstanceToken`。随后生成 Root/Intermediate/Host 证书，并把 `roomInstanceTokenDigest` 写入证书 subject 和扩展。这样可以避免“token 依赖证书指纹，证书内容又依赖 token”的循环引用。
+Host 创建房间时先生成 Root、Intermediate 和 Host 的密钥对，再用 canonical room name、`roomInstanceId`、准入 secret、Root 公钥指纹、Intermediate 公钥指纹和 Host 公钥指纹构造带长度前缀的 canonical 字段序列，并对该序列计算 SHA-256，得到 `roomInstanceToken`。随后生成 Root/Intermediate/Host 证书，并把 `roomInstanceTokenDigest` 写入证书 subject 和扩展。这样可以避免“token 依赖证书指纹，证书内容又依赖 token”的循环引用，也避免简单分隔符拼接带来的字段边界歧义。
 
 成员私钥支持口令保护。`--key-pass` 为空时写出普通 PEM 私钥；`--key-pass` 非空时写出 `BEGIN ENCRYPTED PRIVATE KEY`，使用 AES-256-CBC 加密 PEM 私钥。私钥口令只在本机用于打开该成员的房间级私钥，不写入 `entrance.scp`，也不会发送给 Server、Host 或其他成员。
 
@@ -167,7 +169,7 @@ Host 创建房间时先生成 Root、Intermediate 和 Host 的密钥对，再用
 
 ```powershell
 .\out\build\x64-release\cert.exe inspect-entrance `
-  --entrance logs\certs\<room-digest>\entrance.scp `
+  --entrance logs\certs\<room-dir>\entrance.scp `
   --phrase "long random room phrase"
 ```
 
@@ -175,35 +177,28 @@ Client 导入 entrance 并在本机生成成员私钥和 CSR：
 
 ```powershell
 .\out\build\x64-release\cert.exe import-entrance `
-  --entrance logs\certs\<room-digest>\entrance.scp `
+  --entrance logs\certs\<room-dir>\entrance.scp `
   --phrase "long random room phrase" `
   --user bob `
   --out logs\certs
 ```
 
-Host 手工签发 Client CSR。这个命令主要用于开发调试和离线检查，不推荐普通用户手动执行。正常联机场景中，Client 从 `entrance.scp` 导入 room instance token、Root/Intermediate 公钥证书和 signed room descriptor 后，本机生成成员私钥、CSR、设备/身份声明和 pending join proof；联机申请和签发响应通过 admission-encrypted payload 传输；Host 在 `/approve` 或 WinUI 左键审批时自动解密、读取 room instance 绑定信息、校验 CSR 和声明，然后签发成员证书响应。
+Host 手工签发 Client CSR。这个命令主要用于开发调试和离线检查，不推荐普通用户手动执行。正常联机场景中，Client 从 `entrance.scp` 导入 room instance token、Root/Intermediate 公钥证书和 signed room descriptor 后，本机生成成员私钥、CSR、设备/身份声明和 pending join proof；这些内部对象写入加密 `room-state.scb`，联机申请和签发响应通过 admission-encrypted payload 传输；Host 在 `/approve` 或 WinUI 左键审批时自动解密、读取 room instance 绑定信息、校验 CSR 和声明，然后在内存中生成签发响应并立即加密发送。
 
 ```powershell
 .\out\build\x64-release\cert.exe sign-csr `
-  --room-dir logs\certs\<room-digest> `
-  --csr logs\certs\<room-digest>\bob.csr `
+  --room-dir logs\certs\<room-dir> `
+  --csr <csr-file> `
   --user bob
 ```
 
-Client 安装 Host 返回的签发响应：
-
-```powershell
-.\out\build\x64-release\cert.exe install-sign-response `
-  --room-dir logs\certs\<room-digest> `
-  --response logs\certs\<room-digest>\bob-sign-response.json `
-  --user bob
-```
+Client 安装 Host 返回的签发响应由联机流程自动完成。Host approve 时在内存中生成签发响应，并通过 admission-encrypted payload 返回；Client 验证 CSR hash、成员 public key、证书链和 room instance 绑定后自动安装成员证书链。CLI 不再提供手工 `install-sign-response` 命令，避免鼓励普通用户落地明文签发响应文件。
 
 查看某个房间目录可用于运行会话的材料：
 
 ```powershell
 .\out\build\x64-release\cert.exe room-runtime `
-  --room-dir logs\certs\<room-digest> `
+  --room-dir logs\certs\<room-dir> `
   --user bob `
   --role client
 ```
@@ -211,11 +206,11 @@ Client 安装 Host 返回的签发响应：
 Host/Client CLI 已支持 `--room-dir` 直接加载房间级 PKI 和 room instance token：
 
 ```powershell
-.\out\build\x64-release\host.exe --server wss://server.example:25566 --room-dir logs\certs\<room-digest> alice
-.\out\build\x64-release\client.exe wss://server.example:25566 --room-dir logs\certs\<room-digest> bob
+.\out\build\x64-release\host.exe --server wss://server.example:25566 --room-dir logs\certs\<room-dir> alice
+.\out\build\x64-release\client.exe wss://server.example:25566 --room-dir logs\certs\<room-dir> bob
 ```
 
-WinUI 不显示 `room-dir` 路径。Host 面板只需要 Room、Server URL 和 User，点击启动房间后会自动生成 `logs/certs/<room-digest>/entrance.scp` 和 Host 房间级证书材料。Join 面板只需要 Room、Server URL 和 User，点击加入房间后选择 Host 分发的 `entrance.scp`，WinUI 会自动导入并生成本机成员私钥和 CSR。Client 会先进入 pending 状态，Host 左键 pending 成员卡片允许加入，右键拒绝并封禁该申请指纹。审批通过时，Host 签发成员证书响应，Client 安装后再参与 GKA。
+WinUI 不显示 `room-dir` 路径。Host 面板只需要 Room、Server URL 和 User，点击启动房间后会自动生成 `logs/certs/<原始房间名>_<digest前8位>/entrance.scp` 和 Host 房间级证书材料。Join 面板只需要 Room、Server URL 和 User，点击加入房间后选择 Host 分发的 `entrance.scp`，WinUI 会自动导入并生成本机成员私钥和加密运行材料。Client 会先进入 pending 状态，Host 左键 pending 成员卡片允许加入，右键拒绝并封禁该申请指纹。审批通过时，Host 签发成员证书响应，Client 安装后再参与 GKA。
 
 ## 成员 PKI 在协议中的作用
 

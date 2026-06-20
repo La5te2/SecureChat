@@ -66,7 +66,26 @@ constexpr const char* localCaCertName = "local-root-ca.pem";
 constexpr const char* localServerKeyName = "server-key.pem";
 constexpr const char* localServerCertName = "server-cert.pem";
 constexpr const char* localServerChainName = "server-chain.pem";
+constexpr const char* localStateKeyName = ".securechat-local-state-key";
+constexpr const char* roomStateFileName = "room-state.scb";
+constexpr const char* roomStateMagic = "SECURECHAT_ROOM_STATE1";
+constexpr std::uint16_t roomStateVersion = 1;
+constexpr std::size_t localStateKeyBytes = 32;
+constexpr std::uint16_t roomStateNonceBytes = 12;
+constexpr std::uint16_t roomStateTagBytes = 16;
+constexpr std::uint64_t roomStateMaxPlaintextBytes = 4ULL * 1024ULL * 1024ULL;
 constexpr const char* entranceMagic = "SECURECHAT_SCP";
+constexpr const char* entranceBinaryMagic = "SECURECHAT_SCP_BIN1";
+constexpr std::uint16_t entranceBinaryVersion = 1;
+constexpr std::uint8_t entranceKdfArgon2id = 1;
+constexpr std::uint8_t entranceAeadAes256Gcm = 1;
+constexpr std::uint32_t entranceArgonMemoryKiB = 64 * 1024;
+constexpr std::uint32_t entranceArgonIterations = 3;
+constexpr std::uint32_t entranceArgonParallelism = 1;
+constexpr std::uint16_t entranceSaltBytes = 16;
+constexpr std::uint16_t entranceNonceBytes = 12;
+constexpr std::uint16_t entranceTagBytes = 16;
+constexpr std::uint64_t entranceMaxCiphertextBytes = 16ULL * 1024ULL * 1024ULL;
 constexpr const char* admissionMagic = "SECURECHAT_ADMISSION";
 constexpr std::size_t admissionKeyBytes = 32;
 constexpr std::size_t admissionNonceBytes = 12;
@@ -396,16 +415,16 @@ std::string deriveRoomInstanceToken(
     const std::string& rootPublicKeyFingerprint,
     const std::string& intermediatePublicKeyFingerprint,
     const std::string& hostPublicKeyFingerprint) {
-    // token 绑定房间名、一次性随机材料和房间级 CA/Host 公钥。
-    // 绑定公钥而不是证书指纹，可以让证书本体安全地写入 token 摘要。
-    return sha256Hex(
-        "securechat-room-instance-v2|" +
-        canonicalName + "|" +
-        roomInstanceId + "|" +
-        admissionSecret + "|" +
-        rootPublicKeyFingerprint + "|" +
-        intermediatePublicKeyFingerprint + "|" +
-        hostPublicKeyFingerprint);
+    // token 绑定房间名、两份 256-bit 随机材料和房间级 CA/Host 公钥。
+    // 每个字段都带长度前缀，避免简单分隔符拼接可能产生的边界歧义。
+    std::string material = "securechat-room-instance-v3\n";
+    appendCanonicalField(material, "canonicalRoomName", canonicalName);
+    appendCanonicalField(material, "roomInstanceId", roomInstanceId);
+    appendCanonicalField(material, "admissionSecret", admissionSecret);
+    appendCanonicalField(material, "rootPublicKeyFingerprint", rootPublicKeyFingerprint);
+    appendCanonicalField(material, "intermediatePublicKeyFingerprint", intermediatePublicKeyFingerprint);
+    appendCanonicalField(material, "hostPublicKeyFingerprint", hostPublicKeyFingerprint);
+    return sha256Hex(material);
 }
 
 std::string canonicalRoomDescriptor(const json& descriptor) {
@@ -525,8 +544,216 @@ std::string readTextFile(const std::filesystem::path& path) {
     return buffer.str();
 }
 
+void writeBinaryFile(const std::filesystem::path& path, const std::vector<unsigned char>& value) {
+    std::ofstream file(path, std::ios::binary);
+    if (!file) throw std::runtime_error("failed to open file for writing: " + pathToUtf8(path));
+    if (!value.empty()) {
+        file.write(reinterpret_cast<const char*>(value.data()), static_cast<std::streamsize>(value.size()));
+    }
+}
+
+std::vector<unsigned char> readBinaryFile(const std::filesystem::path& path) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) throw std::runtime_error("failed to open file: " + pathToUtf8(path));
+    std::ostringstream buffer;
+    buffer << file.rdbuf();
+    const auto text = buffer.str();
+    return std::vector<unsigned char>(text.begin(), text.end());
+}
+
+void appendByte(std::vector<unsigned char>& out, std::uint8_t value) {
+    out.push_back(value);
+}
+
+void appendUInt16(std::vector<unsigned char>& out, std::uint16_t value) {
+    out.push_back(static_cast<unsigned char>((value >> 8) & 0xff));
+    out.push_back(static_cast<unsigned char>(value & 0xff));
+}
+
+void appendUInt32(std::vector<unsigned char>& out, std::uint32_t value) {
+    for (int shift = 24; shift >= 0; shift -= 8) {
+        out.push_back(static_cast<unsigned char>((value >> shift) & 0xff));
+    }
+}
+
+void appendUInt64(std::vector<unsigned char>& out, std::uint64_t value) {
+    for (int shift = 56; shift >= 0; shift -= 8) {
+        out.push_back(static_cast<unsigned char>((value >> shift) & 0xff));
+    }
+}
+
+std::uint8_t readByte(const std::vector<unsigned char>& in, std::size_t& offset) {
+    if (offset >= in.size()) throw std::runtime_error("truncated binary header");
+    return in[offset++];
+}
+
+std::uint16_t readUInt16(const std::vector<unsigned char>& in, std::size_t& offset) {
+    if (in.size() - offset < 2) throw std::runtime_error("truncated binary header");
+    const auto value = static_cast<std::uint16_t>((static_cast<std::uint16_t>(in[offset]) << 8) |
+        static_cast<std::uint16_t>(in[offset + 1]));
+    offset += 2;
+    return value;
+}
+
+std::uint32_t readUInt32(const std::vector<unsigned char>& in, std::size_t& offset) {
+    if (in.size() - offset < 4) throw std::runtime_error("truncated binary header");
+    std::uint32_t value = 0;
+    for (int i = 0; i < 4; ++i) {
+        value = (value << 8) | static_cast<std::uint32_t>(in[offset + i]);
+    }
+    offset += 4;
+    return value;
+}
+
+std::uint64_t readUInt64(const std::vector<unsigned char>& in, std::size_t& offset) {
+    if (in.size() - offset < 8) throw std::runtime_error("truncated binary header");
+    std::uint64_t value = 0;
+    for (int i = 0; i < 8; ++i) {
+        value = (value << 8) | static_cast<std::uint64_t>(in[offset + i]);
+    }
+    offset += 8;
+    return value;
+}
+
+std::filesystem::path roomStatePath(const std::filesystem::path& roomDir) {
+    return roomDir / roomStateFileName;
+}
+
+std::filesystem::path localStateKeyPath(const std::filesystem::path& roomDir) {
+    return roomDir.parent_path() / localStateKeyName;
+}
+
+std::vector<unsigned char> localStateKey(const std::filesystem::path& roomDir, bool createIfMissing) {
+    const auto path = localStateKeyPath(roomDir);
+    if (fileExists(path)) {
+        auto key = readBinaryFile(path);
+        if (key.size() != localStateKeyBytes) {
+            throw std::runtime_error("local state key has invalid size: " + pathToUtf8(path));
+        }
+        return key;
+    }
+    if (!createIfMissing) {
+        throw std::runtime_error("local state key is missing: " + pathToUtf8(path));
+    }
+    ensureDirectory(path.parent_path());
+    auto key = randomBytes(localStateKeyBytes);
+    writeBinaryFile(path, key);
+    restrictPrivateFile(path);
+    return key;
+}
+
+std::vector<unsigned char> encryptRoomState(const json& state, const std::vector<unsigned char>& key) {
+    const auto plaintextText = state.dump();
+    if (plaintextText.size() > roomStateMaxPlaintextBytes) {
+        throw std::runtime_error("room state is too large");
+    }
+    auto nonce = randomBytes(roomStateNonceBytes);
+    std::vector<unsigned char> ciphertext(plaintextText.size());
+    std::vector<unsigned char> tag(roomStateTagBytes);
+    std::vector<unsigned char> header;
+    const std::string magic(roomStateMagic);
+    header.insert(header.end(), magic.begin(), magic.end());
+    appendUInt16(header, roomStateVersion);
+    appendUInt16(header, static_cast<std::uint16_t>(nonce.size()));
+    appendUInt16(header, static_cast<std::uint16_t>(tag.size()));
+    appendUInt64(header, static_cast<std::uint64_t>(plaintextText.size()));
+
+    EvpCipherCtxPtr ctx(EVP_CIPHER_CTX_new(), EVP_CIPHER_CTX_free);
+    int len = 0;
+    int outLen = 0;
+    if (!ctx ||
+        EVP_EncryptInit_ex(ctx.get(), EVP_aes_256_gcm(), nullptr, nullptr, nullptr) != 1 ||
+        EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_GCM_SET_IVLEN, static_cast<int>(nonce.size()), nullptr) != 1 ||
+        EVP_EncryptInit_ex(ctx.get(), nullptr, nullptr, key.data(), nonce.data()) != 1 ||
+        EVP_EncryptUpdate(ctx.get(), nullptr, &len, header.data(), static_cast<int>(header.size())) != 1 ||
+        EVP_EncryptUpdate(ctx.get(), ciphertext.data(), &len, reinterpret_cast<const unsigned char*>(plaintextText.data()), static_cast<int>(plaintextText.size())) != 1) {
+        throw std::runtime_error("room state encryption failed");
+    }
+    outLen = len;
+    if (EVP_EncryptFinal_ex(ctx.get(), ciphertext.data() + outLen, &len) != 1) {
+        throw std::runtime_error("room state encryption final failed");
+    }
+    outLen += len;
+    ciphertext.resize(static_cast<std::size_t>(outLen));
+    if (EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_GCM_GET_TAG, static_cast<int>(tag.size()), tag.data()) != 1) {
+        throw std::runtime_error("room state tag generation failed");
+    }
+
+    std::vector<unsigned char> out;
+    out.reserve(header.size() + nonce.size() + ciphertext.size() + tag.size());
+    out.insert(out.end(), header.begin(), header.end());
+    out.insert(out.end(), nonce.begin(), nonce.end());
+    out.insert(out.end(), ciphertext.begin(), ciphertext.end());
+    out.insert(out.end(), tag.begin(), tag.end());
+    return out;
+}
+
+json decryptRoomState(const std::vector<unsigned char>& blob, const std::vector<unsigned char>& key) {
+    const std::string magic(roomStateMagic);
+    if (blob.size() < magic.size()) throw std::runtime_error("unsupported room state format");
+    for (std::size_t i = 0; i < magic.size(); ++i) {
+        if (blob[i] != static_cast<unsigned char>(magic[i])) {
+            throw std::runtime_error("unsupported room state format");
+        }
+    }
+    std::size_t offset = magic.size();
+    const auto version = readUInt16(blob, offset);
+    const auto nonceBytes = readUInt16(blob, offset);
+    const auto tagBytes = readUInt16(blob, offset);
+    const auto ciphertextBytes = readUInt64(blob, offset);
+    const auto headerBytes = offset;
+    if (version != roomStateVersion ||
+        nonceBytes != roomStateNonceBytes ||
+        tagBytes != roomStateTagBytes ||
+        ciphertextBytes > roomStateMaxPlaintextBytes) {
+        throw std::runtime_error("unsupported room state parameters");
+    }
+    const auto expectedRemaining =
+        static_cast<std::uint64_t>(nonceBytes) +
+        ciphertextBytes +
+        static_cast<std::uint64_t>(tagBytes);
+    if (static_cast<std::uint64_t>(blob.size() - offset) != expectedRemaining) {
+        throw std::runtime_error("truncated room state payload");
+    }
+    auto takeBytes = [&](std::size_t count) {
+        std::vector<unsigned char> out(blob.begin() + static_cast<std::ptrdiff_t>(offset),
+            blob.begin() + static_cast<std::ptrdiff_t>(offset + count));
+        offset += count;
+        return out;
+    };
+    const auto nonce = takeBytes(nonceBytes);
+    auto ciphertext = takeBytes(static_cast<std::size_t>(ciphertextBytes));
+    const auto tag = takeBytes(tagBytes);
+    std::vector<unsigned char> plaintext(ciphertext.size() + roomStateTagBytes);
+    EvpCipherCtxPtr ctx(EVP_CIPHER_CTX_new(), EVP_CIPHER_CTX_free);
+    int len = 0;
+    int outLen = 0;
+    if (!ctx ||
+        EVP_DecryptInit_ex(ctx.get(), EVP_aes_256_gcm(), nullptr, nullptr, nullptr) != 1 ||
+        EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_GCM_SET_IVLEN, static_cast<int>(nonce.size()), nullptr) != 1 ||
+        EVP_DecryptInit_ex(ctx.get(), nullptr, nullptr, key.data(), nonce.data()) != 1 ||
+        EVP_DecryptUpdate(ctx.get(), nullptr, &len, blob.data(), static_cast<int>(headerBytes)) != 1 ||
+        EVP_DecryptUpdate(ctx.get(), plaintext.data(), &len, ciphertext.data(), static_cast<int>(ciphertext.size())) != 1) {
+        throw std::runtime_error("room state decryption failed");
+    }
+    outLen = len;
+    if (EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_GCM_SET_TAG, static_cast<int>(tag.size()), const_cast<unsigned char*>(tag.data())) != 1 ||
+        EVP_DecryptFinal_ex(ctx.get(), plaintext.data() + outLen, &len) != 1) {
+        throw std::runtime_error("room state authentication failed");
+    }
+    outLen += len;
+    return json::parse(std::string(reinterpret_cast<char*>(plaintext.data()), static_cast<std::size_t>(outLen)));
+}
+
+void writeRuntimeFile(const std::filesystem::path& roomDir, const json& state) {
+    const auto key = localStateKey(roomDir, true);
+    writeBinaryFile(roomStatePath(roomDir), encryptRoomState(state, key));
+    restrictPrivateFile(roomStatePath(roomDir));
+}
+
 json readRuntimeFile(const std::filesystem::path& roomDir) {
-    return json::parse(readTextFile(roomDir / "room-runtime.json"));
+    const auto key = localStateKey(roomDir, false);
+    return decryptRoomState(readBinaryFile(roomStatePath(roomDir)), key);
 }
 
 int pemPasswordCallback(char* buffer, int size, int, void* userData) {
@@ -627,7 +854,8 @@ VerifiedRoomCsr verifyRoomCsrBundle(
     const std::filesystem::path& roomDir,
     const json& csrBundle,
     const std::string& memberName) {
-    const auto descriptor = json::parse(readTextFile(roomDir / "room-descriptor.json"));
+    const auto runtime = readRuntimeFile(roomDir);
+    const auto descriptor = runtime.value("descriptor", json::object());
     const auto expectedDigest = descriptor.value("roomInstanceTokenDigest", "");
     if (expectedDigest.empty()) throw std::runtime_error("room descriptor missing roomInstanceTokenDigest");
     if (!csrBundle.is_object() ||
@@ -697,7 +925,8 @@ RoomMemberSignResult signVerifiedRoomCsr(
     const std::string& memberName) {
     auto intermediateKey = readPrivateKey(roomDir / "intermediate-ca-key.pem");
     auto intermediateCert = readCertificate(roomDir / "intermediate-ca.pem");
-    const auto descriptor = json::parse(readTextFile(roomDir / "room-descriptor.json"));
+    const auto runtime = readRuntimeFile(roomDir);
+    const auto descriptor = runtime.value("descriptor", json::object());
     const auto roomInstanceId = descriptor.value("roomInstanceId", "");
     const auto serial = 2000 + static_cast<int>(std::hash<std::string>{}(memberName) & 0x3fffffff);
     auto cert = createMemberCertificate(
@@ -712,7 +941,6 @@ RoomMemberSignResult signVerifiedRoomCsr(
         "member");
     const auto certPath = roomDir / (memberName + "-cert.pem");
     const auto chainPath = roomDir / (memberName + "-chain.pem");
-    const auto responsePath = roomDir / (memberName + "-sign-response.json");
     writeCertificate(certPath, cert.get());
     writeCertificateChain(chainPath, cert.get(), intermediateCert.get());
     const auto memberFp = certFingerprint(cert.get());
@@ -734,12 +962,11 @@ RoomMemberSignResult signVerifiedRoomCsr(
         {"alg", "RSA-SHA256"},
         {"value", base64Encode(signature.data(), signature.size())}
     };
-    writeTextFile(responsePath, response.dump(2));
     return {
         pathToUtf8(certPath),
         pathToUtf8(chainPath),
-        pathToUtf8(responsePath),
-        memberFp};
+        memberFp,
+        response};
 }
 
 X509Ptr createRoomCaCertificate(
@@ -867,25 +1094,57 @@ std::vector<unsigned char> deriveEntranceKey(const std::string& phrase, const st
     return key;
 }
 
-json encryptEntrancePayload(const json& payload, const std::string& phrase) {
-    const std::uint32_t memoryKiB = 64 * 1024;
-    const std::uint32_t iterations = 3;
-    const std::uint32_t parallelism = 1;
-    auto salt = randomBytes(16);
-    auto nonce = randomBytes(12);
-    auto key = deriveEntranceKey(phrase, salt, memoryKiB, iterations, parallelism);
+void appendEntranceHeader(
+    std::vector<unsigned char>& header,
+    std::uint64_t ciphertextBytes,
+    std::uint16_t saltBytes,
+    std::uint16_t nonceBytes,
+    std::uint16_t tagBytes) {
+    const std::string magic(entranceBinaryMagic);
+    header.insert(header.end(), magic.begin(), magic.end());
+    appendUInt16(header, entranceBinaryVersion);
+    appendByte(header, entranceKdfArgon2id);
+    appendByte(header, entranceAeadAes256Gcm);
+    appendUInt32(header, entranceArgonMemoryKiB);
+    appendUInt32(header, entranceArgonIterations);
+    appendUInt32(header, entranceArgonParallelism);
+    appendUInt16(header, saltBytes);
+    appendUInt16(header, nonceBytes);
+    appendUInt16(header, tagBytes);
+    appendUInt64(header, ciphertextBytes);
+}
+
+std::vector<unsigned char> encryptEntrancePayload(const json& payload, const std::string& phrase) {
+    auto salt = randomBytes(entranceSaltBytes);
+    auto nonce = randomBytes(entranceNonceBytes);
+    auto key = deriveEntranceKey(
+        phrase,
+        salt,
+        entranceArgonMemoryKiB,
+        entranceArgonIterations,
+        entranceArgonParallelism);
     const auto plaintext = payload.dump();
+    if (plaintext.size() > entranceMaxCiphertextBytes) {
+        throw std::runtime_error("entrance.scp payload is too large");
+    }
     std::vector<unsigned char> ciphertext(plaintext.size());
-    std::vector<unsigned char> tag(16);
+    std::vector<unsigned char> tag(entranceTagBytes);
+    std::vector<unsigned char> header;
+    appendEntranceHeader(
+        header,
+        static_cast<std::uint64_t>(plaintext.size()),
+        static_cast<std::uint16_t>(salt.size()),
+        static_cast<std::uint16_t>(nonce.size()),
+        static_cast<std::uint16_t>(tag.size()));
+
     EvpCipherCtxPtr ctx(EVP_CIPHER_CTX_new(), EVP_CIPHER_CTX_free);
     int len = 0;
     int outLen = 0;
-    const std::string aad = std::string(entranceMagic) + "|v1|argon2id|aes-256-gcm";
     if (!ctx ||
         EVP_EncryptInit_ex(ctx.get(), EVP_aes_256_gcm(), nullptr, nullptr, nullptr) != 1 ||
         EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_GCM_SET_IVLEN, static_cast<int>(nonce.size()), nullptr) != 1 ||
         EVP_EncryptInit_ex(ctx.get(), nullptr, nullptr, key.data(), nonce.data()) != 1 ||
-        EVP_EncryptUpdate(ctx.get(), nullptr, &len, reinterpret_cast<const unsigned char*>(aad.data()), static_cast<int>(aad.size())) != 1 ||
+        EVP_EncryptUpdate(ctx.get(), nullptr, &len, header.data(), static_cast<int>(header.size())) != 1 ||
         EVP_EncryptUpdate(ctx.get(), ciphertext.data(), &len, reinterpret_cast<const unsigned char*>(plaintext.data()), static_cast<int>(plaintext.size())) != 1) {
         throw std::runtime_error("entrance encryption failed");
     }
@@ -899,49 +1158,84 @@ json encryptEntrancePayload(const json& payload, const std::string& phrase) {
         throw std::runtime_error("entrance tag generation failed");
     }
 
-    return {
-        {"magic", entranceMagic},
-        {"version", 1},
-        {"kdf", "argon2id"},
-        {"kdfParams", {{"memoryKiB", memoryKiB}, {"iterations", iterations}, {"parallelism", parallelism}}},
-        {"aead", "aes-256-gcm"},
-        {"salt", base64Encode(salt.data(), salt.size())},
-        {"nonce", base64Encode(nonce.data(), nonce.size())},
-        {"ciphertext", base64Encode(ciphertext.data(), ciphertext.size())},
-        {"tag", base64Encode(tag.data(), tag.size())}
-    };
+    std::vector<unsigned char> envelope;
+    envelope.reserve(header.size() + salt.size() + nonce.size() + ciphertext.size() + tag.size());
+    envelope.insert(envelope.end(), header.begin(), header.end());
+    envelope.insert(envelope.end(), salt.begin(), salt.end());
+    envelope.insert(envelope.end(), nonce.begin(), nonce.end());
+    envelope.insert(envelope.end(), ciphertext.begin(), ciphertext.end());
+    envelope.insert(envelope.end(), tag.begin(), tag.end());
+    return envelope;
 }
 
 json decryptEntrancePayload(const std::filesystem::path& entranceFile, const std::string& phrase) {
-    const auto envelope = json::parse(readTextFile(entranceFile));
-    if (envelope.value("magic", "") != entranceMagic || envelope.value("version", 0) != 1) {
+    const auto envelope = readBinaryFile(entranceFile);
+    const std::string magic(entranceBinaryMagic);
+    if (envelope.size() < magic.size()) {
         throw std::runtime_error("unsupported entrance.scp format");
     }
-    if (envelope.value("kdf", "") != "argon2id" || envelope.value("aead", "") != "aes-256-gcm") {
+    for (std::size_t i = 0; i < magic.size(); ++i) {
+        if (envelope[i] != static_cast<unsigned char>(magic[i])) {
+            throw std::runtime_error("unsupported entrance.scp format");
+        }
+    }
+
+    std::size_t offset = magic.size();
+    const auto version = readUInt16(envelope, offset);
+    const auto kdf = readByte(envelope, offset);
+    const auto aead = readByte(envelope, offset);
+    const auto memoryKiB = readUInt32(envelope, offset);
+    const auto iterations = readUInt32(envelope, offset);
+    const auto parallelism = readUInt32(envelope, offset);
+    const auto saltBytes = readUInt16(envelope, offset);
+    const auto nonceBytes = readUInt16(envelope, offset);
+    const auto tagBytes = readUInt16(envelope, offset);
+    const auto ciphertextBytes = readUInt64(envelope, offset);
+    const auto headerBytes = offset;
+
+    if (version != entranceBinaryVersion || kdf != entranceKdfArgon2id || aead != entranceAeadAes256Gcm) {
         throw std::runtime_error("unsupported entrance.scp crypto suite");
     }
-    const auto params = envelope.at("kdfParams");
-    const auto salt = base64Decode(envelope.value("salt", ""));
-    const auto nonce = base64Decode(envelope.value("nonce", ""));
-    auto ciphertext = base64Decode(envelope.value("ciphertext", ""));
-    const auto tag = base64Decode(envelope.value("tag", ""));
-    auto key = deriveEntranceKey(
-        phrase,
-        salt,
-        params.value("memoryKiB", 0U),
-        params.value("iterations", 0U),
-        params.value("parallelism", 0U));
+    if (memoryKiB != entranceArgonMemoryKiB ||
+        iterations != entranceArgonIterations ||
+        parallelism != entranceArgonParallelism ||
+        saltBytes != entranceSaltBytes ||
+        nonceBytes != entranceNonceBytes ||
+        tagBytes != entranceTagBytes ||
+        ciphertextBytes > entranceMaxCiphertextBytes) {
+        throw std::runtime_error("unsupported entrance.scp parameters");
+    }
+    const auto remaining = static_cast<std::uint64_t>(envelope.size() - offset);
+    const auto expectedRemaining =
+        static_cast<std::uint64_t>(saltBytes) +
+        static_cast<std::uint64_t>(nonceBytes) +
+        ciphertextBytes +
+        static_cast<std::uint64_t>(tagBytes);
+    if (remaining != expectedRemaining) {
+        throw std::runtime_error("truncated entrance.scp payload");
+    }
+
+    auto takeBytes = [&](std::size_t count) {
+        std::vector<unsigned char> out(envelope.begin() + static_cast<std::ptrdiff_t>(offset),
+            envelope.begin() + static_cast<std::ptrdiff_t>(offset + count));
+        offset += count;
+        return out;
+    };
+    const auto salt = takeBytes(saltBytes);
+    const auto nonce = takeBytes(nonceBytes);
+    auto ciphertext = takeBytes(static_cast<std::size_t>(ciphertextBytes));
+    const auto tag = takeBytes(tagBytes);
+    auto key = deriveEntranceKey(phrase, salt, memoryKiB, iterations, parallelism);
 
     std::vector<unsigned char> plaintext(ciphertext.size() + 16);
     EvpCipherCtxPtr ctx(EVP_CIPHER_CTX_new(), EVP_CIPHER_CTX_free);
     int len = 0;
     int outLen = 0;
-    const std::string aad = std::string(entranceMagic) + "|v1|argon2id|aes-256-gcm";
     if (!ctx ||
         EVP_DecryptInit_ex(ctx.get(), EVP_aes_256_gcm(), nullptr, nullptr, nullptr) != 1 ||
         EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_GCM_SET_IVLEN, static_cast<int>(nonce.size()), nullptr) != 1 ||
         EVP_DecryptInit_ex(ctx.get(), nullptr, nullptr, key.data(), nonce.data()) != 1 ||
-        EVP_DecryptUpdate(ctx.get(), nullptr, &len, reinterpret_cast<const unsigned char*>(aad.data()), static_cast<int>(aad.size())) != 1 ||
+        EVP_DecryptUpdate(ctx.get(), nullptr, &len, envelope.data(), static_cast<int>(headerBytes)) != 1 ||
         EVP_DecryptUpdate(ctx.get(), plaintext.data(), &len, ciphertext.data(), static_cast<int>(ciphertext.size())) != 1) {
         throw std::runtime_error("entrance decryption failed");
     }
@@ -1176,8 +1470,41 @@ json validateEntrancePayload(json payload) {
     return payload;
 }
 
-std::filesystem::path roomDirFromDigest(const std::string& outputRoot, const std::string& digest) {
-    return pathFromUtf8(outputRoot) / digest;
+bool isWindowsReservedDeviceName(std::string name) {
+    std::transform(name.begin(), name.end(), name.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::toupper(ch));
+    });
+    const auto dot = name.find('.');
+    if (dot != std::string::npos) name = name.substr(0, dot);
+    if (name == "CON" || name == "PRN" || name == "AUX" || name == "NUL") return true;
+    if (name.size() == 4 && name.rfind("COM", 0) == 0 && name[3] >= '1' && name[3] <= '9') return true;
+    if (name.size() == 4 && name.rfind("LPT", 0) == 0 && name[3] >= '1' && name[3] <= '9') return true;
+    return false;
+}
+
+void validateRoomNameForDirectory(const std::string& roomName) {
+    if (roomName.empty()) throw std::runtime_error("room name is required");
+    if (roomName == "." || roomName == "..") {
+        throw std::runtime_error("room name cannot be . or ..");
+    }
+    if (!roomName.empty() && (roomName.back() == ' ' || roomName.back() == '.')) {
+        throw std::runtime_error("room name cannot end with space or dot");
+    }
+    for (unsigned char ch : roomName) {
+        if (ch < 0x20 || ch == '<' || ch == '>' || ch == ':' || ch == '"' ||
+            ch == '/' || ch == '\\' || ch == '|' || ch == '?' || ch == '*') {
+            throw std::runtime_error("room name contains characters that cannot be used in a folder name");
+        }
+    }
+    if (isWindowsReservedDeviceName(roomName)) {
+        throw std::runtime_error("room name is reserved by Windows and cannot be used as a folder name");
+    }
+}
+
+std::filesystem::path roomDirFromDigest(const std::string& outputRoot, const std::string& roomName, const std::string& digest) {
+    validateRoomNameForDirectory(roomName);
+    const auto shortDigest = digest.size() >= 8 ? digest.substr(0, 8) : digest;
+    return pathFromUtf8(outputRoot) / (roomName + "_" + shortDigest);
 }
 
 ServerTlsMaterial ensureLocalTlsMaterial() {
@@ -1317,7 +1644,7 @@ RoomEntranceCreateResult createRoomEntrance(const RoomEntranceCreateOptions& opt
     const auto rootFp = certFingerprint(rootCert.get());
     const auto intermediateFp = certFingerprint(intermediateCert.get());
     const auto hostFp = certFingerprint(hostCert.get());
-    const auto roomDir = roomDirFromDigest(options.outputRoot.empty() ? "logs/certs" : options.outputRoot, digest);
+    const auto roomDir = roomDirFromDigest(options.outputRoot.empty() ? "logs/certs" : options.outputRoot, roomName, digest);
     ensureDirectory(roomDir);
 
     const auto rootKeyPath = roomDir / "root-ca-key.pem";
@@ -1328,8 +1655,6 @@ RoomEntranceCreateResult createRoomEntrance(const RoomEntranceCreateOptions& opt
     const auto hostCertPath = roomDir / "host-cert.pem";
     const auto hostChainPath = roomDir / "host-chain.pem";
     const auto entrancePath = roomDir / "entrance.scp";
-    const auto descriptorPath = roomDir / "room-descriptor.json";
-    const auto runtimePath = roomDir / "room-runtime.json";
 
     writePrivateKey(rootKeyPath, rootKey.get());
     writeCertificate(rootCertPath, rootCert.get());
@@ -1360,21 +1685,21 @@ RoomEntranceCreateResult createRoomEntrance(const RoomEntranceCreateOptions& opt
         {"alg", "RSA-SHA256"},
         {"value", base64Encode(descriptorSig.data(), descriptorSig.size())}
     };
-    writeTextFile(descriptorPath, descriptor.dump(2));
 
     json runtime = {
         {"version", 1},
         {"roomName", roomName},
         {"canonicalRoomName", canonicalName},
+        {"roomInstanceId", roomInstanceId},
         {"roomInstanceToken", roomInstanceToken},
         {"roomInstanceTokenDigest", digest},
         {"admissionSecret", admissionSecret},
         {"role", "host"},
         {"baseUsername", hostBaseName},
-        {"username", hostName}
+        {"username", hostName},
+        {"descriptor", descriptor}
     };
-    writeTextFile(runtimePath, runtime.dump(2));
-    restrictPrivateFile(runtimePath);
+    writeRuntimeFile(roomDir, runtime);
 
     json payload = {
         {"version", 1},
@@ -1398,7 +1723,7 @@ RoomEntranceCreateResult createRoomEntrance(const RoomEntranceCreateOptions& opt
         {"descriptor", descriptor}
     };
     const auto envelope = encryptEntrancePayload(payload, roomPhrase);
-    writeTextFile(entrancePath, envelope.dump(2));
+    writeBinaryFile(entrancePath, envelope);
 
     return {
         pathToUtf8(roomDir),
@@ -1428,7 +1753,7 @@ std::string roomDirForEntrance(
     auto payload = validateEntrancePayload(decryptEntrancePayload(pathFromUtf8(entranceFile), trimAscii(roomPhrase)));
     const auto digest = payload.value("roomInstanceTokenDigest", "");
     if (digest.empty()) throw std::runtime_error("entrance payload missing roomInstanceTokenDigest");
-    return pathToUtf8(roomDirFromDigest(outputRoot.empty() ? "logs/certs" : outputRoot, digest));
+    return pathToUtf8(roomDirFromDigest(outputRoot.empty() ? "logs/certs" : outputRoot, payload.value("roomName", ""), digest));
 }
 
 std::vector<LocalRoomDirInfo> listLocalRoomDirs(
@@ -1453,10 +1778,10 @@ std::vector<LocalRoomDirInfo> listLocalRoomDirs(
     for (const auto& entry : std::filesystem::directory_iterator(root, ec)) {
         if (ec) break;
         if (!entry.is_directory(ec)) continue;
-        const auto runtimePath = entry.path() / "room-runtime.json";
+        const auto runtimePath = roomStatePath(entry.path());
         if (!fileExists(runtimePath)) continue;
         try {
-            const auto runtime = json::parse(readTextFile(runtimePath));
+            const auto runtime = readRuntimeFile(entry.path());
             if (runtime.value("canonicalRoomName", "") != canonicalName) continue;
             const auto storedBaseUsername = runtime.value("baseUsername", runtime.value("username", ""));
             if (storedBaseUsername != username) continue;
@@ -1479,7 +1804,7 @@ std::vector<LocalRoomDirInfo> listLocalRoomDirs(
                 modifiedUnixMs});
         }
         catch (...) {
-            // 损坏或半写入的 room-runtime 不参与自动选择。
+            // 损坏或无法解密的 room state 不参与自动选择。
             continue;
         }
     }
@@ -1499,45 +1824,25 @@ RoomEntranceImportResult importRoomEntrance(const RoomEntranceImportOptions& opt
     auto payload = validateEntrancePayload(decryptEntrancePayload(pathFromUtf8(options.entranceFile), trimAscii(options.roomPhrase)));
     const auto digest = payload.value("roomInstanceTokenDigest", "");
     if (digest.empty()) throw std::runtime_error("entrance payload missing roomInstanceTokenDigest");
-    const auto roomDir = roomDirFromDigest(options.outputRoot.empty() ? "logs/certs" : options.outputRoot, digest);
+    const auto roomDir = roomDirFromDigest(options.outputRoot.empty() ? "logs/certs" : options.outputRoot, payload.value("roomName", ""), digest);
     ensureDirectory(roomDir);
 
     const auto rootPath = roomDir / "root-ca.pem";
     const auto intermediatePath = roomDir / "intermediate-ca.pem";
     const auto hostCertPath = roomDir / "host-cert.pem";
-    const auto descriptorPath = roomDir / "room-descriptor.json";
-    const auto runtimePath = roomDir / "room-runtime.json";
     writeTextFile(rootPath, payload.value("rootCaPem", ""));
     writeTextFile(intermediatePath, payload.value("intermediateCaPem", ""));
     writeTextFile(hostCertPath, payload.value("hostCertPem", ""));
-    writeTextFile(descriptorPath, payload["descriptor"].dump(2));
 
     auto memberKey = generateRsaKey(3072);
     const auto memberPublicKeyFp = publicKeyFingerprint(memberKey.get());
     const auto username = systemUsernameFromPublicFingerprint(baseUsername, memberPublicKeyFp);
     const auto keyPath = roomDir / (username + "-key.pem");
-    const auto csrPath = roomDir / (username + ".csr");
-    const auto csrBundlePath = roomDir / (username + ".csr.json");
-
-    json runtime = {
-        {"version", 1},
-        {"roomName", payload.value("roomName", "")},
-        {"canonicalRoomName", payload.value("canonicalRoomName", "")},
-        {"roomInstanceToken", payload.value("roomInstanceToken", "")},
-        {"roomInstanceTokenDigest", digest},
-        {"admissionSecret", payload.value("admissionSecret", "")},
-        {"role", "client"},
-        {"baseUsername", baseUsername},
-        {"username", username}
-    };
-    writeTextFile(runtimePath, runtime.dump(2));
-    restrictPrivateFile(runtimePath);
 
     const auto deviceName = localHostname();
     auto csr = createMemberCsr(memberKey.get(), username, digest, deviceName);
     writePrivateKeyMaybeEncrypted(keyPath, memberKey.get(), options.memberKeyPassword);
     const auto csrPem = pemFromCsr(csr.get());
-    writeTextFile(csrPath, csrPem);
 
     EvpPkeyPtr csrPublicKey(X509_REQ_get_pubkey(csr.get()), EVP_PKEY_free);
     if (!csrPublicKey) throw std::runtime_error("CSR public key missing after generation");
@@ -1558,15 +1863,29 @@ RoomEntranceImportResult importRoomEntrance(const RoomEntranceImportOptions& opt
         {"alg", "RSA-SHA256"},
         {"value", base64Encode(proof.data(), proof.size())}
     };
-    writeTextFile(csrBundlePath, csrBundle.dump(2));
+
+    json runtime = {
+        {"version", 1},
+        {"roomName", payload.value("roomName", "")},
+        {"canonicalRoomName", payload.value("canonicalRoomName", "")},
+        {"roomInstanceId", payload.value("roomInstanceId", "")},
+        {"roomInstanceToken", payload.value("roomInstanceToken", "")},
+        {"roomInstanceTokenDigest", digest},
+        {"admissionSecret", payload.value("admissionSecret", "")},
+        {"role", "client"},
+        {"baseUsername", baseUsername},
+        {"username", username},
+        {"descriptor", payload.value("descriptor", json::object())},
+        {"memberCsrPem", csrPem},
+        {"memberCsrBundle", csrBundle}
+    };
+    writeRuntimeFile(roomDir, runtime);
 
     return {
         pathToUtf8(roomDir),
         pathToUtf8(rootPath),
         pathToUtf8(intermediatePath),
         pathToUtf8(keyPath),
-        pathToUtf8(csrPath),
-        pathToUtf8(csrBundlePath),
         digest,
         payload.value("rootFingerprint", ""),
         payload.value("intermediateFingerprint", "")};
@@ -1578,7 +1897,7 @@ json makePendingJoinProof(
     const std::string& publicKey,
     const std::string& keyPassword) {
     const auto roomDir = pathFromUtf8(roomDirValue);
-    const auto runtime = json::parse(readTextFile(roomDir / "room-runtime.json"));
+    const auto runtime = readRuntimeFile(roomDir);
     const auto username = trimAscii(usernameValue.empty() ? runtime.value("username", "") : usernameValue);
     const auto digest = runtime.value("roomInstanceTokenDigest", "");
     if (username.empty()) throw std::runtime_error("username is required");
@@ -1658,7 +1977,8 @@ RoomMemberSignResult signRoomMemberCertificate(const RoomMemberSignOptions& opti
     EvpPkeyPtr publicKey(X509_REQ_get_pubkey(csr.get()), EVP_PKEY_free);
     if (!publicKey) throw std::runtime_error("CSR public key missing");
     if (X509_REQ_verify(csr.get(), publicKey.get()) != 1) throw std::runtime_error("CSR signature verification failed");
-    const auto descriptor = json::parse(readTextFile(roomDir / "room-descriptor.json"));
+    const auto runtime = readRuntimeFile(roomDir);
+    const auto descriptor = runtime.value("descriptor", json::object());
     const auto expectedDigest = descriptor.value("roomInstanceTokenDigest", "");
     if (expectedDigest.empty()) throw std::runtime_error("room descriptor missing roomInstanceTokenDigest");
     VerifiedRoomCsr verified{
@@ -1670,19 +1990,12 @@ RoomMemberSignResult signRoomMemberCertificate(const RoomMemberSignOptions& opti
     return signVerifiedRoomCsr(roomDir, verified, memberName);
 }
 
-RoomMemberInstallResult installRoomMemberCertificate(const RoomMemberInstallOptions& options) {
-    const auto roomDir = pathFromUtf8(options.roomDir);
-    const auto responsePath = pathFromUtf8(options.signResponseFile);
-    auto response = json::parse(readTextFile(responsePath));
-    return installRoomMemberCertificateJson(options.roomDir, response, options.memberName);
-}
-
 RoomMemberInstallResult installRoomMemberCertificateJson(
     const std::string& roomDirValue,
     const json& signResponse,
     const std::string& memberNameValue) {
     const auto roomDir = pathFromUtf8(roomDirValue);
-    const auto runtime = json::parse(readTextFile(roomDir / "room-runtime.json"));
+    const auto runtime = readRuntimeFile(roomDir);
     const auto memberName = trimAscii(memberNameValue.empty()
         ? runtime.value("username", "")
         : memberNameValue);
@@ -1690,8 +2003,8 @@ RoomMemberInstallResult installRoomMemberCertificateJson(
 
     const auto expectedDigest = runtime.value("roomInstanceTokenDigest", "");
     if (expectedDigest.empty()) throw std::runtime_error("room runtime missing roomInstanceTokenDigest");
-    const auto csrPath = roomDir / (memberName + ".csr");
-    if (!fileExists(csrPath)) throw std::runtime_error("local CSR missing: " + pathToUtf8(csrPath));
+    const auto csrPem = runtime.value("memberCsrPem", "");
+    if (csrPem.empty()) throw std::runtime_error("local CSR is missing from encrypted room state");
 
     auto response = signResponse;
     if (response.value("kind", "") != "securechat-room-sign-response" ||
@@ -1699,7 +2012,6 @@ RoomMemberInstallResult installRoomMemberCertificateJson(
         response.value("username", "") != memberName) {
         throw std::runtime_error("sign response does not match this room/member");
     }
-    const auto csrPem = readTextFile(csrPath);
     if (sha256Hex(csrPem) != response.value("csrSha256", "")) {
         throw std::runtime_error("sign response does not match local CSR");
     }
@@ -1744,7 +2056,7 @@ RoomRuntimeMaterial loadRoomRuntimeMaterial(
     bool host,
     bool requireIdentityCert) {
     const auto roomDir = pathFromUtf8(roomDirValue);
-    const auto runtime = json::parse(readTextFile(roomDir / "room-runtime.json"));
+    const auto runtime = readRuntimeFile(roomDir);
     const auto storedUsername = trimAscii(runtime.value("username", host ? "host" : ""));
     const auto storedBaseUsername = trimAscii(runtime.value("baseUsername", storedUsername));
     const auto requestedUsername = trimAscii(usernameValue);
@@ -1752,7 +2064,7 @@ RoomRuntimeMaterial loadRoomRuntimeMaterial(
         !storedUsername.empty() &&
         requestedUsername != storedUsername &&
         requestedUsername != storedBaseUsername) {
-        // room-runtime 同时记录用户输入名和系统 username。
+        // 加密 room state 同时记录用户输入名和系统 username。
         // 重连时拒绝换成第三个名字，避免同一份成员私钥冒用其他身份。
         throw std::runtime_error(
             "room username mismatch: expected " + storedBaseUsername + ", got " + requestedUsername);
@@ -1763,7 +2075,6 @@ RoomRuntimeMaterial loadRoomRuntimeMaterial(
     const auto trustStore = roomDir / "root-ca.pem";
     const auto certChain = host ? (roomDir / "host-chain.pem") : (roomDir / (username + "-chain.pem"));
     const auto keyFile = host ? (roomDir / "host-key.pem") : (roomDir / (username + "-key.pem"));
-    const auto csrBundle = roomDir / (username + ".csr.json");
     if (!fileExists(trustStore)) throw std::runtime_error("room trust store missing: " + pathToUtf8(trustStore));
     const bool certReady = fileExists(certChain);
     if (requireIdentityCert && !certReady) {
@@ -1782,7 +2093,8 @@ RoomRuntimeMaterial loadRoomRuntimeMaterial(
         pathToUtf8(trustStore),
         pathToUtf8(certChain),
         pathToUtf8(keyFile),
-        pathToUtf8(csrBundle),
+        runtime.value("memberCsrBundle", json::object()),
+        runtime.value("memberCsrPem", ""),
         certReady
     };
 }

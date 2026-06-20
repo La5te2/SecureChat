@@ -2270,8 +2270,13 @@ public sealed partial class MainWindow : Window
         InputFrame.BorderBrush = new SolidColorBrush(border);
         SettingsPanel.Background = new SolidColorBrush(panel);
         SettingsPanel.BorderBrush = new SolidColorBrush(border);
-        RoomInstancePanel.Background = new SolidColorBrush(panel);
-        RoomInstancePanel.BorderBrush = new SolidColorBrush(border);
+        // XAML 初始化时 ThemeComboBox 会先触发 SelectionChanged，
+        // 此时后面声明的房间实例面板可能尚未创建。
+        if (RoomInstancePanel is not null)
+        {
+            RoomInstancePanel.Background = new SolidColorBrush(panel);
+            RoomInstancePanel.BorderBrush = new SolidColorBrush(border);
+        }
         ChatBackgroundWash.Background = new SolidColorBrush(chat);
         SidebarToggleIcon.Source = new BitmapImage(new Uri(Path.Combine(
             AppContext.BaseDirectory,

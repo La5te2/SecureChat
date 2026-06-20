@@ -58,8 +58,6 @@ struct RoomEntranceImportResult {
     std::string rootCaFile;
     std::string intermediateCaFile;
     std::string memberKeyFile;
-    std::string memberCsrFile;
-    std::string memberCsrBundleFile;
     std::string roomInstanceTokenDigest;
     std::string rootFingerprint;
     std::string intermediateFingerprint;
@@ -74,14 +72,8 @@ struct RoomMemberSignOptions {
 struct RoomMemberSignResult {
     std::string memberCertFile;
     std::string memberChainFile;
-    std::string signResponseFile;
     std::string memberFingerprint;
-};
-
-struct RoomMemberInstallOptions {
-    std::string roomDir;
-    std::string signResponseFile;
-    std::string memberName;
+    json signResponse;
 };
 
 struct RoomMemberInstallResult {
@@ -99,13 +91,14 @@ struct RoomRuntimeMaterial {
     std::string username;
     std::string roomInstanceToken;
     std::string roomInstanceTokenDigest;
-    // 从 entrance.scp 中取出的准入 secret。仅保存在本机 room-runtime，
+    // 从 entrance.scp 中取出的准入 secret。仅保存在本机加密 room state，
     // 用于加密 pending CSR 和签发响应，不发送给 Server。
     std::string admissionSecret;
     std::string trustStoreFile;
     std::string identityCertFile;
     std::string identityKeyFile;
-    std::string memberCsrBundleFile;
+    json memberCsrBundle;
+    std::string memberCsrPem;
     bool identityCertReady = false;
 };
 
@@ -180,8 +173,7 @@ RoomMemberSignResult signPendingRoomMemberCertificate(
 // Host 使用房间级 Intermediate CA 签发某个 Client CSR。
 RoomMemberSignResult signRoomMemberCertificate(const RoomMemberSignOptions& options);
 
-// Client 验证 Host 的签发响应，并把自己的成员证书链安装到本机房间目录。
-RoomMemberInstallResult installRoomMemberCertificate(const RoomMemberInstallOptions& options);
+// Client 验证 Host 在线返回的签发响应，并把自己的成员证书链安装到本机房间目录。
 RoomMemberInstallResult installRoomMemberCertificateJson(
     const std::string& roomDir,
     const json& signResponse,

@@ -7,7 +7,7 @@
 同一个房间的 Host 和 Client 需要使用相同的：
 
 - Server URL，例如 `wss://127.0.0.1:25566` 或 `wss://chat.example.com:25566`；
-- room instance，也就是同一套 `logs/certs/<room-digest>` 房间证书目录；
+- room instance，也就是同一套 `logs/certs/<原始房间名>_<digest前8位>` 房间证书目录；
 - 本地/局域网自动 TLS 证书场景下，还需要同一个 `local-root-ca.pem`。
 
 Server 只需要 TLS 证书和监听参数，不需要成员 PKI。Host 和 Client 使用 `--room-dir` 时会从房间目录自动读取 trust store、成员证书链、成员私钥和 room instance token。
@@ -61,7 +61,7 @@ out\build\x64-release\cert.exe
 WinUI 可执行文件位置：
 
 ```text
-app\chat\bin\x64\Release\net10.0-windows10.0.19041.0\win-x64\SecureChat.exe
+app\winui\bin\x64\Release\net10.0-windows10.0.19041.0\win-x64\SecureChat.exe
 ```
 
 ## Windows：启动 Server
@@ -78,11 +78,11 @@ Server 会自动生成 `certs/server-chain.pem`、`certs/server-key.pem` 和 `ce
 
 ## Windows：准备房间证书目录
 
-在项目根目录执行。`create-entrance` 输出 Host 的房间目录；Client 使用 Host 分发的 `entrance.scp` 执行 `import-entrance` 后，会在本机生成成员私钥、CSR、设备/身份声明和 pending join proof。`roomDir` 末级目录名就是下面的 `<room-digest>`。成员证书由后续联机 `/approve` 自动签发，不需要普通用户手动运行 `sign-csr`。
+在项目根目录执行。`create-entrance` 输出 Host 的房间目录；Client 使用 Host 分发的 `entrance.scp` 执行 `import-entrance` 后，会在本机生成成员私钥和加密运行材料。`roomDir` 末级目录名形如 `<原始房间名>_<digest前8位>`。成员证书由后续联机 `/approve` 自动签发，不需要普通用户手动运行 `sign-csr`。
 
 ```powershell
 .\out\build\x64-release\cert.exe create-entrance --room secure-room --phrase "use-a-long-random-room-phrase" --host alice --out logs\certs
-.\out\build\x64-release\cert.exe import-entrance --entrance logs\certs\<room-digest>\entrance.scp --phrase "use-a-long-random-room-phrase" --user bob --out logs\certs
+.\out\build\x64-release\cert.exe import-entrance --entrance logs\certs\<room-dir>\entrance.scp --phrase "use-a-long-random-room-phrase" --user bob --out logs\certs
 ```
 
 ## Windows：启动 Host
@@ -96,7 +96,7 @@ $env:SECURECHAT_LOCAL_TLS_CA="certs\local-root-ca.pem"
 创建房间：
 
 ```powershell
-.\out\build\x64-release\host.exe --server wss://127.0.0.1:25566 --room-dir logs\certs\<room-digest> alice
+.\out\build\x64-release\host.exe --server wss://127.0.0.1:25566 --room-dir logs\certs\<room-dir> alice
 ```
 
 ## Windows：启动 Client
@@ -110,7 +110,7 @@ $env:SECURECHAT_LOCAL_TLS_CA="certs\local-root-ca.pem"
 加入房间：
 
 ```powershell
-.\out\build\x64-release\client.exe wss://127.0.0.1:25566 --room-dir logs\certs\<room-digest> bob
+.\out\build\x64-release\client.exe wss://127.0.0.1:25566 --room-dir logs\certs\<room-dir> bob
 ```
 
 Client 会进入 pending join。回到 Host 窗口先查看 pending requestId，再审批：
@@ -127,12 +127,12 @@ WinUI 不启动 Server，也不配置 Server 私钥。使用 WinUI 前，需要�
 双击运行：
 
 ```text
-app\chat\bin\x64\Release\net10.0-windows10.0.19041.0\win-x64\SecureChat.exe
+app\winui\bin\x64\Release\net10.0-windows10.0.19041.0\win-x64\SecureChat.exe
 ```
 
 WinUI 的 Server URL 必须填写 `wss://...`。如果 Server 使用 Certbot 等系统信任 CA 签发的证书，WinUI 不需要额外配置 Server CA。如果 Server 使用自动生成的开发证书，在设置面板的 `Local Server TLS CA / 本地服务器 TLS 信任根` 中选择 `certs/local-root-ca.pem`。
 
-Host 页填写 Room、Server URL、User 后点击启动房间，WinUI 会自动生成 `logs/certs/<room-digest>/entrance.scp`。同一个 Host 可以创建多个同名房间，每次创建都会生成新的 room instance 和新的本地 room-dir。Host 页或 Join 页点击“加入房间”时，WinUI 总会弹出房间实例选择面板；用户确认具体实例后才会连接。Join 页首次加入时填写同一个 Room、Server URL、当前 User，点击“导入房间”，并在弹出的文件选择器中选择 Host 分发的 `entrance.scp`。Client 进入 pending join 后，Host 可以左键灰色 pending 成员卡片允许加入，右键灰色 pending 成员卡片会拒绝该申请。WinUI 不显示 pending requestId。
+Host 页填写 Room、Server URL、User 后点击启动房间，WinUI 会自动生成 `logs/certs/<原始房间名>_<digest前8位>/entrance.scp`。同一个 Host 可以创建多个同名房间，每次创建都会生成新的 room instance 和新的本地 room-dir。Host 页或 Join 页点击“加入房间”时，WinUI 总会弹出房间实例选择面板；用户确认具体实例后才会连接。Join 页首次加入时填写同一个 Room、Server URL、当前 User，点击“导入房间”，并在弹出的文件选择器中选择 Host 分发的 `entrance.scp`。Client 进入 pending join 后，Host 可以左键灰色 pending 成员卡片允许加入，右键灰色 pending 成员卡片会拒绝该申请。WinUI 不显示 pending requestId。
 
 ## Linux：构建
 
@@ -189,12 +189,12 @@ chmod +x start_server.sh stop_server.sh
 
 ## Linux：准备房间证书目录
 
-在项目根目录执行。`create-entrance` 输出 Host 的房间目录；Client 使用 Host 分发的 `entrance.scp` 执行 `import-entrance` 后，会在本机生成成员私钥、CSR、设备/身份声明和 pending join proof。`roomDir` 末级目录名就是下面的 `<room-digest>`。成员证书由后续联机 `/approve` 自动签发，不需要普通用户手动运行 `sign-csr`。
+在项目根目录执行。`create-entrance` 输出 Host 的房间目录；Client 使用 Host 分发的 `entrance.scp` 执行 `import-entrance` 后，会在本机生成成员私钥和加密运行材料。`roomDir` 末级目录名形如 `<原始房间名>_<digest前8位>`。成员证书由后续联机 `/approve` 自动签发，不需要普通用户手动运行 `sign-csr`。
 
 ```bash
 cd ~/SecureChat
 ./out/build/x64-linux-release/cert create-entrance --room secure-room --phrase "use-a-long-random-room-phrase" --host alice --out logs/certs
-./out/build/x64-linux-release/cert import-entrance --entrance logs/certs/<room-digest>/entrance.scp --phrase "use-a-long-random-room-phrase" --user bob --out logs/certs
+./out/build/x64-linux-release/cert import-entrance --entrance logs/certs/<room-dir>/entrance.scp --phrase "use-a-long-random-room-phrase" --user bob --out logs/certs
 ```
 
 ## Linux：启动 Host
@@ -209,7 +209,7 @@ export SECURECHAT_LOCAL_TLS_CA=certs/local-root-ca.pem
 创建房间：
 
 ```bash
-./out/build/x64-linux-release/host --server wss://127.0.0.1:25566 --room-dir logs/certs/<room-digest> alice
+./out/build/x64-linux-release/host --server wss://127.0.0.1:25566 --room-dir logs/certs/<room-dir> alice
 ```
 
 ## Linux：启动 Client
@@ -224,7 +224,7 @@ export SECURECHAT_LOCAL_TLS_CA=certs/local-root-ca.pem
 加入房间：
 
 ```bash
-./out/build/x64-linux-release/client wss://127.0.0.1:25566 --room-dir logs/certs/<room-digest> bob
+./out/build/x64-linux-release/client wss://127.0.0.1:25566 --room-dir logs/certs/<room-dir> bob
 ```
 
 Client 会进入 pending join。回到 Host 终端先查看 pending requestId，再审批：
@@ -277,7 +277,6 @@ cd /opt/SecureChat
 export SECURECHAT_BIND_ADDRESS=127.0.0.1
 export SECURECHAT_PORT=25567
 export SECURECHAT_SERVER_PID_FILE=server-backend.pid
-export SECURECHAT_SERVER_LOG_FILE=server-backend.log
 ./start_server.sh
 ```
 
@@ -316,8 +315,8 @@ sudo nginx -s reload
 Host/Client 连接 Nginx 入口：
 
 ```bash
-./out/build/x64-linux-release/host --server wss://chat.example.com:25566 --room-dir logs/certs/<room-digest> alice
-./out/build/x64-linux-release/client wss://chat.example.com:25566 --room-dir logs/certs/<room-digest> bob
+./out/build/x64-linux-release/host --server wss://chat.example.com:25566 --room-dir logs/certs/<room-dir> alice
+./out/build/x64-linux-release/client wss://chat.example.com:25566 --room-dir logs/certs/<room-dir> bob
 ```
 
 ## 常用聊天命令

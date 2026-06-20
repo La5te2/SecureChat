@@ -15,17 +15,32 @@ cd "$(dirname "${SCRIPT_PATH}")"
 
 PORT="${SECURECHAT_PORT:-25566}"
 PID_FILE="${SECURECHAT_SERVER_PID_FILE:-server.pid}"
-LOG_FILE="${SECURECHAT_SERVER_LOG_FILE:-}"
+LOG_ENABLED="${SECURECHAT_SERVER_LOG_ENABLED:-1}"
+LOG_FILE="server/logs/server.log"
 
 clear_securechat_server_env() {
   unset SECURECHAT_SERVER_BIN
   unset SECURECHAT_PORT
   unset SECURECHAT_SERVER_PID_FILE
-  unset SECURECHAT_SERVER_LOG_FILE
+  unset SECURECHAT_SERVER_LOG_ENABLED
   unset SECURECHAT_TLS_AUTO_DIR
   unset SECURECHAT_TLS_CERT_FILE
   unset SECURECHAT_TLS_KEY_FILE
   unset SECURECHAT_TLS_KEY_PASS
+}
+
+server_log_enabled() {
+  case "${LOG_ENABLED,,}" in
+    1|true|yes|on)
+      return 0
+      ;;
+    0|false|no|off)
+      return 1
+      ;;
+    *)
+      return 0
+      ;;
+  esac
 }
 
 stop_pid() {
@@ -83,11 +98,11 @@ main() {
 
   echo "Server stopped."
   echo "SecureChat Server runtime environment cleared for this shell process."
-  if [[ -n "${LOG_FILE}" ]]; then
+  if server_log_enabled; then
     echo "Log file kept:"
     echo "  ${LOG_FILE}"
   else
-    echo "Log file was disabled."
+    echo "Log output was disabled by SECURECHAT_SERVER_LOG_ENABLED=0."
   fi
 }
 

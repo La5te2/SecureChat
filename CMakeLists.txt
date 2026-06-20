@@ -28,7 +28,7 @@ add_library(core STATIC
     src/client_session_core.cpp
     src/room_registry.cpp
     src/secure_relay.cpp
-    src/server_room_store.cpp
+    src/server_state_store.cpp
     src/signaling_server.cpp
     src/websocket_config.cpp
 )

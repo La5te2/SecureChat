@@ -5,7 +5,7 @@ SecureChat 是一个基于 C++ 和 WinUI 的安全双向通信系统。系统提
 ## 项目组成
 
 - `src/` 和 `include/`：C++ 核心代码，包含信令服务器、WebSocket 中继、贡献式群组密钥协商、成员 PKI、`entrance.scp` 证书工具、附件传输、CLI 和 native API。
-- `app/chat/`：Windows WinUI 图形客户端。
+- `app/winui/`：Windows WinUI 图形客户端。
 - `certs/`：本地示例证书和证书生成材料。正式部署时应替换为独立生成的证书。
 - `docs/`：开发和部署说明，包括启动手册、环境变量、证书生成和安全边界文档。
 - `build.bat`：Windows 上构建 C++ 目标。
@@ -240,20 +240,20 @@ out/build/x64-linux-release/libnative.so
 
 ### 本机 WSS
 
-CLI 运行时仍需要 `--room-dir` 指向本机房间材料目录。下面示例中 `<room-digest>` 是 `cert.exe create-entrance` 或 `cert import-entrance` 输出的 `roomDir` 末级目录名。普通用户更推荐使用 WinUI，WinUI 会隐藏该路径。
+CLI 运行时仍需要 `--room-dir` 指向本机房间材料目录。下面示例中 `<room-dir>` 是 `cert.exe create-entrance` 或 `cert import-entrance` 输出的 `roomDir`，目录名形如 `<原始房间名>_<roomInstanceTokenDigest前8位>`。普通用户更推荐使用 WinUI，WinUI 会隐藏该路径。
 
 Windows：
 
 ```powershell
 .\out\build\x64-release\cert.exe create-entrance --room secure-room --phrase "use-a-long-random-room-phrase" --host alice --out logs\certs
-.\out\build\x64-release\cert.exe import-entrance --entrance logs\certs\<room-digest>\entrance.scp --phrase "use-a-long-random-room-phrase" --user bob --out logs\certs
+.\out\build\x64-release\cert.exe import-entrance --entrance logs\certs\<room-dir>\entrance.scp --phrase "use-a-long-random-room-phrase" --user bob --out logs\certs
 ```
 
 Linux：
 
 ```bash
 ./out/build/x64-linux-release/cert create-entrance --room secure-room --phrase "use-a-long-random-room-phrase" --host alice --out logs/certs
-./out/build/x64-linux-release/cert import-entrance --entrance logs/certs/<room-digest>/entrance.scp --phrase "use-a-long-random-room-phrase" --user bob --out logs/certs
+./out/build/x64-linux-release/cert import-entrance --entrance logs/certs/<room-dir>/entrance.scp --phrase "use-a-long-random-room-phrase" --user bob --out logs/certs
 ```
 
 然后打开三个终端，先启动 Server，再启动 Host，最后启动 Client。Client 连接后会停留在 pending join。Host 在 CLI 标准输入中执行 `/list` 查看 pending requestId，再执行 `/approve <requestId>`；WinUI Host 可直接左键 pending 成员卡片允许加入。Host 会自动解密准入信令 envelope，校验 Client 的 CSR、room instance 绑定、设备/身份声明和 pending join proof，并在线签发成员证书响应；签发响应同样经 admission-encrypted envelope 返回。Client 安装响应后才会成为 active 成员并收到当前 group key。
@@ -265,8 +265,8 @@ Remove-Item Env:SECURECHAT_TLS_CERT_FILE -ErrorAction SilentlyContinue
 Remove-Item Env:SECURECHAT_TLS_KEY_FILE -ErrorAction SilentlyContinue
 .\out\build\x64-release\server.exe 25566
 $env:SECURECHAT_LOCAL_TLS_CA="certs\local-root-ca.pem"
-.\out\build\x64-release\host.exe --server wss://127.0.0.1:25566 --room-dir logs\certs\<room-digest> alice
-.\out\build\x64-release\client.exe wss://127.0.0.1:25566 --room-dir logs\certs\<room-digest> bob
+.\out\build\x64-release\host.exe --server wss://127.0.0.1:25566 --room-dir logs\certs\<room-dir> alice
+.\out\build\x64-release\client.exe wss://127.0.0.1:25566 --room-dir logs\certs\<room-dir> bob
 ```
 
 Linux：
@@ -275,8 +275,8 @@ Linux：
 unset SECURECHAT_TLS_CERT_FILE SECURECHAT_TLS_KEY_FILE
 ./out/build/x64-linux-release/server 25566
 export SECURECHAT_LOCAL_TLS_CA=certs/local-root-ca.pem
-./out/build/x64-linux-release/host --server wss://127.0.0.1:25566 --room-dir logs/certs/<room-digest> alice
-./out/build/x64-linux-release/client wss://127.0.0.1:25566 --room-dir logs/certs/<room-digest> bob
+./out/build/x64-linux-release/host --server wss://127.0.0.1:25566 --room-dir logs/certs/<room-dir> alice
+./out/build/x64-linux-release/client wss://127.0.0.1:25566 --room-dir logs/certs/<room-dir> bob
 ```
 
 使用 `--room-dir` 时，Host/Client 不需要额外配置成员 PKI 环境变量。
@@ -296,8 +296,8 @@ export SECURECHAT_TLS_KEY_FILE=/path/to/privkey.pem
 Host/Client 连接：
 
 ```bash
-./out/build/x64-linux-release/host --server wss://chat.example.com:25566 --room-dir logs/certs/<room-digest> alice
-./out/build/x64-linux-release/client wss://chat.example.com:25566 --room-dir logs/certs/<room-digest> bob
+./out/build/x64-linux-release/host --server wss://chat.example.com:25566 --room-dir logs/certs/<room-dir> alice
+./out/build/x64-linux-release/client wss://chat.example.com:25566 --room-dir logs/certs/<room-dir> bob
 ```
 
 如果服务器证书由系统信任 CA 签发，Host/Client/WinUI 不需要额外配置服务器 CA。本地或局域网自签 CA 场景下，CLI 可通过 `SECURECHAT_LOCAL_TLS_CA` 指定 `certs/local-root-ca.pem`；WinUI 可在设置面板的 `Local Server TLS CA / 本地服务器 TLS 信任根` 中选择同一个文件。
@@ -367,7 +367,7 @@ WinUI 面向日常使用场景。
 
 1. 打开 WinUI。
 2. 如果连接本地/局域网自动生成的 WSS 证书，在设置面板选择 `Local Server TLS CA / 本地服务器 TLS 信任根`。
-3. Host 区域输入 Room、Server URL 和 User，点击 `Create Room / 创建房间`。WinUI 会自动生成 `logs/certs/<room-digest>/entrance.scp` 和房间级 Host 证书材料。
+3. Host 区域输入 Room、Server URL 和 User，点击 `Create Room / 创建房间`。WinUI 会自动生成 `logs/certs/<原始房间名>_<digest前8位>/entrance.scp` 和房间级 Host 证书材料。
 4. Host 或 Join 区域点击 `Join Room / 加入房间` 时，WinUI 会弹出房间实例选择面板；确认后才会连接。即使只有一个同名候选房间，也会要求确认。
 5. Client 首次加入时在 Join 区域点击 `Import Room / 导入房间`，选择 Host 分发的 `entrance.scp` 文件。
 6. Client 正确解析 `entrance.scp` 后进入 pending 状态。此时发送框禁用，成员列表只显示自己的灰色卡片。
@@ -422,7 +422,7 @@ Host 管理命令在 Host 输入框或 CLI 标准输入中发送：
 
 当前已拆分 Host 断线和显式关闭。Host 关闭 WinUI、结束 Host 进程、按 Ctrl+C 或网络瞬断只表示 Host disconnected，Server 保留房间 open 状态和 pending join 队列，Client 只看到 Host 暂离状态。Host 使用 WinUI 的 `Stop Session`、CLI 的 `/stop_session` 或 `/close_room` 时才发送带 Host 签名的 `close_room`，Server 广播 `room_closed` 并关闭该 room instance。
 
-Server 使用 SQLite 保存 room instance 的 open/closed 状态和 pending join 原始请求。Server 不保存聊天明文、附件明文、成员私钥、Root/Intermediate 私钥、群密钥或 entrance secret。
+Server 使用 SQLite 保存 room instance 的 open/closed 状态和 pending join 原始请求，默认路径为 `server/state/server-state.sqlite3`，可通过 `SECURECHAT_SERVER_STATE_DB` 覆盖。Server 不保存聊天明文、附件明文、成员私钥、Root/Intermediate 私钥、群密钥或 entrance secret。
 
 Server 进程停止或重启只表示中继暂时不可用，不会把 open 房间标记为 closed。房间进入 closed 状态只能来自 Host 在线发送的签名 `close_room`。
 
@@ -475,7 +475,7 @@ WinUI 对附件预览采用当前房间内的本机 UI 策略。成员默认 All
 | `SECURECHAT_PORT` | Server 默认端口 |
 | `SECURECHAT_ATTACHMENT_MAX_BYTES` | 附件发送大小上限 |
 | `SECURECHAT_LOGS_MAX_BYTES` | 本地附件缓存上限 |
-| `SECURECHAT_SERVER_LOG_FILE` | Server 日志文件 |
+| `SECURECHAT_SERVER_LOG_ENABLED` | Server daemon 日志输出开关；默认写入 `server/logs/server.log` |
 | `SECURECHAT_ALLOW_ROOT` | Linux 上允许 root 临时运行 Server |
 
 完整环境变量见 `docs/environment-variables.md`。
@@ -500,14 +500,13 @@ taskkill /PID <pid> /F
 
 ### Client 一直等待 group key
 
-先检查 Client 是否仍处于 pending join。新成员需要 Host 在 WinUI 左键 pending 成员卡片，或在 CLI 执行 `/list` 查看 requestId 后执行 `/approve <requestId>`，才会成为 active 成员并收到当前 group key。然后检查 Host 是否仍在房间内，Server 是否仍在转发 `group_key` envelope，以及 Host/Client 是否使用同一套房间级 PKI 信任根。需要排障时可以临时启用日志：
+先检查 Client 是否仍处于 pending join。新成员需要 Host 在 WinUI 左键 pending 成员卡片，或在 CLI 执行 `/list` 查看 requestId 后执行 `/approve <requestId>`，才会成为 active 成员并收到当前 group key。然后检查 Host 是否仍在房间内，Server 是否仍在转发 `group_key` envelope，以及 Host/Client 是否使用同一套房间级 PKI 信任根。`start_server.sh` 默认把 Server 日志写入固定位置：
 
 ```bash
-export SECURECHAT_SERVER_LOG_FILE=server.log
-./out/build/x64-linux-release/server 25566
+tail -f server/logs/server.log
 ```
 
-排障完成后建议删除日志。日志可能包含 room token、连接状态和脱敏后的成员标识。
+如需关闭 daemon 日志输出，可在启动前设置 `SECURECHAT_SERVER_LOG_ENABLED=0`。日志可能包含 room token、连接状态和脱敏后的成员标识。
 
 ### 只能使用 wss
 

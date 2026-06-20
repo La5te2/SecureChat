@@ -17,7 +17,6 @@ void printUsage() {
     std::cerr << "  cert inspect-entrance --entrance <path> --phrase <phrase>\n";
     std::cerr << "  cert import-entrance --entrance <path> --phrase <phrase> --user <name> [--out <dir>] [--key-pass <pass>]\n";
     std::cerr << "  cert sign-csr --room-dir <dir> --csr <path> --user <name>\n";
-    std::cerr << "  cert install-sign-response --room-dir <dir> --response <path> --user <name>\n";
     std::cerr << "  cert room-runtime --room-dir <dir> --user <name> --role <host|client>\n";
 }
 
@@ -94,8 +93,6 @@ int main(int argc, char** argv) {
             const auto result = chat::certs::importRoomEntrance(import);
             std::cout << "roomDir: " << result.roomDir << "\n";
             std::cout << "memberKey: " << result.memberKeyFile << "\n";
-            std::cout << "memberCsr: " << result.memberCsrFile << "\n";
-            std::cout << "memberCsrBundle: " << result.memberCsrBundleFile << "\n";
             std::cout << "rootFingerprint: " << result.rootFingerprint << "\n";
             std::cout << "intermediateFingerprint: " << result.intermediateFingerprint << "\n";
             return 0;
@@ -107,19 +104,6 @@ int main(int argc, char** argv) {
             sign.csrFile = requireOption(options, "--csr");
             sign.memberName = requireOption(options, "--user");
             const auto result = chat::certs::signRoomMemberCertificate(sign);
-            std::cout << "memberCert: " << result.memberCertFile << "\n";
-            std::cout << "memberChain: " << result.memberChainFile << "\n";
-            std::cout << "signResponse: " << result.signResponseFile << "\n";
-            std::cout << "memberFingerprint: " << result.memberFingerprint << "\n";
-            return 0;
-        }
-
-        if (command == "install-sign-response") {
-            chat::certs::RoomMemberInstallOptions install;
-            install.roomDir = requireOption(options, "--room-dir");
-            install.signResponseFile = requireOption(options, "--response");
-            install.memberName = requireOption(options, "--user");
-            const auto result = chat::certs::installRoomMemberCertificate(install);
             std::cout << "memberCert: " << result.memberCertFile << "\n";
             std::cout << "memberChain: " << result.memberChainFile << "\n";
             std::cout << "memberFingerprint: " << result.memberFingerprint << "\n";

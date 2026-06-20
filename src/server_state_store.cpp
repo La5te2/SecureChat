@@ -1,5 +1,5 @@
-// Server room 状态 SQLite 实现。
-#include "server_room_store.hpp"
+// Server 状态 SQLite 存储实现。
+#include "server_state_store.hpp"
 
 #include <sqlite3.h>
 
@@ -21,7 +21,7 @@ std::filesystem::path pathFromUtf8(const std::string& value) {
 
 std::string defaultDbPath() {
     const auto configured = envValue("SECURECHAT_SERVER_STATE_DB");
-    return configured.empty() ? "logs/server-state.sqlite3" : configured;
+    return configured.empty() ? "server/state/server-state.sqlite3" : configured;
 }
 
 void execSql(sqlite3* db, const char* sql) {
@@ -29,13 +29,13 @@ void execSql(sqlite3* db, const char* sql) {
     if (sqlite3_exec(db, sql, nullptr, nullptr, &error) != SQLITE_OK) {
         std::string message = error ? error : "unknown sqlite error";
         sqlite3_free(error);
-        throw std::runtime_error("server room store SQL failed: " + message);
+        throw std::runtime_error("server state store SQL failed: " + message);
     }
 }
 
 void bindText(sqlite3_stmt* stmt, int index, const std::string& value) {
     if (sqlite3_bind_text(stmt, index, value.c_str(), static_cast<int>(value.size()), SQLITE_TRANSIENT) != SQLITE_OK) {
-        throw std::runtime_error("server room store bind failed");
+        throw std::runtime_error("server state store bind failed");
     }
 }
 
@@ -43,7 +43,7 @@ class Statement {
 public:
     Statement(sqlite3* db, const char* sql) : mDb(db) {
         if (sqlite3_prepare_v2(db, sql, -1, &mStmt, nullptr) != SQLITE_OK) {
-            throw std::runtime_error("server room store prepare failed: " + std::string(sqlite3_errmsg(db)));
+            throw std::runtime_error("server state store prepare failed: " + std::string(sqlite3_errmsg(db)));
         }
     }
     ~Statement() {
@@ -62,19 +62,19 @@ sqlite3* dbPtr(void* value) {
 
 }
 
-ServerRoomStore::ServerRoomStore() : mPath(defaultDbPath()) {
+ServerStateStore::ServerStateStore() : mPath(defaultDbPath()) {
     open();
     migrate();
 }
 
-ServerRoomStore::~ServerRoomStore() {
+ServerStateStore::~ServerStateStore() {
     if (mDb) {
         sqlite3_close(dbPtr(mDb));
         mDb = nullptr;
     }
 }
 
-void ServerRoomStore::open() {
+void ServerStateStore::open() {
     const auto path = pathFromUtf8(mPath);
     std::error_code ec;
     if (path.has_parent_path()) {
@@ -91,7 +91,7 @@ void ServerRoomStore::open() {
     mDb = db;
 }
 
-void ServerRoomStore::migrate() {
+void ServerStateStore::migrate() {
     auto* db = dbPtr(mDb);
     execSql(db, "PRAGMA journal_mode=WAL;");
     execSql(db,
@@ -110,7 +110,7 @@ void ServerRoomStore::migrate() {
         ");");
 }
 
-std::vector<std::string> ServerRoomStore::loadOpenRooms() {
+std::vector<std::string> ServerStateStore::loadOpenRooms() {
     Statement stmt(dbPtr(mDb), "SELECT room_id FROM rooms WHERE state='open';");
     std::vector<std::string> rooms;
     while (sqlite3_step(stmt.get()) == SQLITE_ROW) {
@@ -120,7 +120,7 @@ std::vector<std::string> ServerRoomStore::loadOpenRooms() {
     return rooms;
 }
 
-std::vector<ServerRoomStore::PendingJoin> ServerRoomStore::loadPendingJoins(const std::string& roomId) {
+std::vector<ServerStateStore::PendingJoin> ServerStateStore::loadPendingJoins(const std::string& roomId) {
     Statement stmt(dbPtr(mDb), "SELECT request_id, payload FROM pending_joins WHERE room_id=? ORDER BY created_at;");
     bindText(stmt.get(), 1, roomId);
     std::vector<PendingJoin> pending;
@@ -132,7 +132,7 @@ std::vector<ServerRoomStore::PendingJoin> ServerRoomStore::loadPendingJoins(cons
     return pending;
 }
 
-std::string ServerRoomStore::roomState(const std::string& roomId) {
+std::string ServerStateStore::roomState(const std::string& roomId) {
     Statement stmt(dbPtr(mDb), "SELECT state FROM rooms WHERE room_id=?;");
     bindText(stmt.get(), 1, roomId);
     if (sqlite3_step(stmt.get()) != SQLITE_ROW) return "";
@@ -140,7 +140,7 @@ std::string ServerRoomStore::roomState(const std::string& roomId) {
     return text ? std::string(text) : std::string();
 }
 
-void ServerRoomStore::markRoomOpen(const std::string& roomId) {
+void ServerStateStore::markRoomOpen(const std::string& roomId) {
     Statement stmt(dbPtr(mDb),
         "INSERT INTO rooms(room_id, state, updated_at) VALUES(?, 'open', unixepoch()) "
         "ON CONFLICT(room_id) DO UPDATE SET state='open', updated_at=unixepoch();");
@@ -150,7 +150,7 @@ void ServerRoomStore::markRoomOpen(const std::string& roomId) {
     }
 }
 
-void ServerRoomStore::markRoomClosed(const std::string& roomId) {
+void ServerStateStore::markRoomClosed(const std::string& roomId) {
     Statement stmt(dbPtr(mDb),
         "INSERT INTO rooms(room_id, state, updated_at) VALUES(?, 'closed', unixepoch()) "
         "ON CONFLICT(room_id) DO UPDATE SET state='closed', updated_at=unixepoch();");
@@ -161,7 +161,7 @@ void ServerRoomStore::markRoomClosed(const std::string& roomId) {
     clearPendingJoins(roomId);
 }
 
-void ServerRoomStore::addPendingJoin(const std::string& roomId, const std::string& requestId, const nlohmann::json& payload) {
+void ServerStateStore::addPendingJoin(const std::string& roomId, const std::string& requestId, const nlohmann::json& payload) {
     Statement stmt(dbPtr(mDb),
         "INSERT OR REPLACE INTO pending_joins(room_id, request_id, payload, created_at) VALUES(?, ?, ?, unixepoch());");
     bindText(stmt.get(), 1, roomId);
@@ -172,7 +172,7 @@ void ServerRoomStore::addPendingJoin(const std::string& roomId, const std::strin
     }
 }
 
-void ServerRoomStore::removePendingJoin(const std::string& roomId, const std::string& requestId) {
+void ServerStateStore::removePendingJoin(const std::string& roomId, const std::string& requestId) {
     Statement stmt(dbPtr(mDb), "DELETE FROM pending_joins WHERE room_id=? AND request_id=?;");
     bindText(stmt.get(), 1, roomId);
     bindText(stmt.get(), 2, requestId);
@@ -181,7 +181,7 @@ void ServerRoomStore::removePendingJoin(const std::string& roomId, const std::st
     }
 }
 
-void ServerRoomStore::clearPendingJoins(const std::string& roomId) {
+void ServerStateStore::clearPendingJoins(const std::string& roomId) {
     Statement stmt(dbPtr(mDb), "DELETE FROM pending_joins WHERE room_id=?;");
     bindText(stmt.get(), 1, roomId);
     if (sqlite3_step(stmt.get()) != SQLITE_DONE) {

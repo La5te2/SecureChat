@@ -6,12 +6,13 @@ cd "$(dirname "$0")"
 SERVER_BIN="${SECURECHAT_SERVER_BIN:-./out/build/x64-linux-release/server}"
 PORT="${SECURECHAT_PORT:-25566}"
 PID_FILE="${SECURECHAT_SERVER_PID_FILE:-server.pid}"
-LOG_FILE="${SECURECHAT_SERVER_LOG_FILE:-}"
-# Server is the only role that listens on a public port, so this script starts
-# it as a background daemon by default.
-# Server output contains room ids, usernames, and connection events.
-# Do not persist it unless diagnostics are explicitly requested.
-LOG_TARGET="${LOG_FILE:-/dev/null}"
+LOG_ENABLED="${SECURECHAT_SERVER_LOG_ENABLED:-1}"
+LOG_FILE="server/logs/server.log"
+# Server 是唯一监听端口的角色，因此启动脚本默认按后台 daemon 运行。
+# Server 输出可能包含 room id、用户名和连接事件。
+# 默认写入 server/logs/server.log；如果需要丢弃 daemon 输出，
+# 设置 SECURECHAT_SERVER_LOG_ENABLED=0。
+LOG_TARGET="/dev/null"
 MODE_OVERRIDE=""
 DEFAULT_TLS_CERT_FILE="certs/fullchain.pem"
 DEFAULT_TLS_KEY_FILE="certs/privkey.pem"
@@ -29,12 +30,27 @@ usage() {
   echo "Run the server binary directly with empty TLS env vars to generate a local/LAN development certificate."
 }
 
+log_enabled() {
+  case "${LOG_ENABLED,,}" in
+    1|true|yes|on)
+      return 0
+      ;;
+    0|false|no|off)
+      return 1
+      ;;
+    *)
+      echo "ERROR: SECURECHAT_SERVER_LOG_ENABLED must be 1/0, true/false, yes/no, or on/off."
+      exit 1
+      ;;
+  esac
+}
+
 show_log_hint() {
-  if [[ -n "${LOG_FILE}" ]]; then
+  if log_enabled; then
     echo "Log:"
     echo "  tail -f ${LOG_FILE}"
   else
-    echo "Log: disabled by default; set SECURECHAT_SERVER_LOG_FILE=server.log to save diagnostics."
+    echo "Log: disabled by SECURECHAT_SERVER_LOG_ENABLED=0."
   fi
 }
 
@@ -131,6 +147,13 @@ if command -v ss >/dev/null && ss -lnt 2>/dev/null | grep -q ":${PORT} "; then
   exit 1
 fi
 
+if log_enabled; then
+  mkdir -p "$(dirname "${LOG_FILE}")"
+  LOG_TARGET="${LOG_FILE}"
+else
+  LOG_TARGET="/dev/null"
+fi
+
 echo "Starting SecureChat Server..."
 echo "  port: ${PORT}"
 echo "  signaling: wss"
@@ -149,11 +172,11 @@ if kill -0 "${pid}" 2>/dev/null; then
   show_log_hint
 else
   echo "ERROR: Server exited during startup."
-  if [[ -n "${LOG_FILE}" ]]; then
+  if log_enabled; then
     echo "Last log lines:"
     tail -n 80 "${LOG_FILE}" 2>/dev/null || true
   else
-    echo "Logging was disabled; set SECURECHAT_SERVER_LOG_FILE=server.log and retry for diagnostics."
+    echo "Log output was disabled by SECURECHAT_SERVER_LOG_ENABLED=0."
   fi
   rm -f "${PID_FILE}"
   exit 1

@@ -1,6 +1,7 @@
-// Server 侧最小持久化状态。
-// 该模块只保存 opaque room token、open/closed 状态和待 Host 审批的
-// pending join 原始 JSON，不保存聊天明文、群密钥或任何成员私钥。
+// Server 侧持久化状态存储。
+// 当前只保存 opaque room token、open/closed 状态和待 Host 审批的
+// pending join 原始 JSON；后续非房间专属的 Server 状态也可以放入这里。
+// 该模块不保存聊天明文、群密钥或任何成员私钥。
 #pragma once
 
 #include <nlohmann/json.hpp>
@@ -8,15 +9,15 @@
 #include <string>
 #include <vector>
 
-class ServerRoomStore {
+class ServerStateStore {
 public:
     struct PendingJoin {
         std::string requestId;
         nlohmann::json payload;
     };
 
-    ServerRoomStore();
-    ~ServerRoomStore();
+    ServerStateStore();
+    ~ServerStateStore();
 
     std::vector<std::string> loadOpenRooms();
     std::vector<PendingJoin> loadPendingJoins(const std::string& roomId);

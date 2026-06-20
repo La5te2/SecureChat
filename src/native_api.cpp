@@ -542,7 +542,7 @@ int CHAT_CALL chat_join_start_auto(
         const auto roomDir = chat::certs::roomDirForEntrance(entrance, roomName, "logs/certs");
         const auto localRoomDir = std::filesystem::path(roomDir);
         bool alreadyImported = false;
-        if (std::filesystem::exists(localRoomDir / "room-runtime.json")) {
+        if (std::filesystem::exists(localRoomDir / "room-state.scb")) {
             try {
                 (void)chat::certs::loadRoomRuntimeMaterial(roomDir, user, false, false);
                 alreadyImported = true;

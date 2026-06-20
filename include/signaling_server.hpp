@@ -5,7 +5,7 @@
 #include "auth_service.hpp"
 #include "common.hpp"
 #include "room_registry.hpp"
-#include "server_room_store.hpp"
+#include "server_state_store.hpp"
 
 #include <rtc/rtc.hpp>
 
@@ -140,7 +140,7 @@ private:
     std::mutex mMutex;
     AuthService mAuth;
     RoomRegistry mRegistry;
-    ServerRoomStore mRoomStore;
+    ServerStateStore mStateStore;
     std::unordered_map<std::string, Room> mRooms;
     std::unordered_map<rtc::WebSocket*, ClientState> mClients;
 };
