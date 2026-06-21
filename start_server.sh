@@ -23,10 +23,11 @@ if [[ "${EUID}" == "0" && "${SECURECHAT_ALLOW_ROOT:-}" != "1" ]]; then
   exit 1
 fi
 usage() {
-  echo "Usage: ./start_server.sh [--mode wss|secure|1]"
+  echo "Usage: ./start_server.sh [--mode wss|secure|1|ws|backend|0]"
   echo
-  echo "SecureChat Server always starts in WSS mode."
-  echo "If TLS env vars are empty, this script uses certs/fullchain.pem and certs/privkey.pem."
+  echo "Public SecureChat entries must use WSS."
+  echo "--mode ws/backend starts a loopback WS backend for a TLS proxy or protected tunnel."
+  echo "In WSS mode, if TLS env vars are empty, this script uses certs/fullchain.pem and certs/privkey.pem."
   echo "Run the server binary directly with empty TLS env vars to generate a local/LAN development certificate."
 }
 
@@ -58,7 +59,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --mode)
       if [[ $# -lt 2 ]]; then
-        echo "ERROR: --mode requires wss, secure, or 1."
+        echo "ERROR: --mode requires wss, secure, 1, ws, backend, or 0."
         usage
         exit 1
       fi
@@ -81,22 +82,25 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ -n "${MODE_OVERRIDE}" ]]; then
-  case "${MODE_OVERRIDE,,}" in
-    0|ws|insecure)
-      echo "ERROR: ws/insecure mode is disabled. Use wss."
-      exit 1
-      ;;
-    1|wss|secure)
-      :
-      ;;
-    *)
-      echo "ERROR: unsupported --mode value: ${MODE_OVERRIDE}"
-      usage
-      exit 1
-      ;;
-  esac
-fi
+BACKEND_WS=0
+SERVER_MODE="${MODE_OVERRIDE:-wss}"
+case "${SERVER_MODE,,}" in
+  0|ws|backend)
+    BACKEND_WS=1
+    ;;
+  1|wss|secure)
+    BACKEND_WS=0
+    ;;
+  insecure)
+    echo "ERROR: use --mode backend for a loopback WS backend."
+    exit 1
+    ;;
+  *)
+    echo "ERROR: unsupported --mode value: ${SERVER_MODE}"
+    usage
+    exit 1
+    ;;
+esac
 
 select_script_tls_defaults() {
   if [[ -n "${SECURECHAT_TLS_CERT_FILE:-}" && -n "${SECURECHAT_TLS_KEY_FILE:-}" ]]; then
@@ -121,7 +125,24 @@ select_script_tls_defaults() {
   echo "  key:  ${SECURECHAT_TLS_KEY_FILE}"
 }
 
-select_script_tls_defaults
+if [[ "${BACKEND_WS}" == "1" ]]; then
+  export SECURECHAT_SIGNALING_TLS=0
+  if [[ -z "${SECURECHAT_BIND_ADDRESS:-}" ]]; then
+    export SECURECHAT_BIND_ADDRESS=127.0.0.1
+  fi
+  case "${SECURECHAT_BIND_ADDRESS}" in
+    127.0.0.1|localhost|::1|\[::1\])
+      ;;
+    *)
+      echo "ERROR: --mode ws/backend requires a loopback bind address."
+      echo "Set SECURECHAT_BIND_ADDRESS=127.0.0.1, localhost, or ::1."
+      exit 1
+      ;;
+  esac
+else
+  export SECURECHAT_SIGNALING_TLS=1
+  select_script_tls_defaults
+fi
 
 if [[ ! -x "${SERVER_BIN}" ]]; then
   echo "ERROR: Server binary is missing or not executable: ${SERVER_BIN}"
@@ -156,10 +177,15 @@ fi
 
 echo "Starting SecureChat Server..."
 echo "  port: ${PORT}"
-echo "  signaling: wss"
-if [[ -z "${SECURECHAT_TLS_CERT_FILE:-}" || -z "${SECURECHAT_TLS_KEY_FILE:-}" ]]; then
-  echo "ERROR: SECURECHAT_TLS_CERT_FILE and SECURECHAT_TLS_KEY_FILE are required for WSS."
-  exit 1
+if [[ "${BACKEND_WS}" == "1" ]]; then
+  echo "  signaling: ws loopback backend"
+  echo "  bind: ${SECURECHAT_BIND_ADDRESS}"
+else
+  echo "  signaling: wss"
+  if [[ -z "${SECURECHAT_TLS_CERT_FILE:-}" || -z "${SECURECHAT_TLS_KEY_FILE:-}" ]]; then
+    echo "ERROR: SECURECHAT_TLS_CERT_FILE and SECURECHAT_TLS_KEY_FILE are required for WSS."
+    exit 1
+  fi
 fi
 
 env -u SECURECHAT_ROOM_PASSWORD nohup "${SERVER_BIN}" "${PORT}" > "${LOG_TARGET}" 2>&1 &

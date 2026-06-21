@@ -277,10 +277,11 @@ public sealed partial class MainWindow : Window
     [DllImport("winmm.dll", CharSet = CharSet.Unicode)]
     private static extern bool mciGetErrorString(int errorCode, StringBuilder errorText, int errorTextSize);
 
-    private static bool IsWssServerUrl(string value)
+    private static bool IsWebSocketServerUrl(string value)
     {
         return Uri.TryCreate(value, UriKind.Absolute, out var uri) &&
-            uri.Scheme.Equals("wss", StringComparison.OrdinalIgnoreCase);
+            (uri.Scheme.Equals("wss", StringComparison.OrdinalIgnoreCase) ||
+             uri.Scheme.Equals("ws", StringComparison.OrdinalIgnoreCase));
     }
 
     private bool TryReadSessionInputs(
@@ -304,9 +305,9 @@ public sealed partial class MainWindow : Window
             AddLine("error", "User is required.");
             return false;
         }
-        if (!IsWssServerUrl(serverUrl))
+        if (!IsWebSocketServerUrl(serverUrl))
         {
-            AddLine("error", "Server URL must start with wss://.");
+            AddLine("error", "Server URL must start with ws:// or wss://.");
             return false;
         }
         return true;

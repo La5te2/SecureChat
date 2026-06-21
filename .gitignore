@@ -23,7 +23,6 @@ app/**/uploads/
 artifacts/
 dist/
 server/
-tools/
 
 # Secret Certs
 certs/

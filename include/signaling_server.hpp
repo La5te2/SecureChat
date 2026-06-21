@@ -31,7 +31,8 @@ public:
 
     // 返回已绑定的信令端口，包括自动选择的端口。
     uint16_t port() const;
-    // 返回 Client 连接该 Server 时使用的 "wss"。
+    // 返回当前监听器的 scheme。对外入口应为 "wss"；
+    // "ws" 表示本机回环后端，由外层代理或隧道组件提供保护。
     std::string urlScheme() const;
     // 关闭所有已发布房间，并向已连接 Client 告知原因。
     void closeAllRooms(const std::string& reason = "host disconnected");

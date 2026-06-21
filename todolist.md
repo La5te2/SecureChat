@@ -967,3 +967,135 @@ PKI 身份认证现在强制绑定成员证书、临时 public key、GKA contrib
   - 已完成 WinUI 启动/关闭烟测，确认当前关闭路径没有产生新的幽灵进程。
   - 已核对 MotW 写入、Linux/Unix 去执行位、`file` 不自动预览、图片/语音结构校验和 trust/untrust 预览控制的代码路径。
   - 后续如果增加嵌入式打开器或附件管理界面，需要重新增加跨平台实机测试矩阵。
+
+## 阶段 17：房间级本地目录重构与 Relay Mesh
+
+目标：把用户端本地材料统一收束到单个 room instance 根目录，并在该目录下引入房间级共享 relay pool。CLI Host 创建房间时通过 `--pool <file>` 导入原始 relay pool 文件；WinUI Host 创建房间时从本地 config 的 `[pool]` 段读取原始 relay pool。Host 创建 `entrance.scp` 时把规范化后的 pool manifest 写入 entrance 保密 payload。Host 的原始 pool 文件和本机 SQLite 副本限定在 Host 本机；Client 导入 `entrance.scp` 后从保密 payload 获得同一 room instance 的 relay pool，并在本机生成 SQLite 副本。网络状态正常时，每个成员都尝试连接完整 pool。客户端从当前 epoch 的 room group key 派生房间级调度秘密 `K_route`，用它为文本消息、附件 manifest、附件 chunk 和 notice 确定 relay 子集。阶段 17 的安全收益来自客户端侧房间级秘密调度、relay 子集分散、notice 高 fanout、missing bitmap/NACK 重传和 relay pool 动态扩容。
+
+- [ ] 重构用户端本地目录模型。
+  - 用户端本地材料统一放入 room instance 根目录：
+    ```text
+    logs/
+      <roomBaseName>_<roomInstanceTokenDigest前8位>/
+        certs/
+        texts/
+        files/
+        images/
+        voice/
+        state/
+        relay/
+    ```
+  - `--room-dir` 的语义改为 room instance 根目录，例如 `logs/<room>_<digest8>`。
+  - `certs/` 保存 `entrance.scp`、房间级 CA、成员证书链、成员私钥和加密 room state。
+  - `texts/` 保存本机文本历史，例如 `texts/<systemUsername>.sqlite3`。
+  - `files/`、`images/` 和 `voice/` 保存对应附件缓存。
+  - `state/` 保存本机 replay cache、运行状态和后续本地配置。
+  - `relay/` 保存 relay pool SQLite 和 relay 调度缓存。
+  - WinUI 房间实例选择枚举 `logs/<room>_<digest8>`，并显示房间名、创建/导入时间和 room instance 摘要。
+  - 删除某个 room instance 时可以直接删除对应 room root，用户端本地材料随房间一起清理。
+
+- [ ] 迁移现有路径和兼容边界。
+  - `cert_generation.cpp`、`local_paths.cpp`、`local_message_store.cpp`、附件落地逻辑和 WinUI 房间选择逻辑统一使用 room root。
+  - `cert.exe create-entrance` 输出 Host room root，并在其中创建 `certs/entrance.scp`。
+  - `cert.exe import-entrance` 输出 Client room root，把导入后的成员材料写入 `certs/`，并把用户选择的原始 `entrance.scp` 复制为 `room-dir/certs/entrance.scp`。
+  - Host 和 Client 后续重新加入同一 room instance 时都从 `room-dir/certs/entrance.scp` 读取 admission secret；该文件作为重入房准入副本，文件缺失或被移动时需要重新导入原始 `entrance.scp` 后再进入房间。
+  - `entrance.scp` 携带初始 relay manifest、manifest 摘要、`poolVersion` 和签名信息，使导入成员获得同一 room instance 的 relay pool 范围。
+  - Host/Client 启动读取 `room-dir/certs/` 中的 `entrance.scp`、trust store、成员证书链、成员私钥和加密 room state。
+  - 文档中的 `logs/certs/<room>_<digest8>`、`logs/texts/<room>_<digest8>`、`logs/files/<room>_<digest8>` 等旧路径统一替换为 room root 下的子目录。
+  - Server 自身状态继续放在 `server/state/` 和 `server/logs/`，与用户端 `logs/` 分离。
+
+- [ ] 定义 entrance 与共享 relay pool。
+  - CLI Host 创建房间时通过 `--pool <file>` 导入原始 relay pool 文件。
+  - WinUI Host 创建房间时从本地 config 的 `[pool]` 段读取原始 relay pool，设置面板保持房间名、用户昵称和本地 TLS 信任根等用户级选项。
+  - WinUI config 的 `[pool]` 段允许 Host 本地手动编辑，每个非空行表示一个 relay URL，例如：
+    ```text
+    [pool]
+    wss://relay-a.example.com:25566
+    wss://relay-b.example.com:31415
+    wss://relay-c.example.net:49201
+    ```
+  - CLI `--pool <file>` 文件采用同样的 UTF-8 明文文本格式，可以直接使用 `[pool]` 段，也可以只写 relay URL 行，例如：
+    ```text
+    wss://relay-a.example.com:25566
+    wss://relay-b.example.com:31415
+    wss://relay-c.example.net:49201
+    ```
+  - relay URL 默认使用 `wss://host:port`；不同 relay 可以使用不同端口，并配合云安全组开放对应端口。
+  - 端口异构可以增加默认端口扫描和批量误扫的成本，也便于按 relay 配置安全组；地址或 manifest 泄露、全端口扫描、流量侧观察和定向扫描仍能发现开放端口，因此端口异构属于暴露面治理，不属于核心安全边界。
+  - Host 解析原始 pool 后生成 canonical relay manifest，字段包括 manifest id、`poolVersion`、relay URL、权重、有效期、来源和签名。
+  - Host 把 canonical relay manifest 写入 `entrance.scp` 的保密 payload，并把 SQLite 副本写入 `room-dir/relay/relay-pool.sqlite3`。
+  - Client 导入 `entrance.scp` 后解出 canonical relay manifest，验证签名、版本和有效期，再生成自己的 `room-dir/relay/relay-pool.sqlite3`。
+  - 同一 room instance 默认共享同一 relay pool；初始 pool 范围由 `entrance.scp` 框定。
+  - relay pool 支持追加新服务器地址；新增 relay 通过签名 manifest 或房间加密控制消息进入本地 pool。
+  - 网络状态正常时，每个成员都尝试连接完整 relay pool；本地健康状态影响实际发送调度、notice fanout 和重传选择。
+  - relay 状态至少包括 `candidate`、`connecting`、`healthy`、`degraded`、`offline`、`banned`。
+  - active Host 和 active Client 在数据通路上使用同一等级的房间成员能力；安全判断位于成员端，Server/Relay 的处理范围是 opaque envelope。
+
+- [ ] 设计房间级秘密 relay 调度。
+  - 从当前 epoch 的 room group key 派生调度秘密：
+    ```text
+    K_route = HKDF-SHA256(
+      K_G,
+      salt = roomInstanceTokenDigest || epoch,
+      info = "securechat-relay-schedule"
+    )
+    ```
+  - 文本 payload、文本 notice、附件 manifest、附件 chunk 和 missing request 使用不同调度标签做 domain separation，例如 `route:text`、`route:notice`、`route:manifest`、`route:chunk`、`route:missing`。
+  - 每个调度对象通过确定性规则选择 relay 子集：
+    ```text
+    RelaySet(itemId, chunkIndex, attempt) =
+      WeightedSample(PRF(K_route, label || itemId || chunkIndex || attempt || poolVersion),
+                     healthyRelayPool,
+                     m)
+    ```
+  - 算法公开，`K_route` 保持在当前 active 成员本地；relay 和外部观察者的可见内容限于所在通路上的 ciphertext、大小和时序。
+  - 成员和 relay 构成二分图。成员 `M_i` 的 relay 邻居集合记为 `N(M_i)`。
+  - 直接覆盖范围由 sender 选择的 relay 子集和接收者当前可用 relay 交集决定。
+  - notice、manifest 和 missing request 使用较高 fanout 系数；数据 chunk 使用较小 fanout 系数分散到 relay pool 子集。
+  - relay 权重由 RTT、最近成功时间、失败次数、本地禁用状态和 manifest 权重共同决定。
+  - 可达性优化集中在客户端侧：刷新 manifest、提高完整 pool 连接率、提高 notice fanout、提升 missing request fanout、按 attempt 选择新的 relay 子集。
+  - 成员全部 relay 暂不可用时进入 relay unavailable 状态；房间 open/closed 生命周期保持原有语义。
+
+- [ ] 使用 SQLite 管理 relay pool。
+  - 每个 room instance 使用独立数据库：
+    ```text
+    logs/<room>_<digest8>/relay/relay-pool.sqlite3
+    ```
+  - `relay_nodes` 表保存 relay URL、来源、manifest 版本、状态、RTT、成功/失败次数、权重、本地禁用标记和最近使用时间。
+  - `relay_manifests` 表保存 manifest id、版本、签名者指纹、抓取时间、过期时间、签名和原始 JSON。
+  - `relay_send_stats` 表按 room instance 记录每个 relay 的消息数、chunk 数、失败次数和最近使用时间。
+  - `relay_schedule_events` 表保存本机发送或接收过的 messageId/transferId、attempt、poolVersion、调度标签和 relay 子集摘要，便于排障和重传。
+  - `relay_missing_requests` 表保存待处理 missing message、missing chunk bitmap、重传次数和最近请求时间。
+  - SQLite 用于 relay pool 的状态学习、恢复、查询和加权选择；附件安全策略由文件系统隔离、MotW/noexec 和 UI 预览策略承担。
+
+- [ ] 实现多 relay 连接和发送调度。
+  - Host/Client 从单一 `serverUrl` 连接抽象改为 relay connection manager。
+  - WinUI Host/Join 页面的 Server URL 输入框在阶段 17 后由 config `[pool]` 和 room-dir 内的 `relay-pool.sqlite3` 替代。
+  - WinUI Host/Join 主界面移除 Server URL 栏；Host 创建房间只显示房间名、用户名/昵称和创建/加入相关按钮，Join 加入房间只显示房间名、用户名/昵称、导入房间和加入房间相关按钮。
+  - CLI Host 创建新房间时使用 `--pool <file>`；CLI Host/Client 复用既有 room instance 时使用 `--room-dir <dir>` 读取 `relay/relay-pool.sqlite3`。
+  - 每个 relay connection 复用现有 WebSocket 信令和 encrypted relay envelope。
+  - 小文本消息使用 `route:text` 选择 1 个或少量 relay 发送密文 payload。
+  - 文本 notice 使用 `route:notice` 选择独立 relay 子集发送 `messageId`、epoch、sender fingerprint、payloadHash 和 `poolVersion`。
+  - 接收端收到 notice 后检查本机 seen cache；缺少对应 payload 时发送 `missing_message(messageId)`。
+  - 发送端收到 missing request 后提升 `attempt`，用新的 deterministic relay 子集重发 payload。
+  - 同一 `messageId` 且 payloadHash 相同的副本按重复消息处理；同一 `messageId` 且 payloadHash 不同的副本标记为 fork/conflict 事件。
+  - GKA、PKI、pending join、close room 等控制消息使用更高 fanout 系数和独立调度标签，优先保障控制面可达性。
+  - relay 之间保持独立运行；可达性优化集中在客户端侧 relay pool 扩容、relay 重叠度提升、notice 高 fanout 和缺失内容重传。
+
+- [ ] 设计附件分片多路径增强。
+  - 附件分为控制面 manifest 和数据面 chunk。
+  - manifest 使用 room group key 加密，包含 transferId、fileSize、chunkSize、totalChunks、fileHash、chunkHashes 或 Merkle root、`poolVersion`、fanout 参数和调度版本。
+  - manifest notice 使用 `route:notice` 或 `route:manifest` 发送到较高 fanout relay 子集。
+  - 每个 chunk 绑定 room instance、sender、transferId、chunkIndex、totalChunks、attempt 和 AEAD nonce。
+  - chunk relay 子集由 `route:chunk`、transferId、chunkIndex、attempt 和 `poolVersion` 通过 `K_route` 确定。
+  - 接收端用 received bitmap 跟踪 chunk；超时后发送 missing bitmap/NACK。
+  - 发送端按 missing bitmap 对缺失 chunk 提升 `attempt` 并重新计算 relay 子集。
+  - 每个 chunk 先通过 AEAD tag 验证，再检查 chunk hash；所有 chunk 收齐后计算 fileHash 并与 manifest 对比。
+  - 纠删码作为可选增强：附件编码为 `n` 个 shard，接收端收到其中 `k` 个即可恢复。
+  - 纠删码服务稳定性和抗 relay 掉线；端到端加密继续承担内容机密性。
+
+- [ ] 更新 UI、CLI 和测试。
+  - WinUI 显示当前 relay pool 健康摘要，例如可用 relay 数、当前发送 relay 和最近失败情况。
+  - CLI 增加 relay 诊断命令，例如 `/relays`、`/relay-refresh`、`/relay-ban <url>`、`/relay-unban <url>`。
+  - 增加测试：单 relay、双 relay、三 relay、relay 中途掉线、relay 新增、manifest 过期、manifest 签名错误、message notice 缺失补发、payloadHash fork 检测、附件 missing bitmap 重传和最终 fileHash 校验。
+  - 增加安全测试：攻击者监控一个 relay 时，可见内容限于该 relay 子集上的 ciphertext、chunk 和 notice；监控所有 relay 时，可见内容限于应用层密文和元数据。

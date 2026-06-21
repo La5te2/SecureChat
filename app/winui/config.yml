@@ -1,2 +1,5 @@
 # SecureChat user settings. Delete this file to reset the UI.
 [chat]
+
+[pool]
+wss://chat.example.online:25566

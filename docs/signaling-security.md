@@ -22,11 +22,11 @@
 
 ## WSS 信令模式
 
-当前正式信令入口强制使用 `wss://`。Host/Client/WinUI 只接受 `wss://` Server URL。
+当前正式对外信令入口使用 `wss://`。Host/Client/WinUI 只校验 URL 语法，接受 `ws://` 和 `wss://`；明文入口由 Server 启动配置决定。Server 默认启用 TLS；`SECURECHAT_SIGNALING_TLS=0` 要求 loopback 绑定，并提供本机回环 WS backend。
 
 原因：
 
-- 明文 WebSocket 会暴露 HTTP upgrade、信令 JSON、room token、连接状态和中继 metadata；
+- 暴露在公网或跨主机网络上的明文 WebSocket 会暴露 HTTP upgrade、信令 JSON、room token、连接状态和中继 metadata；
 - 路径上的主动攻击者可以篡改未受 TLS 保护的信令；
 - 当前房间准入和成员身份已经依赖 PKI/GKA，继续保留明文信令只会增加误用入口。
 
@@ -55,10 +55,10 @@
 ## Nginx TLS 反向代理边界
 
 ```text
-Host/Client -- WSS --> Nginx -- local WSS --> SecureChat Server
+Host/Client -- WSS/protected tunnel --> fronting component -- local WS --> SecureChat Server
 ```
 
-Nginx 可以监听公网入口，完成外部 TLS 和 WebSocket upgrade，再把流量转发到本机 SecureChat Server。Server 仍只负责房间注册、成员状态和不透明加密中继。反向代理只改变传输入口，不改变应用层 PKI、GKA 和加密中继的安全边界。具体部署命令见 `docs/startup-guide.md`，证书获取和文件边界见 `docs/certificate-methods.md`。
+Nginx/Caddy 可以监听公网入口，完成外部 TLS 和 WebSocket upgrade，再把流量转发到本机 SecureChat Server。frp、SSH tunnel 等受保护隧道也可以作为外层接入组件。此时 SecureChat Server 可用 `SECURECHAT_SIGNALING_TLS=0` 监听 `127.0.0.1` WS backend。Server 仍只负责房间注册、成员状态和不透明加密中继。外层组件只改变传输入口，应用层 PKI、GKA 和加密中继安全边界保持一致。具体部署命令见 `docs/startup-guide.md`，证书获取和文件边界见 `docs/certificate-methods.md`。
 
 ## 密码处理
 

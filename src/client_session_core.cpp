@@ -28,14 +28,6 @@ bool startsWithIgnoreCase(const std::string& value, const std::string& prefix) {
     return true;
 }
 
-void requireWssServerUrl(const std::string& url) {
-    // Client 和 Host 使用同一条 WSS 入口规则。
-    // 不允许 ws://，避免用户误把明文信令当成正式部署路径。
-    if (!startsWithIgnoreCase(url, "wss://")) {
-        throw std::runtime_error("Server URL must start with wss://; ws:// signaling is disabled");
-    }
-}
-
 // 返回去除首尾 ASCII 空白后的副本。
 std::string trimCopy(std::string value) {
     const auto first = value.find_first_not_of(" \t\r\n");
@@ -152,7 +144,6 @@ ClientSessionCore::ClientSessionCore(
       mRoomDir(std::move(roomDir)),
       mKeyPassword(std::move(keyPassword)),
       mWsConfig(std::move(wsConfig)) {
-    requireWssServerUrl(mWsUrl);
     // Server 使用该不透明 token 注册和路由；显示房间名只留在本地 PKI 语义中。
     if (mRoomToken.empty()) throw std::runtime_error("room instance token is required");
     // X25519 密钥对按会话生成。公钥会在 join_room 中被签名；

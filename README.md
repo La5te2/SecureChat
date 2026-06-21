@@ -30,11 +30,11 @@ SecureChat 分为三个运行角色。
 
 SecureChat 有两层保护。
 
-第一层是传输层。`wss://` 使用 TLS 保护 Host/Client 到 Server 或反向代理之间的连接。当前正式入口只提供 WSS，Host/Client/WinUI 的 Server URL 必须使用 `wss://`。
+第一层是传输层。`wss://` 使用 TLS 保护 Host/Client 到 Server 或反向代理之间的连接。当前正式对外入口应使用 WSS。Nginx/Caddy 等 TLS 反向代理或受保护隧道工具可以把外部流量转发到 SecureChat Server 的本机回环 WS backend，该 backend 要求绑定 `127.0.0.1`、`localhost` 或 `::1`。
 
 第二层是应用层。文本、附件元数据和附件分片在发送端加密，在接收端解密。Server 只转发 ciphertext、nonce、tag 等 envelope 字段，不能读取聊天明文或附件明文。
 
-因此，Host/Client/WinUI 的 Server URL 必须以 `wss://` 开头。手动运行 `server` 且未配置 TLS 路径时，C++ Server 会自动生成本地/局域网开发证书；使用 `start_server.sh` 时，脚本会在未配置证书时使用 `certs/fullchain.pem` 和 `certs/privkey.pem`。
+因此，公网和跨主机入口应填写 `wss://`。手动运行 `server` 且未配置 TLS 路径时，C++ Server 会自动生成本地/局域网开发证书；使用 `start_server.sh` 时，脚本会在未配置证书时使用 `certs/fullchain.pem` 和 `certs/privkey.pem`。`start_server.sh --mode ws` 用于本机回环 WS backend。Host/Client/WinUI 只做 URL 语法校验，连接结果由 Server 监听模式决定。
 
 ### 成员 PKI
 
@@ -304,10 +304,10 @@ Host/Client 连接：
 
 ### Nginx TLS 反向代理
 
-也可以让 Nginx 监听公网 TLS 入口，SecureChat Server 只监听本机 WSS backend：
+也可以让 Nginx 监听公网 TLS 入口，SecureChat Server 监听本机回环 WS backend：
 
 ```text
-Host/Client -- WSS --> Nginx :25566 -- local WSS --> SecureChat Server 127.0.0.1:25567
+Host/Client -- WSS --> Nginx :25566 -- local WS --> SecureChat Server 127.0.0.1:25567
 ```
 
 后端 Server：
@@ -315,9 +315,7 @@ Host/Client -- WSS --> Nginx :25566 -- local WSS --> SecureChat Server 127.0.0.1
 ```bash
 export SECURECHAT_BIND_ADDRESS=127.0.0.1
 export SECURECHAT_PORT=25567
-export SECURECHAT_TLS_CERT_FILE=/path/to/backend-fullchain.pem
-export SECURECHAT_TLS_KEY_FILE=/path/to/backend-privkey.pem
-./out/build/x64-linux-release/server 25567
+./start_server.sh --mode ws
 ```
 
 Nginx 配置示例：
@@ -331,8 +329,7 @@ server {
     ssl_certificate_key /etc/letsencrypt/live/chat.example.com/privkey.pem;
 
     location / {
-        proxy_pass https://127.0.0.1:25567;
-        proxy_ssl_verify off;
+        proxy_pass http://127.0.0.1:25567;
 
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
@@ -483,6 +480,7 @@ logs/texts/<room>_<roomInstanceTokenDigest前8位>/<systemUsername>.sqlite3
 | `SECURECHAT_TLS_CERT_FILE` | Server TLS 证书链；手动运行 Server 时可留空以生成本地证书 |
 | `SECURECHAT_TLS_KEY_FILE` | Server TLS 私钥；手动运行 Server 时可留空以生成本地私钥 |
 | `SECURECHAT_TLS_KEY_PASS` | Server TLS 私钥密码 |
+| `SECURECHAT_SIGNALING_TLS` | Server 是否启用 TLS；默认启用，设为 `0` 时要求 loopback 绑定，用于本机回环 WS backend |
 | `SECURECHAT_LOCAL_TLS_CA` | Host/Client/WinUI 连接本地或局域网自签 WSS 时使用的服务器 CA |
 | `SECURECHAT_TLS_AUTO_DIR` | 手动运行 Server 时自动生成本地/局域网 TLS 材料的目录 |
 | `SECURECHAT_BIND_ADDRESS` | Server 监听地址 |
@@ -522,9 +520,9 @@ tail -f server/logs/server.log
 
 如需关闭 daemon 日志输出，可在启动前设置 `SECURECHAT_SERVER_LOG_ENABLED=0`。日志可能包含 room token、连接状态和脱敏后的成员标识。
 
-### 只能使用 wss
+### WSS 与本机 WS backend
 
-正式入口只接受 `wss://`。Server 永远以 TLS WebSocket 启动，Host/Client/WinUI 会拒绝 `ws://` URL。
+正式对外入口应使用 `wss://`。Nginx/Caddy、frp、SSH tunnel 等外层组件可以把外部受保护连接转发到 SecureChat Server 的本机 `127.0.0.1` WS backend。Host/Client/WinUI 只做 URL 语法校验，部署安全策略集中在 Server 监听边界和外层保护组件。
 
 ### 构建依赖下载需要代理
 

@@ -36,7 +36,7 @@ ChatCallbacks consoleCallbacks() {
 }
 
 void printUsage() {
-    std::cerr << "Usage: client <wss-url> --room-dir <dir> [username] [--nickname <name>] [--key-pass <pass>] [--daemon]\n";
+    std::cerr << "Usage: client <server-url> --room-dir <dir> [username] [--nickname <name>] [--key-pass <pass>] [--daemon]\n";
     std::cerr << "Commands: /image <path>, /file <path>, /to <fingerprint-prefix> <text|attachment-command>, /quit\n";
     std::cerr << "Options:\n";
     std::cerr << "  --daemon keeps the client connected without reading stdin.\n";

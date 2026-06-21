@@ -34,14 +34,6 @@ bool startsWithIgnoreCase(const std::string& value, const std::string& prefix) {
     return true;
 }
 
-void requireWssServerUrl(const std::string& url) {
-    // WSS 是唯一支持的对外信令入口。应用层 E2EE 仍保护消息内容，
-    // 但明文 WS 会暴露握手、信令 metadata 和流量形态，因此产品入口禁用。
-    if (!startsWithIgnoreCase(url, "wss://")) {
-        throw std::runtime_error("Server URL must start with wss://; ws:// signaling is disabled");
-    }
-}
-
 // 返回去除首尾 ASCII 空白后的副本。
 std::string trimCopy(std::string value) {
     const auto first = value.find_first_not_of(" \t\r\n");
@@ -157,7 +149,6 @@ HostSessionCore::HostSessionCore(
       mRoomToken(std::move(roomToken)),
       mRoomDir(std::move(roomDir)),
       mWsConfig(std::move(wsConfig)) {
-    requireWssServerUrl(mWsUrl);
     // Server 只注册该不透明 token。房间显示名留在本地 PKI 签名语义里。
     if (mRoomToken.empty()) throw std::runtime_error("room instance token is required");
     // K_G 不再由 Host 直接生成。

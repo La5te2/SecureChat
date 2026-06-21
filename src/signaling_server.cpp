@@ -6,6 +6,7 @@
 #include "secure_relay.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstdlib>
 #include <iomanip>
@@ -43,6 +44,27 @@ constexpr const char* serverBuildMarker = "securechat-server-20260614-ws-frame-b
 std::string envValue(const char* name) {
     const char* value = std::getenv(name);
     return value == nullptr ? std::string() : std::string(value);
+}
+
+bool envFlagEnabled(const std::string& value, bool defaultValue) {
+    if (value.empty()) return defaultValue;
+    std::string lowered;
+    lowered.reserve(value.size());
+    for (const auto ch : value) {
+        lowered.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
+    }
+    if (lowered == "1" || lowered == "true" || lowered == "yes" || lowered == "on") return true;
+    if (lowered == "0" || lowered == "false" || lowered == "no" || lowered == "off") return false;
+    throw std::runtime_error("SECURECHAT_SIGNALING_TLS must be 1/0, true/false, yes/no, or on/off");
+}
+
+bool isLoopbackBindAddress(const std::string& address) {
+    // 明文 WS 模式定位为本机回环后端。Nginx、Caddy、frp、SSH tunnel
+    // 等外层组件负责提供公网侧 TLS、鉴权或隧道保护。
+    return address == "127.0.0.1" ||
+           address == "localhost" ||
+           address == "::1" ||
+           address == "[::1]";
 }
 
 std::string sha256HexForLog(const std::string& value) {
@@ -385,10 +407,11 @@ void validateIncomingSignaling(const json& data) {
 SignalingServer::SignalingServer(uint16_t port) {
     rtc::WebSocketServer::Configuration config;
     config.port = port;
-    // 独立模式监听所有网卡。反向代理部署可设置
-    // SECURECHAT_BIND_ADDRESS=127.0.0.1，使只有 Nginx/Caddy 能访问后端 WSS。
+    // 独立模式监听所有网卡。本机回环后端部署设置
+    // SECURECHAT_BIND_ADDRESS=127.0.0.1，由外层代理或隧道组件接入。
     const auto bindAddress = envValue("SECURECHAT_BIND_ADDRESS");
-    config.bindAddress = bindAddress.empty() ? "0.0.0.0" : bindAddress;
+    const auto effectiveBindAddress = bindAddress.empty() ? std::string("0.0.0.0") : bindAddress;
+    config.bindAddress = effectiveBindAddress;
     // 避免半开或被遗弃的 WebSocket 握手占住公网信令端口，
     // 导致端口仍存活却无法接收新 Client。
     config.connectionTimeout = std::chrono::seconds(15);
@@ -397,15 +420,30 @@ SignalingServer::SignalingServer(uint16_t port) {
     // 公网 WSS 场景尤其明显。
     config.maxMessageSize = chat::protocol::MaxSignalingMessageBytes;
 
-    const auto tlsMaterial = chat::certs::resolveServerTlsMaterial();
+    chat::certs::ServerTlsMaterial tlsMaterial;
     const auto keyPass = envValue("SECURECHAT_TLS_KEY_PASS");
-    // WSS 是唯一对外信令模式。环境变量存在时使用用户提供的正式证书；
-    // 环境变量为空时生成本地/局域网开发证书，避免 Windows 手动启动还要先准备证书。
-    config.enableTls = true;
-    config.certificatePemFile = tlsMaterial.certFile;
-    config.keyPemFile = tlsMaterial.keyFile;
-    if (!keyPass.empty()) config.keyPemPass = keyPass;
-    mUrlScheme = "wss";
+    const auto tlsEnabled = envFlagEnabled(envValue("SECURECHAT_SIGNALING_TLS"), true);
+    if (tlsEnabled) {
+        // WSS 是唯一对外信令模式。环境变量存在时使用用户提供的正式证书；
+        // 环境变量为空时生成本地/局域网开发证书，避免 Windows 手动启动还要先准备证书。
+        tlsMaterial = chat::certs::resolveServerTlsMaterial();
+        config.enableTls = true;
+        config.certificatePemFile = tlsMaterial.certFile;
+        config.keyPemFile = tlsMaterial.keyFile;
+        if (!keyPass.empty()) config.keyPemPass = keyPass;
+        mUrlScheme = "wss";
+    }
+    else {
+        // 该分支提供本机回环 WS 后端。客户端侧只校验 URL 语法；
+        // Server 侧在源头要求 loopback 绑定。
+        if (!isLoopbackBindAddress(effectiveBindAddress)) {
+            throw std::runtime_error(
+                "SECURECHAT_SIGNALING_TLS=0 requires "
+                "SECURECHAT_BIND_ADDRESS=127.0.0.1, localhost, or ::1");
+        }
+        config.enableTls = false;
+        mUrlScheme = "ws";
+    }
 
     mServer = std::make_unique<rtc::WebSocketServer>(config);
     mServer->onClient([this](std::shared_ptr<rtc::WebSocket> ws) {
@@ -426,15 +464,18 @@ SignalingServer::SignalingServer(uint16_t port) {
 
     std::cout << "[signal] server running on " << mUrlScheme << "://"
               << *config.bindAddress << ":" << mServer->port() << std::endl;
-    if (tlsMaterial.generatedLocal) {
+    if (tlsEnabled && tlsMaterial.generatedLocal) {
         std::cout << "[signal] generated local WSS certificate cert=" << tlsMaterial.certFile
                   << " key=" << tlsMaterial.keyFile
                   << " ca=" << tlsMaterial.caFile << std::endl;
     }
-    else if (tlsMaterial.reusedLocal) {
+    else if (tlsEnabled && tlsMaterial.reusedLocal) {
         std::cout << "[signal] using local WSS certificate cert=" << tlsMaterial.certFile
                   << " key=" << tlsMaterial.keyFile
                   << " ca=" << tlsMaterial.caFile << std::endl;
+    }
+    else if (!tlsEnabled) {
+        std::cout << "[signal] loopback WS backend enabled" << std::endl;
     }
     std::cout << "[signal] build marker: " << serverBuildMarker
               << " maxMessageSize=" << chat::protocol::MaxSignalingMessageBytes

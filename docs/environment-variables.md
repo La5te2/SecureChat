@@ -4,7 +4,7 @@
 
 ## 总览
 
-当前共有 14 个 `SECURECHAT_*` 变量：
+当前共有 15 个 `SECURECHAT_*` 变量：
 
 ```text
 SECURECHAT_ALLOW_ROOT
@@ -16,6 +16,7 @@ SECURECHAT_SERVER_BIN
 SECURECHAT_SERVER_LOG_ENABLED
 SECURECHAT_SERVER_PID_FILE
 SECURECHAT_SERVER_STATE_DB
+SECURECHAT_SIGNALING_TLS
 SECURECHAT_TLS_AUTO_DIR
 SECURECHAT_LOCAL_TLS_CA
 SECURECHAT_TLS_CERT_FILE
@@ -33,6 +34,7 @@ SECURECHAT_TLS_KEY_PASS
 | `SECURECHAT_SERVER_PID_FILE` | `server.pid` | Server daemon pid 文件路径。 |
 | `SECURECHAT_SERVER_LOG_ENABLED` | `1` | `start_server.sh` 的 Server 日志输出开关；默认写入 `server/logs/server.log`，设为 `0` 时写入 `/dev/null`。 |
 | `SECURECHAT_SERVER_STATE_DB` | `server/state/<timestamp>.sqlite3` | Server 房间状态 SQLite 路径；未设置时每次启动生成新的 timestamp 状态库，设置后使用指定固定路径。SQLite 字段边界限定为 open/closed room instance 和 pending join 队列。 |
+| `SECURECHAT_SIGNALING_TLS` | `1` | Server 是否启用 TLS；设为 `0` 时要求 loopback 绑定，用于本机回环 WS backend。 |
 | `SECURECHAT_ALLOW_ROOT` | 空 | `start_server.sh` 默认拒绝 root 运行；临时诊断时设为 `1` 才允许 root。 |
 
 ## WSS/TLS
@@ -45,7 +47,7 @@ SECURECHAT_TLS_KEY_PASS
 | `SECURECHAT_LOCAL_TLS_CA` | 空 | Host/Client/WinUI 使用的本地服务器 CA PEM 路径；用于信任自动生成的本地或局域网 WSS 入口证书。 |
 | `SECURECHAT_TLS_AUTO_DIR` | `certs` | 手动运行 `server` 且 TLS 路径环境变量为空时，C++ Server 自动生成本地/局域网 TLS 材料的目录。 |
 
-`ws://` 明文 WebSocket 已禁用；Host/Client/WinUI 的 Server URL 必须使用 `wss://`。
+公网和跨主机入口应使用 `wss://`。`ws://` 作为本机回环 backend 使用；当 `SECURECHAT_SIGNALING_TLS=0` 时，Server 要求 loopback 绑定。
 
 ## 房间级成员身份
 

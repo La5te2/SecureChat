@@ -1,12 +1,12 @@
 # SecureChat 启动手册
 
-本文档说明 Windows 和 Linux 上启动 Server、Host、Client 的最小流程。当前信令入口使用 WSS，也就是 WebSocket over TLS；Host、Client 和 WinUI 的 Server URL 都必须以 `wss://` 开头。
+本文档说明 Windows 和 Linux 上启动 Server、Host、Client 的最小流程。当前对外信令入口使用 WSS，也就是 WebSocket over TLS。Host、Client 和 WinUI 接受 `ws://` 或 `wss://` 形式的 Server URL，公网和跨主机入口应使用 `wss://`。Nginx/Caddy 等 TLS 反向代理或受保护隧道工具可以把外部流量转发到本机回环 WS backend。
 
 ## 共同前提
 
 同一个房间的 Host 和 Client 需要使用相同的：
 
-- Server URL，例如 `wss://127.0.0.1:25566` 或 `wss://chat.example.com:25566`；
+- Server URL，例如 `wss://127.0.0.1:25566`、`wss://chat.example.com:25566`，或本机回环 backend 使用的 `ws://127.0.0.1:25567`；
 - room instance，也就是同一套 `logs/certs/<原始房间名>_<digest前8位>` 房间证书目录；
 - 本地/局域网自动 TLS 证书场景下，还需要同一个 `local-root-ca.pem`。
 
@@ -122,7 +122,7 @@ Client 会进入 pending join。回到 Host 窗口先查看 pending requestId，
 
 ## Windows：WinUI
 
-WinUI 不启动 Server，也不配置 Server 私钥。使用 WinUI 前，需要先启动一个正在监听的 WSS Server。
+WinUI 作为 Host/Client 前端运行，Server 由独立进程提供。使用 WinUI 前，需要先启动一个正在监听的 Server。公网和跨主机场景使用 WSS Server；外层代理或隧道后端可以使用 loopback WS Server。
 
 双击运行：
 
@@ -130,7 +130,7 @@ WinUI 不启动 Server，也不配置 Server 私钥。使用 WinUI 前，需要�
 app\winui\bin\x64\Release\net10.0-windows10.0.19041.0\win-x64\SecureChat.exe
 ```
 
-WinUI 的 Server URL 必须填写 `wss://...`。如果 Server 使用 Certbot 等系统信任 CA 签发的证书，WinUI 不需要额外配置 Server CA。如果 Server 使用自动生成的开发证书，在设置面板的 `Local Server TLS CA / 本地服务器 TLS 信任根` 中选择 `certs/local-root-ca.pem`。
+WinUI 的 Server URL 可以填写 `wss://...` 或 `ws://...`。公网和跨主机入口应使用 `wss://...`。如果 Server 使用 Certbot 等系统信任 CA 签发的证书，WinUI 不需要额外配置 Server CA。如果 Server 使用自动生成的开发证书，在设置面板的 `Local Server TLS CA / 本地服务器 TLS 信任根` 中选择 `certs/local-root-ca.pem`。
 
 Host 页填写 Room、Server URL、User 后点击启动房间，WinUI 会自动生成 `logs/certs/<原始房间名>_<digest前8位>/entrance.scp`。同一个 Host 可以创建多个同名房间，每次创建都会生成新的 room instance 和新的本地 room-dir。Host 页或 Join 页点击“加入房间”时，WinUI 总会弹出房间实例选择面板；用户确认具体实例后才会连接。Join 页首次加入时填写同一个 Room、Server URL、当前 User，点击“导入房间”，并在弹出的文件选择器中选择 Host 分发的 `entrance.scp`。Client 进入 pending join 后，Host 可以左键灰色 pending 成员卡片允许加入，右键灰色 pending 成员卡片会拒绝该申请。WinUI 不显示 pending requestId。
 
@@ -249,12 +249,12 @@ unset SECURECHAT_TLS_CERT_FILE SECURECHAT_TLS_KEY_FILE
 
 ## Linux：Nginx TLS 反向代理
 
-公网可使用 Nginx 监听 WSS 入口，SecureChat Server 只监听本机 backend。
+公网可使用 Nginx 监听 WSS 入口，SecureChat Server 监听本机回环 WS backend。
 
 拓扑：
 
 ```text
-Host/Client -- wss --> Nginx:25566 -- wss --> SecureChat Server 127.0.0.1:25567
+Host/Client -- wss --> Nginx:25566 -- ws --> SecureChat Server 127.0.0.1:25567
 ```
 
 安装 Nginx：
@@ -270,14 +270,14 @@ sudo apt install -y nginx openssl certbot python3-certbot-nginx
 sudo certbot certonly --nginx -d chat.example.com
 ```
 
-启动本机 backend：
+启动本机回环 backend：
 
 ```bash
 cd /opt/SecureChat
 export SECURECHAT_BIND_ADDRESS=127.0.0.1
 export SECURECHAT_PORT=25567
 export SECURECHAT_SERVER_PID_FILE=server-backend.pid
-./start_server.sh
+./start_server.sh --mode ws
 ```
 
 Nginx 配置示例：
@@ -291,8 +291,7 @@ server {
     ssl_certificate_key /etc/letsencrypt/live/chat.example.com/privkey.pem;
 
     location / {
-        proxy_pass https://127.0.0.1:25567;
-        proxy_ssl_verify off;
+        proxy_pass http://127.0.0.1:25567;
 
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
