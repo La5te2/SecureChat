@@ -820,8 +820,8 @@ PKI 身份认证现在强制绑定成员证书、临时 public key、GKA contrib
   - Client 和 Host 都在本地验证管理动作签名；Server 只保存状态和转发事件，不成为安全判断依据。
 
 - [x] 修改 Server 房间状态模型。
-  - Server 保存 room instance token、open/closed 状态、当前连接集合、Host 最近连接状态和 pending join 队列。
-  - Server 不保存 entrance secret、Root/Intermediate 私钥、成员私钥、聊天明文、应用层 group key 或附件明文。
+  - Server 内存状态保存 room instance token、open/closed 状态、当前连接集合、Host 最近连接状态和 pending join 队列。
+  - Server SQLite 字段边界限定为 open/closed room instance 状态和 pending join 原始请求。
   - Server 可以保存待转发的 opaque pending join 请求，但不能解释 CSR 或成员证书语义。
   - Server 对 closed 房间拒绝新消息、新入房申请和新成员状态写入。
   - Server 需要区分 Host disconnected、Host rejoined、room closed 和 member disconnected 四类事件。
@@ -875,19 +875,18 @@ PKI 身份认证现在强制绑定成员证书、临时 public key、GKA contrib
 - [x] 实现本机文本消息历史。
   - Host/Client 只把本端已经成功发送或成功解密显示的 `text` message 写入本机 SQLite。
   - 本机文本历史路径为 `logs/texts/<room>_<roomInstanceTokenDigest前8位>/<systemUsername>.sqlite3`，避免同一 base username 在不同房间级身份下互相覆盖。
-  - SQLite 保存 sender、actor id、display kind、正文、原始 message JSON 和 `isOwn`，WinUI 重进房间时用 `isOwn` 恢复左右气泡方向。
-  - 不保存附件内容、附件元数据、status/error/log、成员私钥、Root/Intermediate 私钥、`K_G`、pairwise key、admission secret 或完整 room instance token。
-  - Server 侧 SQLite 只保存 room instance open/closed 状态和 pending join 队列，不保存聊天明文、附件明文、`K_G` 或成员私钥。
+  - 本机文本历史 SQLite 字段边界限定为 sender、actor id、display kind、正文、原始 message JSON 和 `isOwn`，WinUI 重进房间时用 `isOwn` 恢复左右气泡方向。
+  - Server 侧 SQLite 字段边界限定为 room instance open/closed 状态和 pending join 队列。
   - Host/Client 的本地房间证书目录仍使用 `hash(roomInstanceToken)` 隔离房间级证书和 CSR 材料。
   - 附件接收缓存也使用 `<room>_<roomInstanceTokenDigest前8位>` 隔离；更细的附件隔离和预览控制留到阶段 16。
   - 房间 closed 后，Host/Client 只接受签名关闭事件并停止当前会话；本机历史可读取，但关闭后的房间不能继续追加新会话消息。
 
 - [x] 设计 Server 侧最小持久化状态。
   - Server 可以评估使用 SQLite 保存 room instance token、open/closed 状态、Host 最近连接状态和 pending join 队列；Server 默认状态目录与用户端 `logs/` 分离。
-  - Server SQLite 不保存聊天明文、附件明文、成员私钥、Root/Intermediate 私钥、群密钥或 entrance secret。
-  - Server 重启后可恢复 open 房间的状态标记，但不能恢复自己未保存也不应保存的应用层密钥。
+  - Server SQLite 字段边界限定为 room instance 状态和 pending join 队列。
+  - Server 重启后可恢复 open 房间的状态标记和 pending join 队列。
   - Server 持久化只服务可用性和断线恢复，不改变 Server 不可信安全边界。
-  - 已实现 SQLite 持久化 open/closed 房间状态和 pending join 队列；不保存密钥或聊天明文。
+  - 已实现 SQLite 持久化 open/closed 房间状态和 pending join 队列。
 
 - [x] 设计 room-local resource budget 接入点。
   - 资源预算从阶段 13 的指导原则落到阶段 15 的 Server 队列、pending join、状态变更和大附件中继限制。
@@ -914,7 +913,7 @@ PKI 身份认证现在强制绑定成员证书、临时 public key、GKA contrib
 
 ## 阶段 16：附件隔离和跨平台权限管控
 
-目标：把附件处理收束为“所有 file 附件默认有风险”。来源证书只用于判断“谁发来的”，不用于证明文件安全，也不让文件获得自动打开、自动运行或解除隔离的权利。阶段 16 不做附件风险分级数据库，不做本地附件 SQLite 审计台账，不做独立附件处理进程；当前重点是安全落地、默认隔离、明确提示、预览前校验和跨平台权限标记。
+目标：把附件处理收束为“所有 file 附件默认有风险”。来源证书只用于判断“谁发来的”，不用于证明文件安全，也不让文件获得自动打开、自动运行或解除隔离的权利。阶段 16 的持久化范围维持为 Server 状态库和本机文本历史库；当前重点是安全落地、默认隔离、明确提示、预览前校验和跨平台权限标记。
 
 - [x] 重构附件语义边界。
   - `file` 是通用任意文件附件通道，不限制扩展名或格式；接收端一律按有风险文件处理。
@@ -932,7 +931,7 @@ PKI 身份认证现在强制绑定成员证书、临时 public key、GKA contrib
 - [x] 明确阶段 16 的依赖边界和非目标。
   - 阶段 16 使用阶段 14 的房间级成员 PKI 来标识附件来源，但不把来源可信等同于文件安全。
   - 阶段 16 不做跨房间附件信任，不做证书吊销系统，不做 mTLS 依赖，不改变 Server 不可信 relay 边界。
-  - 阶段 16 不引入附件安全 SQLite。附件元数据只保存在当前消息显示和接收流程需要的内存对象中，退出后不额外保留附件审计台账。
+  - 阶段 16 的 SQLite 使用范围维持为 Server 状态库和本机文本历史库。附件元数据只保存在当前消息显示和接收流程需要的内存对象中，退出后清空。
   - 阶段 16 不实现杀毒、社区 hash 黑名单、企业 EDR、内核回调或系统级强制策略。
   - 平台权限能力不可用时必须降级为保守策略，例如只保存、不自动预览、不自动打开。
 

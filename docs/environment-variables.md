@@ -32,7 +32,7 @@ SECURECHAT_TLS_KEY_PASS
 | `SECURECHAT_BIND_ADDRESS` | `0.0.0.0` | Server 绑定地址；Nginx TLS 反向代理 backend 建议设为 `127.0.0.1`。 |
 | `SECURECHAT_SERVER_PID_FILE` | `server.pid` | Server daemon pid 文件路径。 |
 | `SECURECHAT_SERVER_LOG_ENABLED` | `1` | `start_server.sh` 的 Server 日志输出开关；默认写入 `server/logs/server.log`，设为 `0` 时写入 `/dev/null`。 |
-| `SECURECHAT_SERVER_STATE_DB` | `server/state/<timestamp>.sqlite3` | Server 房间状态 SQLite 路径；未设置时每次启动生成新的 timestamp 状态库，设置后使用指定固定路径。保存 open/closed room instance 和 pending join 队列，不保存聊天明文或密钥。 |
+| `SECURECHAT_SERVER_STATE_DB` | `server/state/<timestamp>.sqlite3` | Server 房间状态 SQLite 路径；未设置时每次启动生成新的 timestamp 状态库，设置后使用指定固定路径。SQLite 字段边界限定为 open/closed room instance 和 pending join 队列。 |
 | `SECURECHAT_ALLOW_ROOT` | 空 | `start_server.sh` 默认拒绝 root 运行；临时诊断时设为 `1` 才允许 root。 |
 
 ## WSS/TLS
