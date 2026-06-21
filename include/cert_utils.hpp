@@ -20,6 +20,7 @@ std::vector<unsigned char> base64Decode(const std::string& value);
 std::string hexEncode(const unsigned char* data, std::size_t size);
 std::string sha256Hex(const std::string& value);
 std::string sha256Hex(const unsigned char* data, std::size_t size);
+std::string hmacSha256Hex(const std::vector<unsigned char>& key, const std::string& message);
 
 void appendCanonicalField(std::string& out, const std::string& name, const std::string& value);
 

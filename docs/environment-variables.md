@@ -47,7 +47,7 @@ SECURECHAT_TLS_KEY_PASS
 | `SECURECHAT_LOCAL_TLS_CA` | 空 | Host/Client/WinUI 使用的本地服务器 CA PEM 路径；用于信任自动生成的本地或局域网 WSS 入口证书。 |
 | `SECURECHAT_TLS_AUTO_DIR` | `certs` | 手动运行 `server` 且 TLS 路径环境变量为空时，C++ Server 自动生成本地/局域网 TLS 材料的目录。 |
 
-公网和跨主机入口应使用 `wss://`。`ws://` 作为本机回环 backend 使用；当 `SECURECHAT_SIGNALING_TLS=0` 时，Server 要求 loopback 绑定。
+房间 relay pool 面向成员连接的入口使用 `wss://`。`ws://` 仅作为本机回环 backend 使用；当 `SECURECHAT_SIGNALING_TLS=0` 时，Server 要求 loopback 绑定，并由外层 TLS 入口或受保护隧道接入。
 
 ## 房间级成员身份
 

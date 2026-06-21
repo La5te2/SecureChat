@@ -1,16 +1,18 @@
 # SecureChat 启动手册
 
-本文档说明 Windows 和 Linux 上启动 Server、Host、Client 的最小流程。当前对外信令入口使用 WSS，也就是 WebSocket over TLS。Host、Client 和 WinUI 接受 `ws://` 或 `wss://` 形式的 Server URL，公网和跨主机入口应使用 `wss://`。Nginx/Caddy 等 TLS 反向代理或受保护隧道工具可以把外部流量转发到本机回环 WS backend。
+本文档说明 Windows 和 Linux 上启动 Server、Host、Client 的最小流程。当前对外信令入口使用 WSS，也就是 WebSocket over TLS。Host、Client 和 WinUI 从房间目录中的 relay pool 读取连接入口；WinUI 创建房间时从本地 `config.yml` 的 `[pool]` 段读取原始 pool。
 
 ## 共同前提
 
 同一个房间的 Host 和 Client 需要使用相同的：
 
-- Server URL，例如 `wss://127.0.0.1:25566`、`wss://chat.example.com:25566`，或本机回环 backend 使用的 `ws://127.0.0.1:25567`；
-- room instance，也就是同一套 `logs/certs/<原始房间名>_<digest前8位>` 房间证书目录；
+- relay pool，也就是一组 `wss://host:port` relay 入口；
+- room instance，也就是同一套 `logs/<原始房间名>_<digest前8位>` 房间目录；
 - 本地/局域网自动 TLS 证书场景下，还需要同一个 `local-root-ca.pem`。
 
-Server 只需要 TLS 证书和监听参数，不需要成员 PKI。Host 和 Client 使用 `--room-dir` 时会从房间目录自动读取 trust store、成员证书链、成员私钥和 room instance token。
+Server 只需要 TLS 证书和监听参数，不需要成员 PKI。Host 和 Client 使用 `--room-dir` 时会从房间目录自动读取 trust store、成员证书链、成员私钥、room instance token 和 relay pool。
+
+relay pool 可以只有一个入口，也可以有多个入口。多个入口时，每行写一个 `wss://host:port`。Host 会在完整 pool 上创建同一个 room instance；Client 获批后会连接完整 pool。pool 地址集合由创建房间时导入的文件决定，运行时不新增地址；每次发送时从当前可用子集 `M(t)` 中选择 relay。pending join 使用 admission secret 选择 relay，GKA 完成后的文本和附件分片使用 room group key 选择 relay。
 
 ## Server TLS 证书选择
 
@@ -81,8 +83,9 @@ Server 会自动生成 `certs/server-chain.pem`、`certs/server-key.pem` 和 `ce
 在项目根目录执行。`create-entrance` 输出 Host 的房间目录；Client 使用 Host 分发的 `entrance.scp` 执行 `import-entrance` 后，会在本机生成成员私钥和加密运行材料。`roomDir` 末级目录名形如 `<原始房间名>_<digest前8位>`。成员证书由后续联机 `/approve` 自动签发，不需要普通用户手动运行 `sign-csr`。
 
 ```powershell
-.\out\build\x64-release\cert.exe create-entrance --room secure-room --phrase "use-a-long-random-room-phrase" --host alice --out logs\certs
-.\out\build\x64-release\cert.exe import-entrance --entrance logs\certs\<room-dir>\entrance.scp --phrase "use-a-long-random-room-phrase" --user bob --out logs\certs
+Set-Content -Encoding UTF8 relay-pool.txt "wss://127.0.0.1:25566"
+.\out\build\x64-release\cert.exe create-entrance --room secure-room --phrase "use-a-long-random-room-phrase" --host alice --pool relay-pool.txt --out logs
+.\out\build\x64-release\cert.exe import-entrance --entrance logs\<room-dir>\certs\entrance.scp --phrase "use-a-long-random-room-phrase" --user bob --out logs
 ```
 
 ## Windows：启动 Host
@@ -96,7 +99,7 @@ $env:SECURECHAT_LOCAL_TLS_CA="certs\local-root-ca.pem"
 创建房间：
 
 ```powershell
-.\out\build\x64-release\host.exe --server wss://127.0.0.1:25566 --room-dir logs\certs\<room-dir> alice
+.\out\build\x64-release\host.exe --room-dir logs\<room-dir> alice
 ```
 
 ## Windows：启动 Client
@@ -110,7 +113,7 @@ $env:SECURECHAT_LOCAL_TLS_CA="certs\local-root-ca.pem"
 加入房间：
 
 ```powershell
-.\out\build\x64-release\client.exe wss://127.0.0.1:25566 --room-dir logs\certs\<room-dir> bob
+.\out\build\x64-release\client.exe --room-dir logs\<room-dir> bob
 ```
 
 Client 会进入 pending join。回到 Host 窗口先查看 pending requestId，再审批：
@@ -130,9 +133,9 @@ WinUI 作为 Host/Client 前端运行，Server 由独立进程提供。使用 Wi
 app\winui\bin\x64\Release\net10.0-windows10.0.19041.0\win-x64\SecureChat.exe
 ```
 
-WinUI 的 Server URL 可以填写 `wss://...` 或 `ws://...`。公网和跨主机入口应使用 `wss://...`。如果 Server 使用 Certbot 等系统信任 CA 签发的证书，WinUI 不需要额外配置 Server CA。如果 Server 使用自动生成的开发证书，在设置面板的 `Local Server TLS CA / 本地服务器 TLS 信任根` 中选择 `certs/local-root-ca.pem`。
+WinUI 的 Host/Join 主界面显示 Room、User 和房间操作按钮。Host 创建房间时从 `config.yml` 的 `[pool]` 段读取 relay pool，每行一个 `wss://host:port`。如果 Server 使用 Certbot 等系统信任 CA 签发的证书，WinUI 可以直接使用系统信任链。如果 Server 使用自动生成的开发证书，在设置面板的 `Local Server TLS CA / 本地服务器 TLS 信任根` 中选择 `certs/local-root-ca.pem`。
 
-Host 页填写 Room、Server URL、User 后点击启动房间，WinUI 会自动生成 `logs/certs/<原始房间名>_<digest前8位>/entrance.scp`。同一个 Host 可以创建多个同名房间，每次创建都会生成新的 room instance 和新的本地 room-dir。Host 页或 Join 页点击“加入房间”时，WinUI 总会弹出房间实例选择面板；用户确认具体实例后才会连接。Join 页首次加入时填写同一个 Room、Server URL、当前 User，点击“导入房间”，并在弹出的文件选择器中选择 Host 分发的 `entrance.scp`。Client 进入 pending join 后，Host 可以左键灰色 pending 成员卡片允许加入，右键灰色 pending 成员卡片会拒绝该申请。WinUI 不显示 pending requestId。
+Host 页填写 Room 和 User 后点击启动房间，WinUI 会自动生成 `logs/<原始房间名>_<digest前8位>/certs/entrance.scp`。同一个 Host 可以创建多个同名房间，每次创建都会生成新的 room instance 和新的本地 room-dir。Host 页或 Join 页点击“加入房间”时，WinUI 总会弹出房间实例选择面板；用户确认具体实例后才会连接。Join 页首次加入时填写同一个 Room 和当前 User，点击“导入房间”，并在弹出的文件选择器中选择 Host 分发的 `entrance.scp`。Client 导入后会在本机 room-dir 的 `certs/entrance.scp` 保存准入副本。Client 进入 pending join 后，Host 可以左键灰色 pending 成员卡片允许加入，右键灰色 pending 成员卡片会拒绝该申请。WinUI 不显示 pending requestId。
 
 ## Linux：构建
 
@@ -193,8 +196,9 @@ chmod +x start_server.sh stop_server.sh
 
 ```bash
 cd ~/SecureChat
-./out/build/x64-linux-release/cert create-entrance --room secure-room --phrase "use-a-long-random-room-phrase" --host alice --out logs/certs
-./out/build/x64-linux-release/cert import-entrance --entrance logs/certs/<room-dir>/entrance.scp --phrase "use-a-long-random-room-phrase" --user bob --out logs/certs
+printf '%s\n' 'wss://127.0.0.1:25566' > relay-pool.txt
+./out/build/x64-linux-release/cert create-entrance --room secure-room --phrase "use-a-long-random-room-phrase" --host alice --pool relay-pool.txt --out logs
+./out/build/x64-linux-release/cert import-entrance --entrance logs/<room-dir>/certs/entrance.scp --phrase "use-a-long-random-room-phrase" --user bob --out logs
 ```
 
 ## Linux：启动 Host
@@ -209,7 +213,7 @@ export SECURECHAT_LOCAL_TLS_CA=certs/local-root-ca.pem
 创建房间：
 
 ```bash
-./out/build/x64-linux-release/host --server wss://127.0.0.1:25566 --room-dir logs/certs/<room-dir> alice
+./out/build/x64-linux-release/host --room-dir logs/<room-dir> alice
 ```
 
 ## Linux：启动 Client
@@ -224,7 +228,7 @@ export SECURECHAT_LOCAL_TLS_CA=certs/local-root-ca.pem
 加入房间：
 
 ```bash
-./out/build/x64-linux-release/client wss://127.0.0.1:25566 --room-dir logs/certs/<room-dir> bob
+./out/build/x64-linux-release/client --room-dir logs/<room-dir> bob
 ```
 
 Client 会进入 pending join。回到 Host 终端先查看 pending requestId，再审批：
@@ -314,8 +318,10 @@ sudo nginx -s reload
 Host/Client 连接 Nginx 入口：
 
 ```bash
-./out/build/x64-linux-release/host --server wss://chat.example.com:25566 --room-dir logs/certs/<room-dir> alice
-./out/build/x64-linux-release/client wss://chat.example.com:25566 --room-dir logs/certs/<room-dir> bob
+printf '%s\n' 'wss://chat.example.com:25566' > relay-pool.txt
+./out/build/x64-linux-release/cert create-entrance --room secure-room --phrase "use-a-long-random-room-phrase" --host alice --pool relay-pool.txt --out logs
+./out/build/x64-linux-release/host --room-dir logs/<room-dir> alice
+./out/build/x64-linux-release/client --room-dir logs/<room-dir> bob
 ```
 
 ## 常用聊天命令

@@ -11,6 +11,7 @@ struct ChatCallbacks {
     std::function<void(const std::string&)> onError;
     std::function<void(const std::string&)> onMessage;
     std::function<void(const std::string&)> onStatus;
+    std::function<void(const std::string&)> onRelayStatus;
     std::function<void(const std::string&)> onImage;
     std::function<void(const std::string&)> onFile;
     std::function<void(const std::string&)> onVoice;

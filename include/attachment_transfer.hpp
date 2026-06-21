@@ -34,6 +34,10 @@ struct ReceiveSlot {
     std::string path;
     std::size_t expectedSize = 0;
     std::size_t receivedSize = 0;
+    std::size_t chunkSize = 0;
+    std::string fileHash;
+    std::vector<std::string> chunkHashes;
+    std::vector<bool> receivedChunks;
 };
 
 // 向暂存传输追加一个已解密二进制中继分片后的结果。
@@ -55,7 +59,10 @@ public:
         Kind kind,
         const std::string& transferId,
         const std::string& name,
-        std::size_t expectedSize);
+        std::size_t expectedSize,
+        std::size_t chunkSize,
+        std::string fileHash,
+        std::vector<std::string> chunkHashes);
     // 返回某个发送者当前是否还有待接收的二进制载荷。
     bool has(const std::string& key) const;
     // 返回活动传输 id，用于校验协议标记。
@@ -63,7 +70,7 @@ public:
     // 清除断连发送者的所有待接收传输。
     void clear(const std::string& key);
     // 向磁盘追加一个二进制分片；传输完成后清空槽位。
-    ReceiveChunkResult appendChunk(const std::string& key, const rtc::binary& data);
+    ReceiveChunkResult appendChunk(const std::string& key, std::size_t offset, const rtc::binary& data);
 
 private:
     mutable std::mutex mMutex;
@@ -96,12 +103,22 @@ std::size_t maxTransferBytes(Kind kind);
 
 // 从 *_meta 载荷中提取并校验预期二进制大小。
 std::size_t expectedSizeFromMeta(const Message& msg, Kind kind);
+// 从 *_meta 载荷中提取分片大小、整体摘要和分片摘要列表。
+std::size_t chunkSizeFromMeta(const Message& msg);
+std::string fileHashFromMeta(const Message& msg);
+std::vector<std::string> chunkHashesFromMeta(const Message& msg);
+// 从 *_binary 载荷中提取分片偏移，用于乱序分片重组。
+std::size_t chunkOffsetFromMessage(const Message& msg);
 
 // 从协议载荷中提取并校验传输 id。
 std::string transferIdFromMessage(const Message& msg);
 
 // 创建紧凑 id，用于匹配 *_meta、*_binary 标记和取消消息。
 std::string makeTransferId();
+
+// 计算附件整体和分片摘要，用于接收端完整性校验。
+std::string sha256Hex(const std::vector<unsigned char>& data);
+std::vector<std::string> chunkSha256Hexes(const std::vector<unsigned char>& data, std::size_t chunkSize);
 
 // 检查磁盘文件字节是否符合声明类型要求的文件头。
 bool hasExpectedFileSignature(const std::string& filePath, Kind kind);

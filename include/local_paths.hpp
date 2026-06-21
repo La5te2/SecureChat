@@ -10,13 +10,14 @@ namespace chat::local_paths {
 // 把用户可读名称压成适合 Windows/Linux 文件名的短标签。
 std::string sanitizePathComponent(const std::string& value, const std::string& fallback);
 
-// 返回 <room_base_name>_<SHA256(roomInstanceToken)前8位>，与 logs/certs 的目录规则保持一致。
+// 返回 <room_base_name>_<SHA256(roomInstanceToken)前8位>，作为 room instance 根目录名。
 std::string roomInstanceLabel(const std::string& roomName, const std::string& roomToken);
 
-// 返回安全的用户文件名。用于 logs/texts/<room>_<roomInstanceTokenDigest前8>/<system-username>.sqlite3。
+// 返回安全的用户文件名。用于 logs/<room>_<digest8>/texts/<system-username>.sqlite3。
 std::string userFileStem(const std::string& systemUsername);
 
 std::filesystem::path logsRoot();
+std::filesystem::path roomRoot(const std::string& roomName, const std::string& roomToken);
 std::filesystem::path attachmentDirectory(const std::string& kind, const std::string& roomName, const std::string& roomToken);
 std::filesystem::path textHistoryDatabase(const std::string& roomName, const std::string& roomToken, const std::string& systemUsername);
 

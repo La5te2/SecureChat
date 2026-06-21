@@ -13,6 +13,7 @@
 #include <rtc/rtc.hpp>
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -38,6 +39,7 @@ public:
         std::string nickname,
         chat::pki_application::IdentityContext identity,
         std::string roomToken,
+        std::string admissionSecret,
         std::string roomDir = {},
         std::string keyPassword = {},
         rtc::WebSocket::Configuration wsConfig = {});
@@ -73,16 +75,64 @@ public:
 private:
     // 排队一次本地关闭，并携带用户可见原因。
     void requestShutdown(const std::string& reason);
-    // 将原始 WebSocket 帧移出 libdatachannel 回调线程。
-    void enqueueSignalingMessage(std::string payload);
+    struct SignalingFrame {
+        std::string payload;
+        std::string relayUrl;
+    };
+
+    // 将原始 WebSocket 帧移出 libdatachannel 回调线程，并保留来源 relay。
+    void enqueueSignalingMessage(std::string payload, std::string relayUrl);
     // 串行协议 worker，负责 JSON 解析、PKI 验证和 GKA 工作。
     void signalingWorkerLoop();
     // 停止并 join 协议 worker，不直接操作 WebSocket。
     void stopSignalingWorker();
     // 分发 joined、房间成员、加密中继和错误事件。
-    void handleSignalingMessage(const std::string& s);
+    void handleSignalingMessage(const SignalingFrame& frame);
+    // 当前是否仍有至少一个 relay 可用于发送。
+    bool hasOpenRelay() const;
+    // 发送前尝试恢复已经关闭的 relay，使重启后的 relay 能重新进入可用集合。
+    void reconnectClosedRelays();
+    // 发出当前 relay pool 健康摘要给 CLI/WinUI。
+    void emitRelayStatus();
+    // 判断指定 relay 是否已经过了本机沉默期。
+    bool relayRetryAllowed(std::size_t relayIndex) const;
+    // relay 成功连接后清除沉默期和失败计数。
+    void markRelayHealthy(std::size_t relayIndex, const std::string& url);
+    // relay 失败后进入沉默期，避免坏 relay 持续刷屏。
+    bool markRelayFailure(std::size_t relayIndex, const std::string& url, const std::string& status);
+    // 查找 WebSocket 指针对应的 relay URL。
+    std::string relayUrlFor(const std::shared_ptr<rtc::WebSocket>& relay) const;
+    // 从 room relay pool 中按房间群密钥派生的调度摘要选择 relay。
+    std::shared_ptr<rtc::WebSocket> chooseRelayForSend(const Message& msg, const std::string& targetId);
+    // 首次准入流程按 admission secret 排序，连接第一个未处于沉默期的 relay。
+    void connectAdmissionRelay();
+    // 连接指定 relay 并发送 join_room。首次申请和后续静默绑定共用该路径。
+    void connectRelay(std::size_t relayIndex);
+    // 打开尚未连接的 relay。首次 entrance 入房只打开一个 relay，获批后再绑定剩余 relay。
+    void connectRemainingRelays();
     // 通过不可信 Server 发送一条加密中继消息。
     bool sendRelayMessage(const Message& msg, const std::string& senderId, const std::string& senderName, const std::string& senderKind, const std::string& targetId);
+    struct ReliableOutbound {
+        Message message;
+        std::string senderId;
+        std::string senderName;
+        std::string senderKind;
+        std::string targetId;
+        std::string messageId;
+        std::string payloadHash;
+        int retryCount = 0;
+    };
+    // 发送已经完成 pairwise 包装和可靠元数据标记的应用载荷。
+    bool sendPreparedRelayMessage(ReliableOutbound outbound, bool emitNotice);
+    // 为可恢复 payload 写入 messageId/payloadHash，并保存本机重传副本。
+    void ensureReliableFields(Message& msg);
+    void rememberReliableOutbound(const ReliableOutbound& outbound);
+    // 记录入站 payload，拒绝重复消息和同 id 异 hash 的异常 payload。
+    bool rememberReliableInbound(const Message& msg);
+    // notice/missing 都走加密中继；notice 只声明有 payload，missing 请求发送方重发。
+    void sendReliableNotice(const ReliableOutbound& outbound);
+    void handleReliableNotice(const Message& msg);
+    void handleMissingMessage(const Message& msg);
     // 为 targetId 把私发 Message 包装进双方私发内层加密。
     Message wrapPairwiseForTarget(const Message& msg, const std::string& targetId);
     // 打开一个发给本 Client 的双方私发包装。
@@ -123,6 +173,8 @@ private:
     std::string mRoomId;
     // Server 把该 token 当作 roomId；人类可读 room id 只留在本地 UI 和 PKI 语义中。
     std::string mRoomToken;
+    // entrance.scp 派生出的房间准入 secret，用于 pending join 的加密和 relay 选择。
+    std::string mAdmissionSecret;
     std::string mRoomDir;
     std::string mKeyPassword;
     std::string mBaseUsername;
@@ -136,6 +188,10 @@ private:
     std::unordered_map<std::string, std::string> mMemberFingerprintsById;
     std::unordered_set<std::string> mRecentRelayIds;
     std::deque<std::string> mRecentRelayOrder;
+    std::mutex mReliableMutex;
+    std::unordered_map<std::string, ReliableOutbound> mReliableOutbound;
+    std::unordered_map<std::string, std::string> mReliableSeen;
+    std::deque<std::string> mReliableSeenOrder;
     ChatCallbacks mCallbacks;
     std::shared_ptr<rtc::WebSocket> mWs;
     rtc::WebSocket::Configuration mWsConfig;
@@ -145,9 +201,18 @@ private:
     std::uint64_t mGroupKeyEpoch = 0;
     std::mutex mSignalingQueueMutex;
     std::condition_variable mSignalingQueueCv;
-    std::deque<std::string> mSignalingQueue;
+    std::deque<SignalingFrame> mSignalingQueue;
     std::thread mSignalingThread;
     std::atomic_bool mSignalingWorkerStopping = false;
+    std::vector<std::string> mRelayUrls;
+    std::vector<std::shared_ptr<rtc::WebSocket>> mRelays;
+    std::vector<bool> mRelayOpen;
+    mutable std::mutex mRelayMutex;
+    std::vector<std::chrono::steady_clock::time_point> mRelayNextRetryAt;
+    std::vector<int> mRelayFailureStreak;
+    std::vector<bool> mRelayFailureReported;
+    std::size_t mRelaySendCursor = 0;
+    std::uint64_t mLastGkaContributionEpoch = 0;
     // 仅在 Server 接受 join_room 并分配 clientId 后为 true。
     // 此前关闭表示准入/连接失败，而不是聊天中断。
     std::atomic_bool mJoinedRoom = false;

@@ -20,9 +20,21 @@
 
 创建/加入房间和成员状态不是聊天消息，但仍然敏感。CLI 的 room-dir 路径和 WinUI 的自动 entrance 导入流程都会读取 opaque room instance token，Server 用该 token 注册和路由房间；加密中继 envelope 的连接 id、大小和时序仍可能暴露通信模式。`encrypted_relay` envelope 是应用层密文，Server 只负责转发。
 
+## 房间级 Relay Pool
+
+Host 创建 `entrance.scp` 时会把 relay pool manifest 写入准入容器的保密 payload。Client 导入 `entrance.scp` 后生成同一份 `relay/relay-pool.sqlite3` 本地副本。Host/Client 启动时读取完整 pool，并尝试连接 pool 中的 WSS relay。该 pool 是房间级固定候选集合 `N`，运行时不追加新地址；每次发送时从本机当前可用子集 `M(t) ⊆ N` 中选择 relay。连接失败的 relay 会进入 degraded/offline 和本机沉默期，同一次失败尝试只记录一次错误；沉默期内不重复重连或刷屏提示，后续发送前再尝试恢复。
+
+Host 在完整 pool 上创建同一个 room instance。Client 首次加入时从 pool 中选择一个 admission relay 发送 pending join；如果该 relay 连接失败，Client 会按 admission secret 派生的排序尝试下一个未处于沉默期的 relay。Host 在产生 pending join 的 relay 上 approve 或 reject。Client 获批并安装房间级成员证书后，会自动连接剩余 relay。Host 对同一已验证成员在其他 relay 上的重复 pending join 做静默批准，不生成新的 pending 卡片，也不触发新的 GKA epoch。
+
+SecureChat 使用一套固定的确定性 relay selector。selector 会对 `M(t)` 中的每个 relay 计算 HMAC-SHA256 score，并按 score 得到 relay 顺序。pending join 阶段使用 admission secret；GKA 完成后的文本、附件元数据和附件分片使用当前 room group key、room token、epoch、消息类型、routeNonce、messageId、transferId/chunkIndex 和 attempt 等字段派生调度摘要。单 relay 投递取当前 payload 对应排序的第一项，因此相同 pool 长期可用时，不同消息仍会得到不同 relay 顺序。Host 只向已经确认 `room_created` 的 relay 发送房间控制帧和应用中继。relay 只能看到自己承载的 ciphertext、帧大小、连接 id 和时序。Host 显式关闭房间时，`close_room` 会向完整 pool 中已 ready 的 relay 投递同一个 Host 签名关闭事件。
+
+附件元数据携带整体文件摘要和分片摘要列表。接收端先验证加密中继 AEAD，再按 offset 写入分片并校验每个 chunk hash；全部分片收齐后计算最终 fileHash。该设计支持不同 relay 上的分片乱序到达，并把损坏、错序拼接或篡改分片转化为本地校验失败。
+
+文本、附件元数据和附件分片带有 `messageId` 和 `payloadHash`。发送方保存短期重传副本，并在 payload 发送成功后发送加密 `relay_notice`。接收端收到 notice 后检查 seen cache；缺少对应 payload 时发送加密 `missing_message`。发送方收到 missing request 后提升 `attempt` 并重新计算 relay 顺序。相同 `messageId` 且 `payloadHash` 一致的副本用于重传去重；相同 `messageId` 但 `payloadHash` 不一致的 payload 被拒绝为异常投递。notice/missing 本身也走应用层加密中继，Server/Relay 看到的是密文 envelope。
+
 ## WSS 信令模式
 
-当前正式对外信令入口使用 `wss://`。Host/Client/WinUI 只校验 URL 语法，接受 `ws://` 和 `wss://`；明文入口由 Server 启动配置决定。Server 默认启用 TLS；`SECURECHAT_SIGNALING_TLS=0` 要求 loopback 绑定，并提供本机回环 WS backend。
+当前正式对外信令入口使用 `wss://`。Host/Client/WinUI 从 room instance 的 relay pool 读取连接入口，pool 中的成员可达入口使用 `wss://`。Server 默认启用 TLS；`SECURECHAT_SIGNALING_TLS=0` 要求 loopback 绑定，并提供本机回环 WS backend 供外层 TLS 入口或受保护隧道接入。
 
 原因：
 
@@ -85,7 +97,6 @@ Host 可以通过普通输入框发送以下本地管理命令：
 /approve <request-id>
 /reject <request-id> [reason]
 /stop_session
-/close_room
 ```
 
 `/silence` 和 `/unsilence` 会转换为 Host 到 Server 的 `silence_client` / `unsilence_client` 信令。Host 本地先用至少 8 位证书指纹前缀解析目标成员。Server 验证发送方确实是当前 room 的 Host 后，只在当前房间内记录目标 clientId 的发送限制。被禁言 Client 保持连接，可以继续参与后续 GKA epoch，但它发送 `encrypted_relay` 时 Server 返回 `member is silenced`，不会转发文本或附件。
@@ -96,7 +107,7 @@ Host 可以通过普通输入框发送以下本地管理命令：
 
 私发消息和私发附件的目标使用证书指纹前缀，前缀至少 8 位十六进制字符，大小写不敏感。nickname、displayName、base username 和 system username 都不作为私发路由目标。WinUI 左键成员卡片复制证书指纹前 8 位，完整指纹保留在程序内部；Host 可以通过 `/list` 显式查看完整指纹。
 
-`/stop_session` 和 `/close_room` 会转换为 Host 到 Server 的 `close_room` 信令。该控制消息包含 Host 房间级证书签名，签名内容绑定 room instance token、动作类型、epoch 和 payload digest。Server 验证发送连接是当前 room 的 Host 后，广播 `room_closed` 并移除该房间；Client 本地验证 Host 签名后才接受房间关闭事件。Host 关闭 WinUI、Ctrl+C、进程退出或网络瞬断不会发送 `close_room`，Server 只广播 `host_disconnected` 并保留房间状态。Host 用同一 room token 重新连接时可以重新接管房间；Host 会从 `room_members` 重新验证已有 Client identity，再发起后续 GKA。
+`/stop_session` 会转换为 Host 到 Server 的 `close_room` 信令。该控制消息包含 Host 房间级证书签名，签名内容绑定 room instance token、动作类型、epoch 和 payload digest。Server 验证发送连接是当前 room 的 Host 后，广播 `room_closed` 并移除该房间；Client 本地验证 Host 签名后才接受房间关闭事件。Host 关闭 WinUI、点击 WinUI 的 `Exit / 离开房间`、Ctrl+C、`/exit`、进程退出或网络瞬断只表示 Host disconnected，Server 广播 `host_disconnected` 并保留房间状态。Host 用同一 room token 重新连接时可以重新接管房间；Host 会从 `room_members` 重新验证已有 Client identity，再发起后续 GKA。
 
 ## 恶意 Server 行为边界
 

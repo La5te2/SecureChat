@@ -86,6 +86,7 @@ public sealed partial class MainWindow : Window
     private LocalRoomInstanceInfo? selectedRoomInstance;
     private System.Threading.Tasks.TaskCompletionSource<LocalRoomInstanceInfo?>? roomInstanceSelectionSource;
     private string activeVoiceRecordingPath = "";
+    private string relayStatusText = "-";
     private System.Threading.Tasks.Task? voiceStartTask;
     private bool voiceRecording;
     private bool voiceRecordingStopping;
@@ -277,23 +278,13 @@ public sealed partial class MainWindow : Window
     [DllImport("winmm.dll", CharSet = CharSet.Unicode)]
     private static extern bool mciGetErrorString(int errorCode, StringBuilder errorText, int errorTextSize);
 
-    private static bool IsWebSocketServerUrl(string value)
-    {
-        return Uri.TryCreate(value, UriKind.Absolute, out var uri) &&
-            (uri.Scheme.Equals("wss", StringComparison.OrdinalIgnoreCase) ||
-             uri.Scheme.Equals("ws", StringComparison.OrdinalIgnoreCase));
-    }
-
     private bool TryReadSessionInputs(
         TextBox roomBox,
-        TextBox serverBox,
         TextBox userBox,
         out string room,
-        out string serverUrl,
         out string user)
     {
         room = roomBox.Text.Trim();
-        serverUrl = serverBox.Text.Trim();
         user = userBox.Text.Trim();
         if (room.Length == 0)
         {
@@ -305,17 +296,30 @@ public sealed partial class MainWindow : Window
             AddLine("error", "User is required.");
             return false;
         }
-        if (!IsWebSocketServerUrl(serverUrl))
+        return true;
+    }
+
+    private bool ApplyRelayPoolEnvironment()
+    {
+        var configPath = AppConfigPath();
+        if (!File.Exists(configPath))
         {
-            AddLine("error", "Server URL must start with ws:// or wss://.");
+            AddLine("error", "Relay pool config is missing.");
             return false;
         }
+
+        if (NativeMethods.chat_set_environment_variable("SECURECHAT_RELAY_POOL_FILE", configPath) == 0)
+        {
+            AddLine("error", "Failed to set relay pool config.");
+            return false;
+        }
+
         return true;
     }
 
     private async void HostJoin_Click(object sender, RoutedEventArgs e)
     {
-        if (!TryReadSessionInputs(HostRoomBox, HostServerUrlBox, HostUserBox, out var room, out var serverUrl, out var user))
+        if (!TryReadSessionInputs(HostRoomBox, HostUserBox, out var room, out var user))
         {
             return;
         }
@@ -332,7 +336,6 @@ public sealed partial class MainWindow : Window
         // 用户显式选择 room instance 后，WinUI 使用隐藏 room-dir 启动 Host。
         // 同名房间不会再由程序暗中选择“最新”的本地目录。
         var ok = NativeMethods.chat_host_start(
-            serverUrl,
             selected.roomDir,
             user,
             nickname,
@@ -347,11 +350,15 @@ public sealed partial class MainWindow : Window
 
     private void HostCreate_Click(object sender, RoutedEventArgs e)
     {
-        if (!TryReadSessionInputs(HostRoomBox, HostServerUrlBox, HostUserBox, out var room, out var serverUrl, out var user))
+        if (!TryReadSessionInputs(HostRoomBox, HostUserBox, out var room, out var user))
         {
             return;
         }
         if (!ApplyServerTlsEnvironment())
+        {
+            return;
+        }
+        if (!ApplyRelayPoolEnvironment())
         {
             return;
         }
@@ -361,7 +368,6 @@ public sealed partial class MainWindow : Window
         // 创建房间时生成新的房间级 Root/Intermediate、Host 成员证书和 entrance.scp。
         // 监听、TLS/WSS 和 relay 都由外部 Server 进程处理。
         var ok = NativeMethods.chat_host_start_auto(
-            serverUrl,
             room,
             user,
             nickname,
@@ -376,7 +382,7 @@ public sealed partial class MainWindow : Window
 
     private async void JoinExisting_Click(object sender, RoutedEventArgs e)
     {
-        if (!TryReadSessionInputs(JoinRoomBox, JoinUrlBox, JoinUserBox, out var room, out var serverUrl, out var user))
+        if (!TryReadSessionInputs(JoinRoomBox, JoinUserBox, out var room, out var user))
         {
             return;
         }
@@ -393,7 +399,6 @@ public sealed partial class MainWindow : Window
         // 加入房间只使用用户刚刚确认的本机 room-dir；
         // 首次拿到 entrance.scp 时应点“导入房间”。
         var ok = NativeMethods.chat_join_start(
-            serverUrl,
             selected.roomDir,
             user,
             nickname,
@@ -409,7 +414,7 @@ public sealed partial class MainWindow : Window
 
     private async void JoinImport_Click(object sender, RoutedEventArgs e)
     {
-        if (!TryReadSessionInputs(JoinRoomBox, JoinUrlBox, JoinUserBox, out var room, out var serverUrl, out var user))
+        if (!TryReadSessionInputs(JoinRoomBox, JoinUserBox, out var room, out var user))
         {
             return;
         }
@@ -427,7 +432,6 @@ public sealed partial class MainWindow : Window
         // C# 只负责收集 UI 输入，
         // PKI、GKA、WebSocket 和 encrypted relay 都在 C++ core 中执行。
         var ok = NativeMethods.chat_join_start_auto(
-            serverUrl,
             room,
             user,
             nickname,
@@ -442,9 +446,9 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    private void Stop_Click(object sender, RoutedEventArgs e)
+    private void Exit_Click(object sender, RoutedEventArgs e)
     {
-        StopSession();
+        ExitRoom();
     }
 
     private void Send_Click(object sender, RoutedEventArgs e)
@@ -805,13 +809,13 @@ public sealed partial class MainWindow : Window
 
     private static bool ShouldSuppressChatLine(string kind, string message)
     {
+        if (string.Equals(kind, "relay_status", StringComparison.OrdinalIgnoreCase)) return true;
         if (string.Equals(kind, "log", StringComparison.OrdinalIgnoreCase)) return true;
         if (!string.Equals(kind, "status", StringComparison.OrdinalIgnoreCase)) return false;
 
         // GUI status is intentionally user-facing only. Endpoint details
         // stay in CLI/log paths so the chat area does not expose network internals.
-        return message.StartsWith("client ws://", StringComparison.OrdinalIgnoreCase) ||
-            message.StartsWith("client wss://", StringComparison.OrdinalIgnoreCase) ||
+        return message.StartsWith("client wss://", StringComparison.OrdinalIgnoreCase) ||
             message.StartsWith("Clients can join with:", StringComparison.OrdinalIgnoreCase) ||
             message.StartsWith("Attachment trust:", StringComparison.OrdinalIgnoreCase) ||
             message.StartsWith("PKI identity ready:", StringComparison.OrdinalIgnoreCase) ||
@@ -1915,11 +1919,11 @@ public sealed partial class MainWindow : Window
         HostCreateButton.IsEnabled = mode == SessionMode.None;
         JoinExistingButton.IsEnabled = mode == SessionMode.None;
         JoinImportButton.IsEnabled = mode == SessionMode.None;
-        // Stop is intentionally always available. Native chat_stop() is
+        // Exit is intentionally always available. Native chat_stop() is
         // idempotent, and keeping the button clickable lets the user recover
         // from connection errors where the UI mode is already None but a native
         // session is still closing.
-        StopButton.IsEnabled = true;
+        ExitButton.IsEnabled = true;
         MessageBox.IsEnabled = isConnected;
         SendModeBox.IsEnabled = isConnected;
         PrivateTargetBox.IsEnabled = isConnected;
@@ -1931,15 +1935,22 @@ public sealed partial class MainWindow : Window
         RefreshRoomPanel();
     }
 
-    private void StopSession()
+    private void ExitRoom()
     {
-        NativeMethods.chat_close_room();
+        NativeMethods.chat_stop();
         SetSessionMode(SessionMode.None);
         ResetParticipants();
     }
 
     private void UpdateSessionStatus(string kind, string message)
     {
+        if (string.Equals(kind, "relay_status", StringComparison.OrdinalIgnoreCase))
+        {
+            relayStatusText = string.IsNullOrWhiteSpace(message) ? "-" : message.Trim();
+            RefreshRoomPanel();
+            return;
+        }
+
         if (kind == "error")
         {
             ShowInfo(message, InfoBarSeverity.Error);
@@ -2243,6 +2254,10 @@ public sealed partial class MainWindow : Window
         };
         RoomModeText.Text = $"{UiText("Mode", "模式")}: {mode}";
         RoomNameText.Text = $"{UiText("Room", "房间")}: {roomName}";
+        if (RelayStatusText is not null)
+        {
+            RelayStatusText.Text = relayStatusText;
+        }
     }
 
     private void ToggleSidebar_Click(object sender, RoutedEventArgs e)
@@ -2689,7 +2704,7 @@ public sealed partial class MainWindow : Window
             AppContext.BaseDirectory,
             "Assets",
             isDark ? "sidebar_toggle_inverted.png" : "sidebar_toggle.png")));
-        StopIcon.Stroke = new SolidColorBrush(foreground);
+        ExitIcon.Stroke = new SolidColorBrush(foreground);
         SettingsIcon.Foreground = new SolidColorBrush(foreground);
         UpdateBubbleStyleState();
         UpdateMessageTextStyleState();
@@ -2930,16 +2945,16 @@ public sealed partial class MainWindow : Window
             JoinPivotItem.Header = UiText("Join", "加入");
             RoomPivotItem.Header = UiText("Room", "房间");
             HostRoomBox.Header = UiText("Room", "房间");
-            HostServerUrlBox.Header = UiText("Server URL", "服务器 URL");
             HostUserBox.Header = UiText("User", "用户");
             HostJoinButton.Content = UiText("Join Room", "加入房间");
             HostCreateButton.Content = UiText("Create Room", "创建房间");
             JoinRoomBox.Header = UiText("Room", "房间");
-            JoinUrlBox.Header = UiText("Server URL", "服务器 URL");
             JoinUserBox.Header = UiText("User", "用户");
             JoinExistingButton.Content = UiText("Join Room", "加入房间");
             JoinImportButton.Content = UiText("Import Room", "导入房间");
+            ToolTipService.SetToolTip(ExitButton, UiText("Exit room", "离开房间"));
             RoomStatusHeaderText.Text = UiText("Room Status", "房间状态");
+            RelayStatusHeaderText.Text = UiText("Relay status", "中继器状态");
             RoomParticipantsHeaderText.Text = UiText("Participants", "参与者");
 
             MessageBox.PlaceholderText = UiText("Type a message", "输入消息");
@@ -3121,6 +3136,14 @@ public sealed partial class MainWindow : Window
             AppendYaml(builder, "label_text_color", ComboTag(MetaTextColorComboBox));
             AppendYaml(builder, "label_font", ComboTag(MetaFontComboBox));
             AppendYaml(builder, "label_font_size", NumberString(MetaFontSizeSlider.Value));
+            builder.AppendLine();
+            builder.AppendLine("[pool]");
+            var poolUrls = ReadPoolUrlsFromConfig(AppConfigPath());
+            if (poolUrls.Count == 0) poolUrls.Add("wss://chat.example.online:25566");
+            foreach (var url in poolUrls)
+            {
+                builder.AppendLine(url);
+            }
 
             File.WriteAllText(AppConfigPath(), builder.ToString(), Encoding.UTF8);
         }
@@ -3151,10 +3174,6 @@ public sealed partial class MainWindow : Window
             AutoPreviewImagesToggleSwitch.IsOn = autoPreviewImages;
             AutoLoadAudioToggleSwitch.IsOn = autoLoadAudio;
             MemberDefaultNicknameBox.Text = Value(chatValues, "member_default_nickname", "");
-            // Server URL is intentionally not restored from config. It is a
-            // per-session endpoint choice, so stale or sensitive endpoints
-            // should not silently appear after a restart.
-            HostServerUrlBox.Text = "";
             LocalServerTlsCaBox.Text = Value(chatValues, "local_server_tls_ca", "");
             SetSlider(BackgroundOpacitySlider, Value(chatValues, "chat_background_opacity", "0.28"));
             SetComboByTag(BackgroundHorizontalComboBox, Value(chatValues, "chat_background_crop_x", "Center"));
@@ -3231,6 +3250,31 @@ public sealed partial class MainWindow : Window
         }
 
         return config;
+    }
+
+    private static List<string> ReadPoolUrlsFromConfig(string path)
+    {
+        var urls = new List<string>();
+        if (!File.Exists(path)) return urls;
+
+        var inPool = false;
+        foreach (var raw in File.ReadAllLines(path))
+        {
+            var line = raw.Trim();
+            if (line.Length == 0 || line.StartsWith("#", StringComparison.Ordinal)) continue;
+            if (line.Length > 2 && line[0] == '[' && line[^1] == ']')
+            {
+                inPool = string.Equals(line[1..^1].Trim(), "pool", StringComparison.OrdinalIgnoreCase);
+                continue;
+            }
+            if (!inPool) continue;
+            if (line.StartsWith("wss://", StringComparison.OrdinalIgnoreCase))
+            {
+                urls.Add(line);
+            }
+        }
+
+        return urls;
     }
 
     private static void AppendYaml(StringBuilder builder, string key, string value)

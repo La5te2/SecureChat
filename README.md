@@ -40,7 +40,7 @@ SecureChat 有两层保护。
 
 Host 和 Client 必须具备成员 PKI。成员证书用于证明长期身份，成员私钥用于签名临时 X25519 公钥、GKA 贡献、group-state envelope 和房间控制消息。Server 不验证成员证书链，成员证书链验证发生在 Host/Client 本地。
 
-当前入口使用 `cert.exe` 生成或导入房间级 `entrance.scp`，再通过 `--room-dir` 启动 Host/Client。程序会从房间目录自动读取 trust store、成员证书链、成员私钥和 room instance token。成员私钥带口令时，通过 CLI 的 `--key-pass` 或 WinUI 设置面板中的 `Member key passphrase / 成员私钥口令` 提供。
+当前入口使用 `cert.exe` 生成或导入房间级 `entrance.scp`，再通过 `--room-dir` 启动 Host/Client。程序会从房间目录自动读取 trust store、成员证书链、成员私钥、room instance token 和 relay pool。成员私钥带口令时，通过 CLI 的 `--key-pass` 或 WinUI 设置面板中的 `Member key passphrase / 成员私钥口令` 提供。
 
 Host/Client 会验证证书链、证书有效期、Key Usage `digitalSignature`、签名算法一致性和签名内容。缺少有效 room-dir 或房间级 PKI 文件时，Host/Client 启动失败。
 
@@ -129,6 +129,18 @@ $$
 ### Server 可见信息
 
 Server 的安全边界是“不读取应用明文”。Server 仍可见部分元数据，包括连接 id、room token、密文长度、消息时序和连接状态。Server 日志会对成员 id 做短哈希脱敏，但 metadata 本身仍属于可观察信息。需要降低 metadata 暴露时，应减少日志、限制访问来源、使用 WSS/TLS，并控制房间规模和消息发送频率。
+
+### Relay Pool
+
+每个 room instance 都有自己的固定 relay pool。Host 创建 `entrance.scp` 时把 relay pool manifest 写入准入容器的保密 payload；Client 导入 `entrance.scp` 后生成同一份 `relay/relay-pool.sqlite3` 本地副本。Host/Client 启动时从 `--room-dir` 读取完整 pool，而不是让用户在界面里手动填写 Server URL。pool 中的地址集合由 Host 创建房间时导入的文件决定，记为 `N`，其大小 `n` 在房间生命周期内不变。运行时每次发送都会根据本机连接状态得到当前可用子集 `M(t)`，其中 `m(t) <= n`；暂时不可用的 relay 会进入 degraded/offline 和本机沉默期，沉默期内不重复重连或刷屏提示，后续发送前再尝试恢复。
+
+Host 会在完整 pool 上创建同一个 room instance。Client 首次加入时从 pool 中选择一个 admission relay 发送 pending join；如果该 relay 连接失败，Client 会按 admission secret 派生的排序尝试下一个未处于沉默期的 relay。Host 在产生 pending join 的 relay 上 approve 或 reject。Client 获批并安装房间级成员证书后，会自动连接剩余 relay。Host 对同一已验证成员在其他 relay 上的重复 pending join 做静默批准，不生成新的 pending 卡片，也不触发新的 GKA epoch。
+
+SecureChat 使用一套固定的确定性 relay selector。selector 会对当前可用子集 `M(t)` 中的每个 relay 计算 HMAC-SHA256 score，并按 score 得到 relay 顺序。pending join 阶段还没有 room group key，因此使用 `entrance.scp` 中的 admission secret；GKA 完成后的文本、附件元数据和附件分片使用当前 room group key、room token、epoch、消息类型、routeNonce、messageId、transferId/chunkIndex 和 attempt 等字段派生调度摘要。单 relay 投递取当前 payload 对应排序的第一项，因此相同 pool 长期可用时，不同消息仍会得到不同 relay 顺序。Host 只向已经确认 `room_created` 的 relay 发送房间控制帧和应用中继，避免把房间控制消息投递到尚未承载该 room instance 的 relay。`close_room` 会向完整 pool 中已 ready 的 relay 投递同一个 Host 签名关闭事件。
+
+附件元数据会携带整体 `fileHash`、`chunkSize`、`chunkCount` 和 `chunkHashes`。接收端先验证外层 AEAD，再按 offset 写入分片并校验每个 chunk hash；所有分片收齐后计算最终 fileHash。这样不同 relay 上乱序到达的分片不会靠到达顺序拼接，损坏或篡改的分片会被拒绝。
+
+文本、附件元数据和附件分片会写入 `messageId` 和 `payloadHash`。发送方保存短期重传副本，并在 payload 发送成功后发送加密 `relay_notice`。接收端收到 notice 后检查本机 seen cache；如果缺少对应 payload，就通过加密 `missing_message` 请求发送方重传。发送方重传时提升 `attempt`，重新计算 relay 顺序，并保留原始 payloadHash。相同 `messageId` 和相同 `payloadHash` 的副本被视为重复投递；相同 `messageId` 但不同 `payloadHash` 的 payload 会被拒绝为异常投递。
 
 ## 构建
 
@@ -245,15 +257,17 @@ CLI 运行时仍需要 `--room-dir` 指向本机房间材料目录。下面示�
 Windows：
 
 ```powershell
-.\out\build\x64-release\cert.exe create-entrance --room secure-room --phrase "use-a-long-random-room-phrase" --host alice --out logs\certs
-.\out\build\x64-release\cert.exe import-entrance --entrance logs\certs\<room-dir>\entrance.scp --phrase "use-a-long-random-room-phrase" --user bob --out logs\certs
+Set-Content -Encoding UTF8 relay-pool.txt "wss://127.0.0.1:25566"
+.\out\build\x64-release\cert.exe create-entrance --room secure-room --phrase "use-a-long-random-room-phrase" --host alice --pool relay-pool.txt --out logs
+.\out\build\x64-release\cert.exe import-entrance --entrance logs\<room-dir>\certs\entrance.scp --phrase "use-a-long-random-room-phrase" --user bob --out logs
 ```
 
 Linux：
 
 ```bash
-./out/build/x64-linux-release/cert create-entrance --room secure-room --phrase "use-a-long-random-room-phrase" --host alice --out logs/certs
-./out/build/x64-linux-release/cert import-entrance --entrance logs/certs/<room-dir>/entrance.scp --phrase "use-a-long-random-room-phrase" --user bob --out logs/certs
+printf '%s\n' 'wss://127.0.0.1:25566' > relay-pool.txt
+./out/build/x64-linux-release/cert create-entrance --room secure-room --phrase "use-a-long-random-room-phrase" --host alice --pool relay-pool.txt --out logs
+./out/build/x64-linux-release/cert import-entrance --entrance logs/<room-dir>/certs/entrance.scp --phrase "use-a-long-random-room-phrase" --user bob --out logs
 ```
 
 然后打开三个终端，先启动 Server，再启动 Host，最后启动 Client。Client 连接后会停留在 pending join。Host 在 CLI 标准输入中执行 `/list` 查看 pending requestId，再执行 `/approve <requestId>`；WinUI Host 可直接左键 pending 成员卡片允许加入。Host 会自动解密准入信令 envelope，校验 Client 的 CSR、room instance 绑定、设备/身份声明和 pending join proof，并在线签发成员证书响应；签发响应同样经 admission-encrypted envelope 返回。Client 安装响应后才会成为 active 成员并收到当前 group key。
@@ -265,8 +279,8 @@ Remove-Item Env:SECURECHAT_TLS_CERT_FILE -ErrorAction SilentlyContinue
 Remove-Item Env:SECURECHAT_TLS_KEY_FILE -ErrorAction SilentlyContinue
 .\out\build\x64-release\server.exe 25566
 $env:SECURECHAT_LOCAL_TLS_CA="certs\local-root-ca.pem"
-.\out\build\x64-release\host.exe --server wss://127.0.0.1:25566 --room-dir logs\certs\<room-dir> alice
-.\out\build\x64-release\client.exe wss://127.0.0.1:25566 --room-dir logs\certs\<room-dir> bob
+.\out\build\x64-release\host.exe --room-dir logs\<room-dir> alice
+.\out\build\x64-release\client.exe --room-dir logs\<room-dir> bob
 ```
 
 Linux：
@@ -275,8 +289,8 @@ Linux：
 unset SECURECHAT_TLS_CERT_FILE SECURECHAT_TLS_KEY_FILE
 ./out/build/x64-linux-release/server 25566
 export SECURECHAT_LOCAL_TLS_CA=certs/local-root-ca.pem
-./out/build/x64-linux-release/host --server wss://127.0.0.1:25566 --room-dir logs/certs/<room-dir> alice
-./out/build/x64-linux-release/client wss://127.0.0.1:25566 --room-dir logs/certs/<room-dir> bob
+./out/build/x64-linux-release/host --room-dir logs/<room-dir> alice
+./out/build/x64-linux-release/client --room-dir logs/<room-dir> bob
 ```
 
 使用 `--room-dir` 时，Host/Client 不需要额外配置成员 PKI 环境变量。
@@ -293,11 +307,13 @@ export SECURECHAT_TLS_KEY_FILE=/path/to/privkey.pem
 
 使用 Linux 启动脚本时，如果没有设置上述两个变量，脚本会直接把它们设置为 `certs/fullchain.pem` 和 `certs/privkey.pem`。这两个文件适合保存 Certbot 签发的域名证书，例如 `chat.example.com` 入口证书。本机/局域网运行应直接运行 `server` 可执行文件并保持 TLS 路径环境变量为空，让 C++ Server 自动生成 `certs/server-chain.pem`、`certs/server-key.pem` 和 `certs/local-root-ca.pem`。
 
-Host/Client 连接：
+Host/Client 连接地址来自 room-dir 内的 `relay/relay-pool.sqlite3`。使用正式域名时，创建 entrance 前把域名入口写入 relay pool 文件：
 
 ```bash
-./out/build/x64-linux-release/host --server wss://chat.example.com:25566 --room-dir logs/certs/<room-dir> alice
-./out/build/x64-linux-release/client wss://chat.example.com:25566 --room-dir logs/certs/<room-dir> bob
+printf '%s\n' 'wss://chat.example.com:25566' > relay-pool.txt
+./out/build/x64-linux-release/cert create-entrance --room secure-room --phrase "use-a-long-random-room-phrase" --host alice --pool relay-pool.txt --out logs
+./out/build/x64-linux-release/host --room-dir logs/<room-dir> alice
+./out/build/x64-linux-release/client --room-dir logs/<room-dir> bob
 ```
 
 如果服务器证书由系统信任 CA 签发，Host/Client/WinUI 不需要额外配置服务器 CA。本地或局域网自签 CA 场景下，CLI 可通过 `SECURECHAT_LOCAL_TLS_CA` 指定 `certs/local-root-ca.pem`；WinUI 可在设置面板的 `Local Server TLS CA / 本地服务器 TLS 信任根` 中选择同一个文件。
@@ -364,14 +380,15 @@ WinUI 面向日常使用场景。
 
 1. 打开 WinUI。
 2. 如果连接本地/局域网自动生成的 WSS 证书，在设置面板选择 `Local Server TLS CA / 本地服务器 TLS 信任根`。
-3. Host 区域输入 Room、Server URL 和 User，点击 `Create Room / 创建房间`。WinUI 会自动生成 `logs/certs/<原始房间名>_<digest前8位>/entrance.scp` 和房间级 Host 证书材料。
-4. Host 或 Join 区域点击 `Join Room / 加入房间` 时，WinUI 会弹出房间实例选择面板；确认后才会连接。即使只有一个同名候选房间，也会要求确认。
-5. Client 首次加入时在 Join 区域点击 `Import Room / 导入房间`，选择 Host 分发的 `entrance.scp` 文件。
-6. Client 正确解析 `entrance.scp` 后进入 pending 状态。此时发送框禁用，成员列表只显示自己的灰色卡片。
-7. Host 界面会显示该 pending 成员的灰色卡片。左键允许加入，右键拒绝加入并封禁该申请指纹。
-8. 审批通过后，Host 签发成员证书响应，Client 安装证书并参与 GKA。发送栏留空 `To: Member / 私信对象` 表示群发；填写成员证书指纹前缀表示私发，前缀至少 8 位十六进制字符。
-9. 成员列表只显示成员名。点击已加入成员卡片复制证书指纹前 8 位，右键成员卡片切换附件自动预览允许状态。完整证书指纹保留在程序内部，Host 可以通过 `/list` 显式查看。
-10. Host 点击 `Stop Session` 会关闭房间并让其他成员退出。
+3. Host 本机 `config.yml` 的 `[pool]` 段保存 relay 入口，每行一个 `wss://host:port`。Host 可在本地编辑该文件，WinUI 设置面板不显示该段。
+4. Host 区域输入 Room 和 User，点击 `Create Room / 创建房间`。WinUI 会自动生成 `logs/<原始房间名>_<digest前8位>/certs/entrance.scp`、房间级 Host 证书材料和 `relay/relay-pool.sqlite3`。
+5. Host 或 Join 区域点击 `Join Room / 加入房间` 时，WinUI 会弹出房间实例选择面板；确认后才会连接。即使只有一个同名候选房间，也会要求确认。
+6. Client 首次加入时在 Join 区域点击 `Import Room / 导入房间`，选择 Host 分发的 `entrance.scp` 文件。导入后本机会在 `logs/<原始房间名>_<digest前8位>/certs/entrance.scp` 保存准入副本。
+7. Client 正确解析 `entrance.scp` 后进入 pending 状态。此时发送框禁用，成员列表只显示自己的灰色卡片。
+8. Host 界面会显示该 pending 成员的灰色卡片。左键允许加入，右键拒绝加入并封禁该申请指纹。
+9. 审批通过后，Host 签发成员证书响应，Client 安装证书并参与 GKA。发送栏留空 `To: Member / 私信对象` 表示群发；填写成员证书指纹前缀表示私发，前缀至少 8 位十六进制字符。
+10. 成员列表只显示成员名。点击已加入成员卡片复制证书指纹前 8 位，右键成员卡片切换附件自动预览允许状态。完整证书指纹保留在程序内部，Host 可以通过 `/list` 显式查看。
+11. 点击右侧 `Exit / 离开房间` 只离开当前房间并关闭本地连接。Host 需要关闭整个 room instance 时，在消息输入框或 CLI 中手动输入 `/stop_session`。
 
 成员名只用于图形界面展示，不用于私发目标匹配。私发目标使用证书指纹前缀，协议内部仍有连接路由 id，用于 Server relay、身份绑定和排障。
 
@@ -387,14 +404,14 @@ Host 管理命令在 Host 输入框或 CLI 标准输入中发送：
 /list
 /approve <requestId>
 /reject <requestId> [原因]
-/close_room
+/stop_session
 ```
 
 `silence` 是当前房间内的发送限制。目标成员仍在线并继续参与后续 GKA epoch。
 
 `evict` 和 `ban` 会驱逐目标成员，并把该成员已验证证书指纹加入当前房间内存封禁集。封禁不写入磁盘，房间结束后失效。
 
-`list` 会显示 Host、active Client 和 pending join 的 display name、system username、证书指纹和 pending requestId。`approve` 会把已验证的 pending join 提升为 active 成员。`reject` 会拒绝 pending 成员，拒绝响应带 Host 签名。`close_room` 显式关闭当前 room instance。WinUI 不显示 requestId，点击 pending 成员卡片时会在内部使用 requestId。
+`list` 会显示 Host、active Client 和 pending join 的 display name、system username、证书指纹和 pending requestId。`approve` 会把已验证的 pending join 提升为 active 成员。`reject` 会拒绝 pending 成员，拒绝响应带 Host 签名。`stop_session` 显式关闭当前 room instance。WinUI 不显示 requestId，点击 pending 成员卡片时会在内部使用 requestId。
 
 私发命令：
 
@@ -415,7 +432,7 @@ Host 管理命令在 Host 输入框或 CLI 标准输入中发送：
 
 ## 房间生命周期
 
-当前已拆分 Host 断线和显式关闭。Host 关闭 WinUI、结束 Host 进程、按 Ctrl+C 或网络瞬断只表示 Host disconnected，Server 保留房间 open 状态和 pending join 队列，Client 只看到 Host 暂离状态。Host 使用 WinUI 的 `Stop Session`、CLI 的 `/stop_session` 或 `/close_room` 时才发送带 Host 签名的 `close_room`，Server 广播 `room_closed` 并关闭该 room instance。
+当前已拆分 Host 断线和显式关闭。Host 关闭 WinUI、结束 Host 进程、按 Ctrl+C、点击 WinUI 的 `Exit / 离开房间`、输入 `/exit` 或发生网络瞬断时，只表示 Host disconnected，Server 保留房间 open 状态和 pending join 队列，Client 只看到 Host 暂离状态。Host 手动输入 `/stop_session` 时才发送带 Host 签名的 `close_room`，Server 广播 `room_closed` 并关闭该 room instance。
 
 Server 使用 SQLite 只保存 room instance 的 open/closed 状态和 pending join 原始请求，默认路径为 `server/state/<timestamp>.sqlite3`，每次启动生成一个新的状态库，避免重启覆盖旧状态；也可通过 `SECURECHAT_SERVER_STATE_DB` 显式指定固定路径。Server SQLite 的字段边界限定为房间可用性状态和待审批入房请求。
 
@@ -437,12 +454,15 @@ Client 关闭进程或网络断开只表示当前连接离线，不自动吊销�
 export SECURECHAT_ATTACHMENT_MAX_BYTES=104857600
 ```
 
-接收文件保存到当前工作目录，并按 room instance 分层。目录名统一使用 `<原始房间名>_<roomInstanceTokenDigest前8位>`，与 `logs/certs` 的房间材料目录规则一致：
+接收文件保存到当前工作目录，并按 room instance 分层。目录名统一使用 `<原始房间名>_<roomInstanceTokenDigest前8位>`：
 
 ```text
-logs/images/<room>_<digest8>
-logs/voice/<room>_<digest8>
-logs/files/<room>_<digest8>
+logs/<room>_<digest8>/images
+logs/<room>_<digest8>/voice
+logs/<room>_<digest8>/files
+logs/<room>_<digest8>/texts
+logs/<room>_<digest8>/certs
+logs/<room>_<digest8>/relay
 ```
 
 接收端保存附件后会做基础隔离标记。Windows 写入 Mark-of-the-Web（MotW）Zone.Identifier；Linux/Unix 移除 owner/group/others 执行位。该保护是 best-effort，文件系统不支持对应能力时不会阻断聊天，但 SecureChat 自身不会自动打开任意 `file` 附件。

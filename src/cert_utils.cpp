@@ -2,6 +2,7 @@
 #include "cert_utils.hpp"
 
 #include <openssl/evp.h>
+#include <openssl/hmac.h>
 #include <openssl/rand.h>
 #include <openssl/sha.h>
 
@@ -72,6 +73,23 @@ std::string sha256Hex(const unsigned char* data, std::size_t size) {
     unsigned char digest[SHA256_DIGEST_LENGTH] = {};
     SHA256(data, size, digest);
     return hexEncode(digest, sizeof(digest));
+}
+
+std::string hmacSha256Hex(const std::vector<unsigned char>& key, const std::string& message) {
+    unsigned char digest[EVP_MAX_MD_SIZE] = {};
+    unsigned int digestSize = 0;
+    const auto* keyData = key.empty() ? nullptr : key.data();
+    const auto* messageData = reinterpret_cast<const unsigned char*>(message.data());
+    if (!HMAC(EVP_sha256(),
+              keyData,
+              static_cast<int>(key.size()),
+              messageData,
+              message.size(),
+              digest,
+              &digestSize)) {
+        throw std::runtime_error("hmac-sha256 failed");
+    }
+    return hexEncode(digest, digestSize);
 }
 
 void appendCanonicalField(std::string& out, const std::string& name, const std::string& value) {

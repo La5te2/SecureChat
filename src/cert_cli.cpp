@@ -13,7 +13,7 @@ namespace {
 
 void printUsage() {
     std::cerr << "Usage:\n";
-    std::cerr << "  cert create-entrance --room <room> --phrase <phrase> --host <name> [--out <dir>] [--key-pass <pass>]\n";
+    std::cerr << "  cert create-entrance --room <room> --phrase <phrase> --host <name> --pool <file> [--out <dir>] [--key-pass <pass>]\n";
     std::cerr << "  cert inspect-entrance --entrance <path> --phrase <phrase>\n";
     std::cerr << "  cert import-entrance --entrance <path> --phrase <phrase> --user <name> [--out <dir>] [--key-pass <pass>]\n";
     std::cerr << "  cert sign-csr --room-dir <dir> --csr <path> --user <name>\n";
@@ -64,8 +64,9 @@ int main(int argc, char** argv) {
             create.roomName = requireOption(options, "--room");
             create.roomPhrase = requireOption(options, "--phrase");
             create.hostName = optionOr(options, "--host", "host");
-            create.outputRoot = optionOr(options, "--out", "logs/certs");
+            create.outputRoot = optionOr(options, "--out", "logs");
             create.memberKeyPassword = optionOr(options, "--key-pass", "");
+            create.relayPoolFile = requireOption(options, "--pool");
             const auto result = chat::certs::createRoomEntrance(create);
             std::cout << "entrance: " << result.entranceFile << "\n";
             std::cout << "roomDir: " << result.roomDir << "\n";
@@ -88,7 +89,7 @@ int main(int argc, char** argv) {
             import.entranceFile = requireOption(options, "--entrance");
             import.roomPhrase = requireOption(options, "--phrase");
             import.username = requireOption(options, "--user");
-            import.outputRoot = optionOr(options, "--out", "logs/certs");
+            import.outputRoot = optionOr(options, "--out", "logs");
             import.memberKeyPassword = optionOr(options, "--key-pass", "");
             const auto result = chat::certs::importRoomEntrance(import);
             std::cout << "roomDir: " << result.roomDir << "\n";

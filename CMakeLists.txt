@@ -26,6 +26,7 @@ add_library(core STATIC
     src/local_paths.cpp
     src/local_message_store.cpp
     src/pki_application.cpp
+    src/relay_pool.cpp
     src/host_session_core.cpp
     src/client_session_core.cpp
     src/room_registry.cpp

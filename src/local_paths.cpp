@@ -62,18 +62,22 @@ std::filesystem::path logsRoot() {
     return std::filesystem::current_path() / "logs";
 }
 
+std::filesystem::path roomRoot(const std::string& roomName, const std::string& roomToken) {
+    return logsRoot() / roomInstanceLabel(roomName, roomToken);
+}
+
 std::filesystem::path attachmentDirectory(
     const std::string& kind,
     const std::string& roomName,
     const std::string& roomToken) {
-    return logsRoot() / kind / roomInstanceLabel(roomName, roomToken);
+    return roomRoot(roomName, roomToken) / kind;
 }
 
 std::filesystem::path textHistoryDatabase(
     const std::string& roomName,
     const std::string& roomToken,
     const std::string& systemUsername) {
-    return logsRoot() / "texts" / roomInstanceLabel(roomName, roomToken) / (userFileStem(systemUsername) + ".sqlite3");
+    return roomRoot(roomName, roomToken) / "texts" / (userFileStem(systemUsername) + ".sqlite3");
 }
 
 } // namespace chat::local_paths

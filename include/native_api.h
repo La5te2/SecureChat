@@ -40,28 +40,24 @@ CHAT_API int CHAT_CALL chat_get_message_history(
     int output_json_size);
 // 从 room-dir 加载 room token 和房间级 PKI 后启动 Host。
 CHAT_API int CHAT_CALL chat_host_start(
-    const char* server_url,
     const char* room_dir,
     const char* username,
     const char* nickname,
     const char* key_pass);
-// WinUI 自动生成 logs/certs/<digest>/entrance.scp，并隐藏 room-dir 细节。
+// WinUI 自动生成 logs/<room>_<digest>/certs/entrance.scp，并隐藏 room-dir 细节。
 CHAT_API int CHAT_CALL chat_host_start_auto(
-    const char* server_url,
     const char* room_name,
     const char* username,
     const char* nickname,
     const char* key_pass);
 // 从 room-dir 加载 room token 和房间级 PKI 后启动 Client。
 CHAT_API int CHAT_CALL chat_join_start(
-    const char* url,
     const char* room_dir,
     const char* username,
     const char* nickname,
     const char* key_pass);
 // WinUI 选择 Host 分发的 entrance.scp 后自动导入并发起 pending join。
 CHAT_API int CHAT_CALL chat_join_start_auto(
-    const char* url,
     const char* room_name,
     const char* username,
     const char* nickname,
@@ -84,8 +80,6 @@ CHAT_API int CHAT_CALL chat_send_voice(const char* file_path);
 CHAT_API int CHAT_CALL chat_send_voice_to(const char* target, const char* file_path);
 // 停止活动 Host 或 Client 会话，但不卸载 native 模块。
 CHAT_API void CHAT_CALL chat_stop();
-// Host 显式关闭当前 room instance。Client 调用时退化为本地停止。
-CHAT_API void CHAT_CALL chat_close_room();
 // GUI 宿主进程退出时的最终清理。它清除回调状态，并释放普通 stop 后
 // 有意保留的已退役 native 对象。
 CHAT_API void CHAT_CALL chat_shutdown();

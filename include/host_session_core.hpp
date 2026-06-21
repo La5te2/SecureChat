@@ -76,18 +76,45 @@ private:
     bool handleHostCommand(const std::string& line);
     // 处理本机附件预览信任命令。该状态只影响当前 UI/CLI，不进入网络协议。
     bool handleAttachmentTrustCommand(const std::string& line);
-    // 批准一个已验证的 pending join，使 Server 将其提升为 active Client。
+    // 批准一个已验证的 pending join，使对应 relay 将其提升为 active Client。
     void approvePendingJoin(const std::string& token);
     // 拒绝一个 pending join，并把签名原因返回给申请者。
     void rejectPendingJoin(const std::string& token, const std::string& reason);
-    // 将原始 WebSocket 帧移出 libdatachannel 回调线程。
-    void enqueueSignalingMessage(std::string payload);
+    struct SignalingFrame {
+        std::string payload;
+        std::string relayUrl;
+    };
+
+    // 将原始 WebSocket 帧移出 libdatachannel 回调线程，并保留来源 relay。
+    void enqueueSignalingMessage(std::string payload, std::string relayUrl);
     // 串行协议 worker，负责 JSON 解析、PKI 验证和 GKA 工作。
     void signalingWorkerLoop();
     // 停止并 join 协议 worker，不直接操作 WebSocket。
     void stopSignalingWorker();
     // 分发房间创建、成员关系、加密中继和错误事件。
-    void handleSignalingMessage(const std::string& s);
+    void handleSignalingMessage(const SignalingFrame& frame);
+    // 当前是否仍有至少一个 relay 可用于发送。
+    bool hasOpenRelay() const;
+    // 连接指定 relay，并在打开后发送 create_room。
+    void connectRelay(std::size_t relayIndex);
+    // 发送前尝试恢复已经关闭的 relay，使重启后的 relay 能重新进入可用集合。
+    void reconnectClosedRelays();
+    // 发出当前 relay pool 健康摘要给 CLI/WinUI。
+    void emitRelayStatus();
+    // 判断指定 relay 是否已经过了本机沉默期。
+    bool relayRetryAllowed(std::size_t relayIndex) const;
+    // relay 成功连接后清除沉默期和失败计数。
+    void markRelayHealthy(std::size_t relayIndex, const std::string& url);
+    // relay 失败后进入沉默期，避免坏 relay 持续刷屏。
+    bool markRelayFailure(std::size_t relayIndex, const std::string& url, const std::string& status);
+    // 查找 WebSocket 指针对应的 relay URL。
+    std::string relayUrlFor(const std::shared_ptr<rtc::WebSocket>& relay) const;
+    // 从 room relay pool 中按房间群密钥派生的调度摘要选择 relay。
+    std::shared_ptr<rtc::WebSocket> chooseRelayForSend(const Message& msg, const std::string& targetId);
+    // 把生命周期控制帧发往所有当前可用 relay。
+    std::size_t sendToAllRelays(const json& msg);
+    // 把控制帧发往指定 relay；找不到来源 relay 时回退到可用 relay。
+    bool sendToRelayUrl(const std::string& relayUrl, const json& msg);
     // 将一个 Client 标记为当前连接离线，但保留它的房间成员资格。
     void markClientDisconnected(const std::string& id);
     // 永久移除一个 Client 成员并更新本地房间状态。
@@ -100,6 +127,27 @@ private:
     void sendClientModeration(const std::string& type, const std::string& clientId);
     // 通过不可信 Server 发送一条加密中继消息。
     bool sendRelayMessage(const Message& msg, const std::string& senderId, const std::string& senderName, const std::string& senderKind, const std::string& targetId);
+    struct ReliableOutbound {
+        Message message;
+        std::string senderId;
+        std::string senderName;
+        std::string senderKind;
+        std::string targetId;
+        std::string messageId;
+        std::string payloadHash;
+        int retryCount = 0;
+    };
+    // 发送已经完成 pairwise 包装和可靠元数据标记的应用载荷。
+    bool sendPreparedRelayMessage(ReliableOutbound outbound, bool emitNotice);
+    // 为可恢复 payload 写入 messageId/payloadHash，并保存本机重传副本。
+    void ensureReliableFields(Message& msg);
+    void rememberReliableOutbound(const ReliableOutbound& outbound);
+    // 记录入站 payload，拒绝重复消息和同 id 异 hash 的异常 payload。
+    bool rememberReliableInbound(const Message& msg);
+    // notice/missing 都走加密中继；notice 只声明有 payload，missing 请求发送方重发。
+    void sendReliableNotice(const ReliableOutbound& outbound);
+    void handleReliableNotice(const Message& msg);
+    void handleMissingMessage(const Message& msg);
     // 为 targetId 把私发 Message 包装进双方私发内层加密。
     Message wrapPairwiseForTarget(const Message& msg, const std::string& targetId);
     // 打开一个发给 Host 的双方私发包装。
@@ -187,6 +235,9 @@ private:
     std::unordered_map<std::string, std::string> mClientIdentityFingerprints;
     std::unordered_map<std::string, std::string> mClientIdentitySubjects;
     std::unordered_map<std::string, json> mClientIdentityObjects;
+    // 记录每个 Client 当前出现在哪些 relay 上。
+    // 同一个成员可能在不同 relay 上有相同 clientId，消息随机选 relay 时需要这些绑定。
+    std::unordered_map<std::string, std::unordered_set<std::string>> mClientRelayUrls;
     // 当前仍连接到 Server 的 Client。成员资格保存在上面的证书/公钥表中；
     // 断网或关闭进程只会从这个集合移除，不会自动吊销成员证书。
     std::unordered_set<std::string> mConnectedClientIds;
@@ -195,11 +246,24 @@ private:
     std::unordered_set<std::string> mBannedIdentityFingerprints;
     std::unordered_set<std::string> mRecentRelayIds;
     std::deque<std::string> mRecentRelayOrder;
+    std::mutex mReliableMutex;
+    std::unordered_map<std::string, ReliableOutbound> mReliableOutbound;
+    std::unordered_map<std::string, std::string> mReliableSeen;
+    std::deque<std::string> mReliableSeenOrder;
     std::mutex mSignalingQueueMutex;
     std::condition_variable mSignalingQueueCv;
-    std::deque<std::string> mSignalingQueue;
+    std::deque<SignalingFrame> mSignalingQueue;
     std::thread mSignalingThread;
     std::atomic_bool mSignalingWorkerStopping = false;
+    std::vector<std::string> mRelayUrls;
+    std::vector<std::shared_ptr<rtc::WebSocket>> mRelays;
+    std::vector<bool> mRelayOpen;
+    std::vector<bool> mRelayRoomReady;
+    mutable std::mutex mRelayMutex;
+    std::vector<std::chrono::steady_clock::time_point> mRelayNextRetryAt;
+    std::vector<int> mRelayFailureStreak;
+    std::vector<bool> mRelayFailureReported;
+    std::size_t mRelaySendCursor = 0;
     chat::secure_relay::MemberKeyPair mMemberKeys;
     chat::pki_application::IdentityContext mIdentity;
     std::vector<unsigned char> mGroupKey;

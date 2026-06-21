@@ -38,7 +38,6 @@ internal static class NativeMethods
 
     [DllImport("native.dll", CallingConvention = CallingConvention.StdCall)]
     internal static extern int chat_host_start(
-        [MarshalAs(UnmanagedType.LPUTF8Str)] string serverUrl,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string roomDir,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string username,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string nickname,
@@ -46,7 +45,6 @@ internal static class NativeMethods
 
     [DllImport("native.dll", CallingConvention = CallingConvention.StdCall)]
     internal static extern int chat_host_start_auto(
-        [MarshalAs(UnmanagedType.LPUTF8Str)] string serverUrl,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string roomName,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string username,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string nickname,
@@ -54,7 +52,6 @@ internal static class NativeMethods
 
     [DllImport("native.dll", CallingConvention = CallingConvention.StdCall)]
     internal static extern int chat_join_start(
-        [MarshalAs(UnmanagedType.LPUTF8Str)] string url,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string roomDir,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string username,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string nickname,
@@ -62,7 +59,6 @@ internal static class NativeMethods
 
     [DllImport("native.dll", CallingConvention = CallingConvention.StdCall)]
     internal static extern int chat_join_start_auto(
-        [MarshalAs(UnmanagedType.LPUTF8Str)] string url,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string roomName,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string username,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string nickname,
@@ -109,9 +105,6 @@ internal static class NativeMethods
 
     [DllImport("native.dll", CallingConvention = CallingConvention.StdCall)]
     internal static extern void chat_stop();
-
-    [DllImport("native.dll", CallingConvention = CallingConvention.StdCall)]
-    internal static extern void chat_close_room();
 
     [DllImport("native.dll", CallingConvention = CallingConvention.StdCall)]
     internal static extern void chat_shutdown();

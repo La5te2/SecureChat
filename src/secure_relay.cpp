@@ -75,7 +75,7 @@ std::vector<unsigned char> aadForEnvelope(
     const std::string& targetId) {
     (void)senderKind;
     (void)targetId;
-    // 阶段 12 只把 room token 和发送者连接 id 放入明文 AAD。
+    // AAD 只绑定 room token 和发送者连接 id。
     // 应用层发送者名称、角色和私发目标都位于密文中。
     const std::string aad = std::string("securechat-relay-v3|") + roomId + "|" + senderId;
     return {aad.begin(), aad.end()};

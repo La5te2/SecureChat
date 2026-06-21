@@ -654,7 +654,7 @@ void SignalingServer::handleCreateRoom(rtc::WebSocket* key, const json& data) {
                 roomAlreadyExists = true;
             }
             else {
-                // 阶段 15：Host 网络断开不再销毁房间。重新连接的 Host
+                // Host 网络断开只改变连接状态。重新连接的 Host
                 // 通过相同 room instance token 重新接管现有 room instance。
                 account = mAuth.registerOrLogin(username, "local-account");
                 existingRoom->second.host = ws;
@@ -1139,7 +1139,7 @@ void SignalingServer::handleClientSilence(rtc::WebSocket* key, const json& data,
 }
 
 void SignalingServer::handleCloseRoom(rtc::WebSocket* key, const json& data) {
-    // 阶段 15：Host 断线只表示暂离；真正销毁房间必须由在线 Host
+    // Host 断线只表示暂离；真正销毁房间必须由在线 Host
     // 显式发送 close_room。Server 只验证发送连接是否为当前 Host。
     std::string roomId;
     std::string errorMessage;
@@ -1373,7 +1373,7 @@ void SignalingServer::relayEncrypted(rtc::WebSocket* key, const json& data) {
                     errorMessage = "member is silenced";
                 }
                 else {
-                    // 阶段 12 元数据最小化：只绑定不透明 room token 和发送者连接 id。
+                    // 元数据最小化：只绑定不透明 room token 和发送者连接 id。
                     // 每个加密中继都会广播；私发目标在解密后过滤。
                     envelope["roomId"] = roomId;
                     envelope["senderId"] = senderId;
@@ -1426,7 +1426,7 @@ void SignalingServer::cleanup(rtc::WebSocket* key) {
         if (roomIt != mRooms.end()) {
             auto& room = roomIt->second;
             if (role == "host" && room.host.get() == key) {
-                // 阶段 15：Host 连接断开不再关闭房间。
+                // Host 连接断开只更新连接状态。
                 // Server 只移除当前 Host socket，并等待 Host 显式 close_room
                 // 或使用同一 room token 重新接管该 room instance。
                 for (auto& item : room.clients) notifyClients.push_back(item.second);

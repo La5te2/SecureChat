@@ -20,6 +20,7 @@
 
 #include "cert_generation.hpp"
 #include "cert_utils.hpp"
+#include "relay_pool.hpp"
 
 #include <cstdlib>
 #include <filesystem>
@@ -615,12 +616,16 @@ std::uint64_t readUInt64(const std::vector<unsigned char>& in, std::size_t& offs
     return value;
 }
 
+std::filesystem::path roomCertDir(const std::filesystem::path& roomDir) {
+    return roomDir / "certs";
+}
+
 std::filesystem::path roomStatePath(const std::filesystem::path& roomDir) {
-    return roomDir / roomStateFileName;
+    return roomCertDir(roomDir) / roomStateFileName;
 }
 
 std::filesystem::path localStateKeyPath(const std::filesystem::path& roomDir) {
-    return roomDir.parent_path() / localStateKeyName;
+    return roomDir / localStateKeyName;
 }
 
 std::vector<unsigned char> localStateKey(const std::filesystem::path& roomDir, bool createIfMissing) {
@@ -746,6 +751,7 @@ json decryptRoomState(const std::vector<unsigned char>& blob, const std::vector<
 }
 
 void writeRuntimeFile(const std::filesystem::path& roomDir, const json& state) {
+    ensureDirectory(roomCertDir(roomDir));
     const auto key = localStateKey(roomDir, true);
     writeBinaryFile(roomStatePath(roomDir), encryptRoomState(state, key));
     restrictPrivateFile(roomStatePath(roomDir));
@@ -923,8 +929,9 @@ RoomMemberSignResult signVerifiedRoomCsr(
     const std::filesystem::path& roomDir,
     const VerifiedRoomCsr& verified,
     const std::string& memberName) {
-    auto intermediateKey = readPrivateKey(roomDir / "intermediate-ca-key.pem");
-    auto intermediateCert = readCertificate(roomDir / "intermediate-ca.pem");
+    const auto certDir = roomCertDir(roomDir);
+    auto intermediateKey = readPrivateKey(certDir / "intermediate-ca-key.pem");
+    auto intermediateCert = readCertificate(certDir / "intermediate-ca.pem");
     const auto runtime = readRuntimeFile(roomDir);
     const auto descriptor = runtime.value("descriptor", json::object());
     const auto roomInstanceId = descriptor.value("roomInstanceId", "");
@@ -939,8 +946,8 @@ RoomMemberSignResult signVerifiedRoomCsr(
         roomInstanceId,
         verified.deviceName,
         "member");
-    const auto certPath = roomDir / (memberName + "-cert.pem");
-    const auto chainPath = roomDir / (memberName + "-chain.pem");
+    const auto certPath = certDir / (memberName + "-cert.pem");
+    const auto chainPath = certDir / (memberName + "-chain.pem");
     writeCertificate(certPath, cert.get());
     writeCertificateChain(chainPath, cert.get(), intermediateCert.get());
     const auto memberFp = certFingerprint(cert.get());
@@ -1644,17 +1651,33 @@ RoomEntranceCreateResult createRoomEntrance(const RoomEntranceCreateOptions& opt
     const auto rootFp = certFingerprint(rootCert.get());
     const auto intermediateFp = certFingerprint(intermediateCert.get());
     const auto hostFp = certFingerprint(hostCert.get());
-    const auto roomDir = roomDirFromDigest(options.outputRoot.empty() ? "logs/certs" : options.outputRoot, roomName, digest);
+    const auto relayPoolFile = trimAscii(options.relayPoolFile.empty()
+        ? envValue("SECURECHAT_RELAY_POOL_FILE")
+        : options.relayPoolFile);
+    if (relayPoolFile.empty()) {
+        throw std::runtime_error("relay pool file is required");
+    }
+    auto relayPool = chat::relay_pool::loadRelayPoolFile(pathFromUtf8(relayPoolFile), "host-local");
+    relayPool.manifest["signerFingerprint"] = hostFp;
+    relayPool.manifest["manifestId"] = sha256Hex(chat::relay_pool::canonicalRelayManifest(relayPool.manifest));
+    const auto relaySignature = signBytes(hostKey.get(), chat::relay_pool::canonicalRelayManifest(relayPool.manifest));
+    relayPool.manifest["signature"] = {
+        {"alg", "RSA-SHA256"},
+        {"value", base64Encode(relaySignature.data(), relaySignature.size())}
+    };
+    const auto roomDir = roomDirFromDigest(options.outputRoot.empty() ? "logs" : options.outputRoot, roomName, digest);
+    const auto certDir = roomCertDir(roomDir);
     ensureDirectory(roomDir);
+    ensureDirectory(certDir);
 
-    const auto rootKeyPath = roomDir / "root-ca-key.pem";
-    const auto rootCertPath = roomDir / "root-ca.pem";
-    const auto intermediateKeyPath = roomDir / "intermediate-ca-key.pem";
-    const auto intermediateCertPath = roomDir / "intermediate-ca.pem";
-    const auto hostKeyPath = roomDir / "host-key.pem";
-    const auto hostCertPath = roomDir / "host-cert.pem";
-    const auto hostChainPath = roomDir / "host-chain.pem";
-    const auto entrancePath = roomDir / "entrance.scp";
+    const auto rootKeyPath = certDir / "root-ca-key.pem";
+    const auto rootCertPath = certDir / "root-ca.pem";
+    const auto intermediateKeyPath = certDir / "intermediate-ca-key.pem";
+    const auto intermediateCertPath = certDir / "intermediate-ca.pem";
+    const auto hostKeyPath = certDir / "host-key.pem";
+    const auto hostCertPath = certDir / "host-cert.pem";
+    const auto hostChainPath = certDir / "host-chain.pem";
+    const auto entrancePath = certDir / "entrance.scp";
 
     writePrivateKey(rootKeyPath, rootKey.get());
     writeCertificate(rootCertPath, rootCert.get());
@@ -1697,9 +1720,11 @@ RoomEntranceCreateResult createRoomEntrance(const RoomEntranceCreateOptions& opt
         {"role", "host"},
         {"baseUsername", hostBaseName},
         {"username", hostName},
+        {"relayPoolManifestId", relayPool.manifest.value("manifestId", "")},
         {"descriptor", descriptor}
     };
     writeRuntimeFile(roomDir, runtime);
+    chat::relay_pool::writeRelayPoolDatabase(roomDir, relayPool.manifest);
 
     json payload = {
         {"version", 1},
@@ -1720,6 +1745,7 @@ RoomEntranceCreateResult createRoomEntrance(const RoomEntranceCreateOptions& opt
         {"intermediatePublicKeyFingerprint", intermediatePublicKeyFp},
         {"hostPublicKeyFingerprint", hostPublicKeyFp},
         {"hostBaseName", hostBaseName},
+        {"relayPool", relayPool.manifest},
         {"descriptor", descriptor}
     };
     const auto envelope = encryptEntrancePayload(payload, roomPhrase);
@@ -1753,7 +1779,7 @@ std::string roomDirForEntrance(
     auto payload = validateEntrancePayload(decryptEntrancePayload(pathFromUtf8(entranceFile), trimAscii(roomPhrase)));
     const auto digest = payload.value("roomInstanceTokenDigest", "");
     if (digest.empty()) throw std::runtime_error("entrance payload missing roomInstanceTokenDigest");
-    return pathToUtf8(roomDirFromDigest(outputRoot.empty() ? "logs/certs" : outputRoot, payload.value("roomName", ""), digest));
+    return pathToUtf8(roomDirFromDigest(outputRoot.empty() ? "logs" : outputRoot, payload.value("roomName", ""), digest));
 }
 
 std::vector<LocalRoomDirInfo> listLocalRoomDirs(
@@ -1768,7 +1794,7 @@ std::vector<LocalRoomDirInfo> listLocalRoomDirs(
     if (username.empty()) throw std::runtime_error("user name is required");
     if (role.empty()) throw std::runtime_error("room role is required");
 
-    const auto root = pathFromUtf8(outputRoot.empty() ? "logs/certs" : outputRoot);
+    const auto root = pathFromUtf8(outputRoot.empty() ? "logs" : outputRoot);
     std::error_code ec;
     if (!std::filesystem::is_directory(root, ec)) {
         throw std::runtime_error("no local room certificates found; import or create the room first");
@@ -1813,7 +1839,7 @@ std::vector<LocalRoomDirInfo> listLocalRoomDirs(
         return left.modifiedTimeUnixMs > right.modifiedTimeUnixMs;
     });
     if (rooms.empty()) {
-        throw std::runtime_error("no matching local room certificate directory found; import or create the room first");
+        throw std::runtime_error("no matching local room directory found; import or create the room first");
     }
     return rooms;
 }
@@ -1824,12 +1850,24 @@ RoomEntranceImportResult importRoomEntrance(const RoomEntranceImportOptions& opt
     auto payload = validateEntrancePayload(decryptEntrancePayload(pathFromUtf8(options.entranceFile), trimAscii(options.roomPhrase)));
     const auto digest = payload.value("roomInstanceTokenDigest", "");
     if (digest.empty()) throw std::runtime_error("entrance payload missing roomInstanceTokenDigest");
-    const auto roomDir = roomDirFromDigest(options.outputRoot.empty() ? "logs/certs" : options.outputRoot, payload.value("roomName", ""), digest);
+    const auto roomDir = roomDirFromDigest(options.outputRoot.empty() ? "logs" : options.outputRoot, payload.value("roomName", ""), digest);
+    const auto certDir = roomCertDir(roomDir);
     ensureDirectory(roomDir);
+    ensureDirectory(certDir);
 
-    const auto rootPath = roomDir / "root-ca.pem";
-    const auto intermediatePath = roomDir / "intermediate-ca.pem";
-    const auto hostCertPath = roomDir / "host-cert.pem";
+    const auto entranceCopyPath = certDir / "entrance.scp";
+    const auto rootPath = certDir / "root-ca.pem";
+    const auto intermediatePath = certDir / "intermediate-ca.pem";
+    const auto hostCertPath = certDir / "host-cert.pem";
+    std::error_code copyEc;
+    std::filesystem::copy_file(
+        pathFromUtf8(options.entranceFile),
+        entranceCopyPath,
+        std::filesystem::copy_options::overwrite_existing,
+        copyEc);
+    if (copyEc) {
+        throw std::runtime_error("failed to copy entrance.scp into room directory: " + copyEc.message());
+    }
     writeTextFile(rootPath, payload.value("rootCaPem", ""));
     writeTextFile(intermediatePath, payload.value("intermediateCaPem", ""));
     writeTextFile(hostCertPath, payload.value("hostCertPem", ""));
@@ -1837,7 +1875,7 @@ RoomEntranceImportResult importRoomEntrance(const RoomEntranceImportOptions& opt
     auto memberKey = generateRsaKey(3072);
     const auto memberPublicKeyFp = publicKeyFingerprint(memberKey.get());
     const auto username = systemUsernameFromPublicFingerprint(baseUsername, memberPublicKeyFp);
-    const auto keyPath = roomDir / (username + "-key.pem");
+    const auto keyPath = certDir / (username + "-key.pem");
 
     const auto deviceName = localHostname();
     auto csr = createMemberCsr(memberKey.get(), username, digest, deviceName);
@@ -1875,11 +1913,17 @@ RoomEntranceImportResult importRoomEntrance(const RoomEntranceImportOptions& opt
         {"role", "client"},
         {"baseUsername", baseUsername},
         {"username", username},
+        {"relayPoolManifestId", payload.value("relayPool", json::object()).value("manifestId", "")},
         {"descriptor", payload.value("descriptor", json::object())},
         {"memberCsrPem", csrPem},
         {"memberCsrBundle", csrBundle}
     };
     writeRuntimeFile(roomDir, runtime);
+    const auto relayPool = payload.value("relayPool", json::object());
+    if (!relayPool.is_object() || relayPool.empty()) {
+        throw std::runtime_error("entrance payload missing relay pool");
+    }
+    chat::relay_pool::writeRelayPoolDatabase(roomDir, relayPool);
 
     return {
         pathToUtf8(roomDir),
@@ -1904,7 +1948,7 @@ json makePendingJoinProof(
     if (digest.empty()) throw std::runtime_error("room runtime missing roomInstanceTokenDigest");
     if (publicKey.empty()) throw std::runtime_error("pending join public key is required");
 
-    const auto keyPath = roomDir / (username + "-key.pem");
+    const auto keyPath = roomCertDir(roomDir) / (username + "-key.pem");
     auto memberKey = readPrivateKey(keyPath, keyPassword);
     json proof = {
         {"version", 1},
@@ -2016,7 +2060,8 @@ RoomMemberInstallResult installRoomMemberCertificateJson(
         throw std::runtime_error("sign response does not match local CSR");
     }
 
-    auto intermediateCert = readCertificate(roomDir / "intermediate-ca.pem");
+    const auto certDir = roomCertDir(roomDir);
+    auto intermediateCert = readCertificate(certDir / "intermediate-ca.pem");
     EvpPkeyPtr intermediatePublicKey(X509_get_pubkey(intermediateCert.get()), EVP_PKEY_free);
     if (!intermediatePublicKey) throw std::runtime_error("intermediate public key missing");
     const auto signatureObject = response.value("signature", json::object());
@@ -2040,8 +2085,8 @@ RoomMemberInstallResult installRoomMemberCertificateJson(
         throw std::runtime_error("member chain does not contain member certificate");
     }
 
-    const auto certPath = roomDir / (memberName + "-cert.pem");
-    const auto chainPath = roomDir / (memberName + "-chain.pem");
+    const auto certPath = certDir / (memberName + "-cert.pem");
+    const auto chainPath = certDir / (memberName + "-chain.pem");
     writeTextFile(certPath, memberCertPem);
     writeTextFile(chainPath, memberChainPem);
     return {
@@ -2072,9 +2117,10 @@ RoomRuntimeMaterial loadRoomRuntimeMaterial(
     const auto username = storedUsername.empty() ? requestedUsername : storedUsername;
     if (username.empty()) throw std::runtime_error("room runtime username is required");
 
-    const auto trustStore = roomDir / "root-ca.pem";
-    const auto certChain = host ? (roomDir / "host-chain.pem") : (roomDir / (username + "-chain.pem"));
-    const auto keyFile = host ? (roomDir / "host-key.pem") : (roomDir / (username + "-key.pem"));
+    const auto certDir = roomCertDir(roomDir);
+    const auto trustStore = certDir / "root-ca.pem";
+    const auto certChain = host ? (certDir / "host-chain.pem") : (certDir / (username + "-chain.pem"));
+    const auto keyFile = host ? (certDir / "host-key.pem") : (certDir / (username + "-key.pem"));
     if (!fileExists(trustStore)) throw std::runtime_error("room trust store missing: " + pathToUtf8(trustStore));
     const bool certReady = fileExists(certChain);
     if (requireIdentityCert && !certReady) {

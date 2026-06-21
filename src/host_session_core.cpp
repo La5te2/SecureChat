@@ -5,6 +5,7 @@
 #include "attachment_transfer.hpp"
 #include "cert_generation.hpp"
 #include "cert_utils.hpp"
+#include "relay_pool.hpp"
 #include "secure_relay.hpp"
 
 #include <algorithm>
@@ -23,6 +24,12 @@ namespace {
 namespace attachment = chat::attachment;
 
 constexpr auto GkaContributionTimeout = std::chrono::seconds(10);
+constexpr std::size_t RelayRouteNonceBytes = 16;
+constexpr std::size_t ReliableMessageIdBytes = 16;
+constexpr std::size_t ReliableCacheLimit = 4096;
+constexpr int ReliableRetryLimit = 3;
+constexpr int RelayRetryBaseSeconds = 5;
+constexpr int RelayRetryMaxSeconds = 60;
 
 bool startsWithIgnoreCase(const std::string& value, const std::string& prefix) {
     if (value.size() < prefix.size()) return false;
@@ -107,6 +114,14 @@ bool isAttachmentBinaryType(const std::string& type) {
     return type == "image_binary" || type == "file_binary" || type == "voice_binary";
 }
 
+bool isReliablePayloadType(const std::string& type) {
+    attachment::Kind ignored = attachment::Kind::Text;
+    return type == "text" ||
+        type == chat::secure_relay::PairwisePrivateType ||
+        attachmentKindForMeta(type, ignored) ||
+        isAttachmentBinaryType(type);
+}
+
 std::string actorIdFromMessage(const Message& msg) {
     // 对同一发送者的附件分片分组时，优先使用稳定 actor id，
     // 而不是显示名。
@@ -127,6 +142,89 @@ std::string normalizeNickname(const std::string& nickname, const std::string& fa
         if (c < 0x20 || c == 0x7f) return fallbackName;
     }
     return trimmed;
+}
+
+std::string relayLabel(const std::string& url) {
+    const auto scheme = url.find("://");
+    const auto start = scheme == std::string::npos ? 0 : scheme + 3;
+    return url.substr(start);
+}
+
+std::chrono::seconds relayRetryDelay(int failureStreak) {
+    const auto shift = (std::min)(failureStreak, 4);
+    return std::chrono::seconds((std::min)(RelayRetryMaxSeconds, RelayRetryBaseSeconds * (1 << shift)));
+}
+
+std::string jsonStringField(const json& value, const std::string& name) {
+    auto it = value.find(name);
+    if (it == value.end()) return "";
+    if (it->is_string()) return it->get<std::string>();
+    if (it->is_number_integer()) return std::to_string(it->get<long long>());
+    if (it->is_number_unsigned()) return std::to_string(it->get<unsigned long long>());
+    return "";
+}
+
+std::string relayRouteLabelForMessage(const Message& msg) {
+    attachment::Kind ignored = attachment::Kind::Text;
+    if (isAttachmentBinaryType(msg.type)) return "route:chunk";
+    if (attachmentKindForMeta(msg.type, ignored)) return "route:manifest";
+    if (msg.type == "text" || msg.type == chat::secure_relay::PairwisePrivateType) return "route:text";
+    return "route:notice";
+}
+
+std::string relayRouteMaterialForMessage(const Message& msg, const std::string& targetId) {
+    std::string material = "securechat-relay-route\n";
+    chat::cert_utils::appendCanonicalField(material, "label", relayRouteLabelForMessage(msg));
+    chat::cert_utils::appendCanonicalField(material, "type", msg.type);
+    chat::cert_utils::appendCanonicalField(material, "from", msg.from);
+    chat::cert_utils::appendCanonicalField(material, "targetId", targetId);
+    chat::cert_utils::appendCanonicalField(material, "contentHash", chat::cert_utils::sha256Hex(msg.content));
+    if (msg.payload.is_object()) {
+        chat::cert_utils::appendCanonicalField(material, "routeNonce", jsonStringField(msg.payload, "routeNonce"));
+        chat::cert_utils::appendCanonicalField(material, "transferId", jsonStringField(msg.payload, "transferId"));
+        chat::cert_utils::appendCanonicalField(material, "chunkIndex", jsonStringField(msg.payload, "chunkIndex"));
+        chat::cert_utils::appendCanonicalField(material, "offset", jsonStringField(msg.payload, "offset"));
+        chat::cert_utils::appendCanonicalField(material, "fileSize", jsonStringField(msg.payload, "size"));
+        chat::cert_utils::appendCanonicalField(material, "actorId", jsonStringField(msg.payload, "actorId"));
+        chat::cert_utils::appendCanonicalField(material, "messageId", jsonStringField(msg.payload, "messageId"));
+        chat::cert_utils::appendCanonicalField(material, "attempt", jsonStringField(msg.payload, "attempt"));
+    }
+    return material;
+}
+
+void ensureRelayRouteNonce(Message& msg) {
+    if (!msg.payload.is_object()) msg.payload = json::object();
+    const auto it = msg.payload.find("routeNonce");
+    if (it != msg.payload.end() && it->is_string() && !it->get<std::string>().empty()) {
+        return;
+    }
+    const auto nonce = chat::cert_utils::randomBytes(RelayRouteNonceBytes);
+    msg.payload["routeNonce"] = chat::cert_utils::base64Encode(nonce);
+}
+
+std::string makeReliableMessageId() {
+    return chat::cert_utils::base64Encode(chat::cert_utils::randomBytes(ReliableMessageIdBytes));
+}
+
+std::string payloadStringField(const Message& msg, const std::string& name) {
+    if (!msg.payload.is_object()) return "";
+    const auto value = jsonStringField(msg.payload, name);
+    return value;
+}
+
+std::string reliablePayloadHashFor(Message msg) {
+    if (!msg.payload.is_object()) msg.payload = json::object();
+    // routeNonce 和 attempt 只影响本次 relay 调度；payloadHash 绑定真正的应用载荷。
+    msg.payload.erase("routeNonce");
+    msg.payload.erase("payloadHash");
+    msg.payload.erase("attempt");
+    return chat::cert_utils::sha256Hex(msg.toJson());
+}
+
+std::string reliableMissingBitmapFor(const Message& msg) {
+    if (!isAttachmentBinaryType(msg.type) || !msg.payload.is_object()) return "";
+    const auto chunkIndex = jsonStringField(msg.payload, "chunkIndex");
+    return chunkIndex.empty() ? "" : chunkIndex;
 }
 
 }
@@ -151,6 +249,9 @@ HostSessionCore::HostSessionCore(
       mWsConfig(std::move(wsConfig)) {
     // Server 只注册该不透明 token。房间显示名留在本地 PKI 签名语义里。
     if (mRoomToken.empty()) throw std::runtime_error("room instance token is required");
+    mRelayUrls = chat::relay_pool::relayUrlsFromRoomDir(mRoomDir);
+    if (mRelayUrls.empty()) throw std::runtime_error("relay pool has no usable relay");
+    mWsUrl = mRelayUrls.front();
     // K_G 不再由 Host 直接生成。
     // 第一把可用房间密钥在 room_created 后由 epoch-1 contribution 集合派生。
     chat::websocket_config::applyClientTlsFromEnvironment(mWsConfig);
@@ -189,11 +290,61 @@ void HostSessionCore::start() {
         });
     }
     startGkaTimeoutWorker();
-    mWs = std::make_shared<rtc::WebSocket>(mWsConfig);
 
-    mWs->onOpen([this]() {
-        chatEmit(mCallbacks.onStatus, "Signaling connected");
-        chatEmit(mCallbacks.onStatus, "PKI identity ready: " + mIdentity.fingerprint());
+    {
+        std::lock_guard<std::mutex> lock(mRelayMutex);
+        mRelays.assign(mRelayUrls.size(), nullptr);
+        mRelayOpen.assign(mRelayUrls.size(), false);
+        mRelayRoomReady.assign(mRelayUrls.size(), false);
+        mRelayNextRetryAt.assign(mRelayUrls.size(), {});
+        mRelayFailureStreak.assign(mRelayUrls.size(), 0);
+        mRelayFailureReported.assign(mRelayUrls.size(), false);
+    }
+
+    for (std::size_t i = 0; i < mRelayUrls.size(); ++i) {
+        connectRelay(i);
+    }
+}
+
+void HostSessionCore::connectRelay(std::size_t relayIndex) {
+    if (relayIndex >= mRelayUrls.size()) return;
+    const auto url = mRelayUrls[relayIndex];
+    {
+        std::lock_guard<std::mutex> lock(mRelayMutex);
+        if (relayIndex < mRelays.size() && mRelays[relayIndex] && !mRelays[relayIndex]->isClosed()) return;
+    }
+    if (!relayRetryAllowed(relayIndex)) return;
+
+    try {
+        chat::relay_pool::markRelayStatus(mRoomDir, url, "connecting");
+    }
+    catch (...) {
+    }
+
+    auto ws = std::make_shared<rtc::WebSocket>(mWsConfig);
+    {
+        std::lock_guard<std::mutex> lock(mRelayMutex);
+        if (mRelays.size() < mRelayUrls.size()) mRelays.resize(mRelayUrls.size());
+        if (mRelayOpen.size() < mRelayUrls.size()) mRelayOpen.resize(mRelayUrls.size(), false);
+        if (mRelayRoomReady.size() < mRelayUrls.size()) mRelayRoomReady.resize(mRelayUrls.size(), false);
+        if (mRelayFailureReported.size() < mRelayUrls.size()) mRelayFailureReported.resize(mRelayUrls.size(), false);
+        mRelayFailureReported[relayIndex] = false;
+        mRelayOpen[relayIndex] = false;
+        mRelayRoomReady[relayIndex] = false;
+        mRelays[relayIndex] = ws;
+        if (!mWs) {
+            mWs = ws;
+            mWsUrl = url;
+        }
+    }
+
+    ws->onOpen([this, ws, url, relayIndex]() {
+        markRelayHealthy(relayIndex, url);
+        chatEmit(mCallbacks.onStatus, "Relay connected: " + relayLabel(url));
+        emitRelayStatus();
+        if (url == mWsUrl) {
+            chatEmit(mCallbacks.onStatus, "PKI identity ready: " + mIdentity.fingerprint());
+        }
         json msg = {
             {"type", "create_room"},
             {"roomId", mRoomToken},
@@ -202,41 +353,133 @@ void HostSessionCore::start() {
             {"publicKey", mMemberKeys.publicKey}
         };
         msg["identity"] = mIdentity.signJoinRoom(mRoomId, mUsername, mMemberKeys.publicKey);
-        mWs->send(msg.dump());
+        ws->send(msg.dump());
     });
 
-    mWs->onMessage([this](rtc::message_variant data) {
-        enqueueSignalingMessage(rtcMessageToString(data));
+    ws->onMessage([this, url](rtc::message_variant data) {
+        enqueueSignalingMessage(rtcMessageToString(data), url);
     });
 
-    mWs->onClosed([this]() {
-        chatEmit(mCallbacks.onStatus, "Signaling closed");
-        // Host 连接尝试可能在 UI 进入 "hosting" 状态后异步失败。
-        // 与 Client 关闭事件保持一致，使前端能在信令通道消失时恢复控件。
-        if (!mStopped.exchange(true)) {
-            if (!mRoomCreated.load()) {
-                chatEmit(
-                    mCallbacks.onError,
-                    "Signaling closed before room creation completed; check Server URL, room certificate directory, PKI files, and rebuild all components if one executable was updated");
-            }
-            chatEmit(mCallbacks.onStatus, "Signaling connection ended");
+    ws->onClosed([this, url, relayIndex]() {
+        const auto report = markRelayFailure(relayIndex, url, "offline");
+        if (report) {
+            chatEmit(mCallbacks.onStatus, "Relay closed: " + relayLabel(url));
+            emitRelayStatus();
+        }
+        if (!mStopped.load() && !hasOpenRelay() && !mRoomCreated.load()) {
+            chatEmit(
+                mCallbacks.onError,
+                "All relays closed before room creation completed; check relay pool, room directory, PKI files, and rebuild all components if one executable was updated");
         }
     });
 
-    mWs->onError([this](std::string error) {
-        chatEmit(mCallbacks.onError, "Signaling error: " + error);
-        if (!mStopped.exchange(true)) {
-            chatEmit(mCallbacks.onStatus, "Signaling failed");
+    ws->onError([this, url, relayIndex](std::string error) {
+        const auto report = markRelayFailure(relayIndex, url, "degraded");
+        if (report) {
+            chatEmit(mCallbacks.onError, "Relay error: " + relayLabel(url) + ": " + error);
+            emitRelayStatus();
         }
     });
 
-    mWs->open(mWsUrl);
+    ws->open(url);
+}
+
+void HostSessionCore::reconnectClosedRelays() {
+    for (std::size_t i = 0; i < mRelayUrls.size(); ++i) {
+        bool needsConnect = false;
+        {
+            std::lock_guard<std::mutex> lock(mRelayMutex);
+            needsConnect = i >= mRelays.size() || !mRelays[i] || mRelays[i]->isClosed();
+        }
+        if (needsConnect && relayRetryAllowed(i)) connectRelay(i);
+    }
+}
+
+void HostSessionCore::emitRelayStatus() {
+    try {
+        chatEmit(mCallbacks.onRelayStatus, chat::relay_pool::relayStatusSummaryText(mRoomDir));
+    }
+    catch (...) {
+    }
+}
+
+std::string HostSessionCore::relayUrlFor(const std::shared_ptr<rtc::WebSocket>& relay) const {
+    std::lock_guard<std::mutex> lock(mRelayMutex);
+    for (std::size_t i = 0; i < mRelays.size(); ++i) {
+        if (mRelays[i] == relay && i < mRelayUrls.size()) return mRelayUrls[i];
+    }
+    return {};
+}
+
+bool HostSessionCore::relayRetryAllowed(std::size_t relayIndex) const {
+    std::lock_guard<std::mutex> lock(mRelayMutex);
+    if (relayIndex >= mRelayNextRetryAt.size()) return true;
+    return std::chrono::steady_clock::now() >= mRelayNextRetryAt[relayIndex];
+}
+
+void HostSessionCore::markRelayHealthy(std::size_t relayIndex, const std::string& url) {
+    {
+        std::lock_guard<std::mutex> lock(mRelayMutex);
+        if (relayIndex >= mRelayFailureStreak.size()) mRelayFailureStreak.resize(mRelayUrls.size(), 0);
+        if (relayIndex >= mRelayNextRetryAt.size()) mRelayNextRetryAt.resize(mRelayUrls.size());
+        if (relayIndex >= mRelayFailureReported.size()) mRelayFailureReported.resize(mRelayUrls.size(), false);
+        if (relayIndex >= mRelayOpen.size()) mRelayOpen.resize(mRelayUrls.size(), false);
+        if (relayIndex >= mRelayRoomReady.size()) mRelayRoomReady.resize(mRelayUrls.size(), false);
+        mRelayOpen[relayIndex] = true;
+        mRelayFailureStreak[relayIndex] = 0;
+        mRelayNextRetryAt[relayIndex] = {};
+        mRelayFailureReported[relayIndex] = false;
+    }
+    try {
+        chat::relay_pool::markRelayStatus(mRoomDir, url, "healthy");
+    }
+    catch (...) {
+    }
+}
+
+bool HostSessionCore::markRelayFailure(std::size_t relayIndex, const std::string& url, const std::string& status) {
+    int failures = 1;
+    std::chrono::seconds delay = relayRetryDelay(0);
+    bool shouldReport = true;
+    {
+        std::lock_guard<std::mutex> lock(mRelayMutex);
+        if (relayIndex >= mRelayFailureStreak.size()) mRelayFailureStreak.resize(mRelayUrls.size(), 0);
+        if (relayIndex >= mRelayNextRetryAt.size()) mRelayNextRetryAt.resize(mRelayUrls.size());
+        if (relayIndex >= mRelayFailureReported.size()) mRelayFailureReported.resize(mRelayUrls.size(), false);
+        if (relayIndex >= mRelayOpen.size()) mRelayOpen.resize(mRelayUrls.size(), false);
+        mRelayOpen[relayIndex] = false;
+        if (relayIndex >= mRelayRoomReady.size()) mRelayRoomReady.resize(mRelayUrls.size(), false);
+        mRelayRoomReady[relayIndex] = false;
+        shouldReport = !mRelayFailureReported[relayIndex];
+        mRelayFailureReported[relayIndex] = true;
+        if (!shouldReport) {
+            return false;
+        }
+        failures = ++mRelayFailureStreak[relayIndex];
+        delay = relayRetryDelay(failures - 1);
+        mRelayNextRetryAt[relayIndex] = std::chrono::steady_clock::now() + delay;
+    }
+    try {
+        chat::relay_pool::markRelayStatus(mRoomDir, url, status);
+    }
+    catch (...) {
+    }
+    chatEmit(
+        mCallbacks.onRelayStatus,
+        "paused " + relayLabel(url) + " for " + std::to_string(delay.count()) + "s after " + std::to_string(failures) + " failure(s)");
+    return true;
 }
 
 void HostSessionCore::requestStopNoJoin() {
     mStopped.store(true);
-    if (mWs && !mWs->isClosed()) {
-        mWs->close();
+    std::vector<std::shared_ptr<rtc::WebSocket>> relays;
+    {
+        std::lock_guard<std::mutex> lock(mRelayMutex);
+        relays = mRelays;
+        if (mWs) relays.push_back(mWs);
+    }
+    for (const auto& relay : relays) {
+        if (relay && !relay->isClosed()) relay->close();
     }
     {
         std::lock_guard<std::mutex> lock(mSignalingQueueMutex);
@@ -258,7 +501,7 @@ void HostSessionCore::stop() {
 void HostSessionCore::closeRoom() {
     // 普通 stop 只表示 Host 本地离线。显式 closeRoom 才请求 Server
     // 销毁当前 room instance，并让所有成员收到 room_closed。
-    if (!mWs || mWs->isClosed()) {
+    if (!hasOpenRelay()) {
         chatEmit(mCallbacks.onStatus, "Signaling channel is not open yet");
         return;
     }
@@ -276,27 +519,144 @@ void HostSessionCore::closeRoom() {
         "close_room",
         mGroupKeyEpoch,
         payloadDigest);
-    mWs->send(msg.dump());
-    chatEmit(mCallbacks.onStatus, "Close room requested");
+    const auto sent = sendToAllRelays(msg);
+    chatEmit(mCallbacks.onStatus, "Close room requested on relays: " + std::to_string(sent));
 }
 
 // 返回外层 CLI/API 循环是否应停止轮询该会话。
 bool HostSessionCore::shouldStop() const {
-    return mStopped.load() || (mWs && mWs->isClosed());
+    return mStopped.load();
 }
 
-void HostSessionCore::enqueueSignalingMessage(std::string payload) {
+bool HostSessionCore::hasOpenRelay() const {
+    std::lock_guard<std::mutex> lock(mRelayMutex);
+    for (std::size_t i = 0; i < mRelays.size(); ++i) {
+        if (i < mRelayOpen.size() && i < mRelayRoomReady.size() &&
+            mRelayOpen[i] && mRelayRoomReady[i] && mRelays[i] && !mRelays[i]->isClosed()) return true;
+    }
+    return false;
+}
+
+std::shared_ptr<rtc::WebSocket> HostSessionCore::chooseRelayForSend(const Message& msg, const std::string& targetId) {
+    reconnectClosedRelays();
+    std::lock_guard<std::mutex> lock(mRelayMutex);
+    struct Candidate {
+        std::shared_ptr<rtc::WebSocket> relay;
+        std::string url;
+    };
+    std::vector<Candidate> openRelays;
+    openRelays.reserve(mRelays.size());
+    for (std::size_t i = 0; i < mRelays.size(); ++i) {
+        const auto& relay = mRelays[i];
+        if (i < mRelayOpen.size() && i < mRelayRoomReady.size() &&
+            mRelayOpen[i] && mRelayRoomReady[i] && relay && !relay->isClosed()) {
+            openRelays.push_back({relay, i < mRelayUrls.size() ? mRelayUrls[i] : ""});
+        }
+    }
+    if (openRelays.empty()) return {};
+    if (!chat::secure_relay::hasUsableGroupKey(mGroupKey)) {
+        const auto index = mRelaySendCursor++ % openRelays.size();
+        return openRelays[index].relay;
+    }
+
+    std::string material = relayRouteMaterialForMessage(msg, targetId);
+    chat::cert_utils::appendCanonicalField(material, "roomToken", mRoomToken);
+    chat::cert_utils::appendCanonicalField(material, "epoch", std::to_string(mGroupKeyEpoch));
+
+    std::string bestScore;
+    std::shared_ptr<rtc::WebSocket> bestRelay;
+    for (const auto& candidate : openRelays) {
+        std::string item = material;
+        chat::cert_utils::appendCanonicalField(item, "relayUrl", candidate.url);
+        const auto score = chat::cert_utils::hmacSha256Hex(mGroupKey, item);
+        if (!bestRelay || score < bestScore) {
+            bestScore = score;
+            bestRelay = candidate.relay;
+        }
+    }
+    return bestRelay;
+}
+
+std::size_t HostSessionCore::sendToAllRelays(const json& msg) {
+    reconnectClosedRelays();
+    std::vector<std::shared_ptr<rtc::WebSocket>> relays;
+    std::vector<std::string> urls;
+    std::vector<bool> open;
+    std::vector<bool> ready;
+    {
+        std::lock_guard<std::mutex> lock(mRelayMutex);
+        relays = mRelays;
+        urls = mRelayUrls;
+        open = mRelayOpen;
+        ready = mRelayRoomReady;
+    }
+
+    const auto payload = msg.dump();
+    std::size_t sent = 0;
+    for (std::size_t i = 0; i < relays.size(); ++i) {
+        const auto& relay = relays[i];
+        const auto url = i < urls.size() ? urls[i] : std::string();
+        const bool usable = i < open.size() && i < ready.size() && open[i] && ready[i];
+        if (!usable) continue;
+        const auto ok = relay && !relay->isClosed() && relay->send(payload);
+        if (!url.empty()) {
+            try {
+                chat::relay_pool::recordRelaySend(mRoomDir, url, false, ok);
+            }
+            catch (...) {
+            }
+        }
+        if (ok) {
+            ++sent;
+        }
+    }
+    emitRelayStatus();
+    return sent;
+}
+
+bool HostSessionCore::sendToRelayUrl(const std::string& relayUrl, const json& msg) {
+    std::shared_ptr<rtc::WebSocket> target;
+    std::shared_ptr<rtc::WebSocket> fallback;
+    {
+        std::lock_guard<std::mutex> lock(mRelayMutex);
+        for (std::size_t i = 0; i < mRelays.size(); ++i) {
+            const auto& relay = mRelays[i];
+            const bool usable = i < mRelayOpen.size() && i < mRelayRoomReady.size() &&
+                mRelayOpen[i] && mRelayRoomReady[i] && relay && !relay->isClosed();
+            if (!usable) continue;
+            if (i < mRelayUrls.size() && mRelayUrls[i] == relayUrl) {
+                target = relay;
+                break;
+            }
+            if (!fallback) fallback = relay;
+        }
+    }
+    if (!target) target = fallback;
+    const auto targetUrl = relayUrlFor(target);
+    const auto ok = target && target->send(msg.dump());
+    if (!targetUrl.empty()) {
+        try {
+            chat::relay_pool::recordRelaySend(mRoomDir, targetUrl, false, ok);
+            emitRelayStatus();
+        }
+        catch (...) {
+        }
+    }
+    return ok;
+}
+
+void HostSessionCore::enqueueSignalingMessage(std::string payload, std::string relayUrl) {
     {
         std::lock_guard<std::mutex> lock(mSignalingQueueMutex);
         if (mSignalingWorkerStopping.load()) return;
-        mSignalingQueue.push_back(std::move(payload));
+        mSignalingQueue.push_back({std::move(payload), std::move(relayUrl)});
     }
     mSignalingQueueCv.notify_one();
 }
 
 void HostSessionCore::signalingWorkerLoop() {
     while (true) {
-        std::string payload;
+        SignalingFrame frame;
         {
             std::unique_lock<std::mutex> lock(mSignalingQueueMutex);
             mSignalingQueueCv.wait(lock, [this]() {
@@ -305,14 +665,14 @@ void HostSessionCore::signalingWorkerLoop() {
             if (mSignalingWorkerStopping.load() && mSignalingQueue.empty()) {
                 break;
             }
-            payload = std::move(mSignalingQueue.front());
+            frame = std::move(mSignalingQueue.front());
             mSignalingQueue.pop_front();
         }
 
         // Host 侧消息处理会验证成员 PKI、解密 GKA contribution，
         // 并可能提交新的群密钥。将这些工作移出 libdatachannel WSS 回调线程，
         // 避免连续 contribution 帧被证书验证阻塞。
-        handleSignalingMessage(payload);
+        handleSignalingMessage(frame);
     }
 }
 
@@ -357,26 +717,10 @@ void HostSessionCore::sendLine(const std::string& line) {
     const auto actor = currentHostActorName();
     Message msg = makeTextMessage(actor, line);
     setCurrentHostActorMetadata(msg);
-    if (!chat::secure_relay::hasUsableGroupKey(mGroupKey)) {
-        chatEmit(mCallbacks.onError, "Room group key is not ready");
-        return;
+    if (sendRelayMessage(msg, chat::protocol::HostActorId, mDisplayName, chat::protocol::HostActorKind, "")) {
+        rememberTextHistory(msg, true);
+        chatEmit(mCallbacks.onMessage, msg.toJson());
     }
-    if (!mWs || mWs->isClosed()) {
-        chatEmit(mCallbacks.onStatus, "Signaling channel is not open yet");
-        return;
-    }
-
-    const auto envelope = chat::secure_relay::encryptMessageWithGroupKey(
-        msg,
-        mRoomToken,
-        chat::protocol::HostActorId,
-        mDisplayName,
-        chat::protocol::HostActorKind,
-        "",
-        mGroupKey);
-    mWs->send(envelope.dump());
-    rememberTextHistory(msg, true);
-    chatEmit(mCallbacks.onMessage, msg.toJson());
 }
 
 void HostSessionCore::sendLineTo(const std::string& target, const std::string& line) {
@@ -426,7 +770,7 @@ bool HostSessionCore::handleHostCommand(const std::string& line) {
     std::istringstream input(trimCopy(line));
     std::string command;
     input >> command;
-    if (command == "/stop_session" || command == "/close_room") {
+    if (command == "/stop_session") {
         closeRoom();
         return true;
     }
@@ -546,7 +890,7 @@ bool HostSessionCore::handleAttachmentTrustCommand(const std::string& line) {
 }
 
 void HostSessionCore::approvePendingJoin(const std::string& token) {
-    if (!mWs || mWs->isClosed()) {
+    if (!hasOpenRelay()) {
         chatEmit(mCallbacks.onStatus, "Signaling channel is not open yet");
         return;
     }
@@ -570,6 +914,7 @@ void HostSessionCore::approvePendingJoin(const std::string& token) {
 
     const auto username = pending.value("username", requestId);
     const auto publicKey = pending.value("publicKey", "");
+    const auto relayUrl = pending.value("relayUrl", "");
     if (!pending.contains("fingerprint") || publicKey.empty()) {
         chatEmit(mCallbacks.onError, "Pending join is not verified and cannot be approved: " + username);
         return;
@@ -611,12 +956,12 @@ void HostSessionCore::approvePendingJoin(const std::string& token) {
             "sign_response",
             {{"signResponse", signResponse}});
     }
-    mWs->send(msg.dump());
+    sendToRelayUrl(relayUrl, msg);
     chatEmit(mCallbacks.onStatus, "Pending join approved: " + username + " / " + requestId);
 }
 
 void HostSessionCore::rejectPendingJoin(const std::string& token, const std::string& reason) {
-    if (!mWs || mWs->isClosed()) {
+    if (!hasOpenRelay()) {
         chatEmit(mCallbacks.onStatus, "Signaling channel is not open yet");
         return;
     }
@@ -626,10 +971,12 @@ void HostSessionCore::rejectPendingJoin(const std::string& token, const std::str
         chatEmit(mCallbacks.onError, "Pending join not found: " + token);
         return;
     }
+    std::string relayUrl;
     {
         std::lock_guard<std::mutex> lock(mClientsMutex);
         auto it = mPendingJoinRequests.find(requestId);
         if (it != mPendingJoinRequests.end()) {
+            relayUrl = it->second.value("relayUrl", "");
             const auto fingerprint = it->second.value("fingerprint", "");
             if (!fingerprint.empty()) {
                 // Host 显式拒绝 pending join 才写入当前房间的临时封禁集。
@@ -654,7 +1001,7 @@ void HostSessionCore::rejectPendingJoin(const std::string& token, const std::str
         "reject_pending_join",
         mGroupKeyEpoch,
         payloadDigest);
-    mWs->send(msg.dump());
+    sendToRelayUrl(relayUrl, msg);
     {
         std::lock_guard<std::mutex> lock(mClientsMutex);
         mPendingJoinRequests.erase(requestId);
@@ -735,11 +1082,7 @@ bool HostSessionCore::sendRelayMessage(
         chatEmit(mCallbacks.onError, "Room group key is not ready");
         return false;
     }
-    if (!mWs || mWs->isClosed()) {
-        chatEmit(mCallbacks.onStatus, "Signaling channel is not open yet");
-        return false;
-    }
-
+    const bool reliable = isReliablePayloadType(msg.type);
     Message outbound = msg;
     if (!targetId.empty()) {
         if (targetId == chat::protocol::HostActorId) {
@@ -754,17 +1097,200 @@ bool HostSessionCore::sendRelayMessage(
             return false;
         }
     }
+    if (reliable) {
+        ensureReliableFields(outbound);
+    }
+
+    ReliableOutbound prepared;
+    prepared.message = std::move(outbound);
+    prepared.senderId = senderId;
+    prepared.senderName = senderName;
+    prepared.senderKind = senderKind;
+    prepared.targetId = targetId;
+    prepared.messageId = payloadStringField(prepared.message, "messageId");
+    prepared.payloadHash = payloadStringField(prepared.message, "payloadHash");
+    return sendPreparedRelayMessage(std::move(prepared), reliable);
+}
+
+bool HostSessionCore::sendPreparedRelayMessage(ReliableOutbound outbound, bool emitNotice) {
+    if (!chat::secure_relay::hasUsableGroupKey(mGroupKey)) {
+        chatEmit(mCallbacks.onError, "Room group key is not ready");
+        return false;
+    }
+
+    // 每条发送尝试都带独立路由 nonce，重传时会重新进入 relay selector。
+    ensureRelayRouteNonce(outbound.message);
+
+    auto relay = chooseRelayForSend(outbound.message, outbound.targetId);
+    if (!relay) {
+        chatEmit(mCallbacks.onStatus, "Signaling channel is not open yet");
+        return false;
+    }
 
     const auto envelope = chat::secure_relay::encryptMessageWithGroupKey(
-        outbound,
+        outbound.message,
         mRoomToken,
-        senderId,
-        senderName,
-        senderKind,
-        targetId,
+        outbound.senderId,
+        outbound.senderName,
+        outbound.senderKind,
+        outbound.targetId,
         mGroupKey);
-    mWs->send(envelope.dump());
+    const auto relayUrl = relayUrlFor(relay);
+    const auto ok = relay->send(envelope.dump());
+    if (!relayUrl.empty()) {
+        try {
+            chat::relay_pool::recordRelaySend(mRoomDir, relayUrl, isAttachmentBinaryType(outbound.message.type), ok);
+            emitRelayStatus();
+        }
+        catch (...) {
+        }
+    }
+    if (ok && emitNotice && !outbound.messageId.empty() && !outbound.payloadHash.empty()) {
+        rememberReliableOutbound(outbound);
+        sendReliableNotice(outbound);
+    }
+    return ok;
+}
+
+void HostSessionCore::ensureReliableFields(Message& msg) {
+    if (!msg.payload.is_object()) msg.payload = json::object();
+    if (payloadStringField(msg, "messageId").empty()) {
+        msg.payload["messageId"] = makeReliableMessageId();
+    }
+    if (!msg.payload.contains("attempt")) {
+        msg.payload["attempt"] = 0;
+    }
+    msg.payload.erase("payloadHash");
+    msg.payload["payloadHash"] = reliablePayloadHashFor(msg);
+}
+
+void HostSessionCore::rememberReliableOutbound(const ReliableOutbound& outbound) {
+    if (outbound.messageId.empty()) return;
+    std::lock_guard<std::mutex> lock(mReliableMutex);
+    mReliableOutbound[outbound.messageId] = outbound;
+    while (mReliableOutbound.size() > ReliableCacheLimit && !mReliableOutbound.empty()) {
+        mReliableOutbound.erase(mReliableOutbound.begin());
+    }
+}
+
+bool HostSessionCore::rememberReliableInbound(const Message& msg) {
+    const auto messageId = payloadStringField(msg, "messageId");
+    const auto payloadHash = payloadStringField(msg, "payloadHash");
+    if (messageId.empty() || payloadHash.empty()) return true;
+
+    std::lock_guard<std::mutex> lock(mReliableMutex);
+    const auto existing = mReliableSeen.find(messageId);
+    if (existing != mReliableSeen.end()) {
+        if (existing->second == payloadHash) return false;
+        chatEmit(mCallbacks.onError, "Rejected conflicting reliable relay payload: " + messageId);
+        return false;
+    }
+
+    mReliableSeen[messageId] = payloadHash;
+    mReliableSeenOrder.push_back(messageId);
+    while (mReliableSeenOrder.size() > ReliableCacheLimit) {
+        mReliableSeen.erase(mReliableSeenOrder.front());
+        mReliableSeenOrder.pop_front();
+    }
     return true;
+}
+
+void HostSessionCore::sendReliableNotice(const ReliableOutbound& outbound) {
+    Message notice;
+    notice.type = "relay_notice";
+    notice.from = currentHostActorName();
+    notice.payload = {
+        {"messageId", outbound.messageId},
+        {"payloadHash", outbound.payloadHash},
+        {"epoch", mGroupKeyEpoch},
+        {"senderId", outbound.senderId},
+        {"senderFingerprint", mIdentity.fingerprint()},
+        {"targetId", outbound.targetId},
+        {"payloadType", outbound.message.type}
+    };
+    if (outbound.message.payload.is_object()) {
+        for (const auto& field : {"transferId", "chunkIndex", "chunkCount", "fileHash"}) {
+            auto it = outbound.message.payload.find(field);
+            if (it != outbound.message.payload.end()) notice.payload[field] = *it;
+        }
+    }
+    sendRelayMessage(notice, outbound.senderId, outbound.senderName, outbound.senderKind, outbound.targetId);
+}
+
+void HostSessionCore::handleReliableNotice(const Message& msg) {
+    if (!msg.payload.is_object()) return;
+    const auto messageId = payloadStringField(msg, "messageId");
+    const auto payloadHash = payloadStringField(msg, "payloadHash");
+    const auto senderId = payloadStringField(msg, "senderId");
+    const auto targetId = payloadStringField(msg, "targetId");
+    if (messageId.empty() || payloadHash.empty() || senderId.empty()) return;
+    if (senderId == chat::protocol::HostActorId) return;
+    if (!targetId.empty() && targetId != chat::protocol::HostActorId) return;
+
+    {
+        std::lock_guard<std::mutex> lock(mReliableMutex);
+        const auto existing = mReliableSeen.find(messageId);
+        if (existing != mReliableSeen.end() && existing->second == payloadHash) return;
+    }
+
+    Message missing;
+    missing.type = "missing_message";
+    missing.from = currentHostActorName();
+    missing.payload = {
+        {"messageId", messageId},
+        {"payloadHash", payloadHash},
+        {"epoch", mGroupKeyEpoch},
+        {"targetSenderId", senderId},
+        {"requesterId", chat::protocol::HostActorId}
+    };
+    const auto chunkIndex = payloadStringField(msg, "chunkIndex");
+    if (!chunkIndex.empty()) {
+        missing.payload["missingChunks"] = json::array({chunkIndex});
+    }
+    const auto transferId = payloadStringField(msg, "transferId");
+    if (!transferId.empty()) {
+        missing.payload["transferId"] = transferId;
+    }
+
+    const auto bitmap = chunkIndex.empty() ? messageId : chunkIndex;
+    const auto requestId = chat::cert_utils::sha256Hex(messageId + "\n" + payloadHash + "\n" + bitmap);
+    try {
+        chat::relay_pool::recordRelayMissing(mRoomDir, requestId, messageId, bitmap, 0);
+    }
+    catch (...) {
+    }
+    sendRelayMessage(missing, chat::protocol::HostActorId, mDisplayName, chat::protocol::HostActorKind, senderId);
+}
+
+void HostSessionCore::handleMissingMessage(const Message& msg) {
+    if (!msg.payload.is_object()) return;
+    const auto targetSenderId = payloadStringField(msg, "targetSenderId");
+    if (!targetSenderId.empty() && targetSenderId != chat::protocol::HostActorId) return;
+    const auto messageId = payloadStringField(msg, "messageId");
+    const auto payloadHash = payloadStringField(msg, "payloadHash");
+    if (messageId.empty() || payloadHash.empty()) return;
+
+    ReliableOutbound outbound;
+    {
+        std::lock_guard<std::mutex> lock(mReliableMutex);
+        auto it = mReliableOutbound.find(messageId);
+        if (it == mReliableOutbound.end() || it->second.payloadHash != payloadHash) return;
+        if (it->second.retryCount >= ReliableRetryLimit) return;
+        ++it->second.retryCount;
+        if (!it->second.message.payload.is_object()) it->second.message.payload = json::object();
+        it->second.message.payload["attempt"] = it->second.retryCount;
+        it->second.message.payload.erase("routeNonce");
+        outbound = it->second;
+    }
+
+    const auto bitmap = reliableMissingBitmapFor(outbound.message);
+    const auto requestId = chat::cert_utils::sha256Hex(messageId + "\n" + payloadHash + "\n" + bitmap);
+    try {
+        chat::relay_pool::recordRelayMissing(mRoomDir, requestId, messageId, bitmap.empty() ? messageId : bitmap, outbound.retryCount);
+    }
+    catch (...) {
+    }
+    sendPreparedRelayMessage(outbound, true);
 }
 
 Message HostSessionCore::wrapPairwiseForTarget(const Message& msg, const std::string& targetId) {
@@ -831,7 +1357,6 @@ bool HostSessionCore::rememberRelayEnvelope(const json& envelope) {
     const auto replayId = chat::secure_relay::replayIdForEnvelope(envelope);
     if (replayId.empty()) return true;
     if (mRecentRelayIds.find(replayId) != mRecentRelayIds.end()) {
-        chatEmit(mCallbacks.onError, "Dropped replayed encrypted relay");
         return false;
     }
     mRecentRelayIds.insert(replayId);
@@ -850,7 +1375,7 @@ bool HostSessionCore::sendGroupStateToClient(
     std::uint64_t epoch) {
     // Host 转发的是已验证 contribution 集合，而不是 Host 自选的原始密钥。
     // Client 解密该状态、验证签名，并自行派生 K_G。
-    if (!mWs || mWs->isClosed()) {
+    if (!hasOpenRelay()) {
         chatEmit(mCallbacks.onStatus, "Signaling channel is not open yet");
         return false;
     }
@@ -863,7 +1388,15 @@ bool HostSessionCore::sendGroupStateToClient(
         epoch);
     // Host 对最终 envelope 签名，使 Client 在接受房间群密钥前能拒绝任何被修改字段。
     mIdentity.signGroupKeyEnvelope(envelope);
-    mWs->send(envelope.dump());
+    std::string relayUrl;
+    {
+        std::lock_guard<std::mutex> lock(mClientsMutex);
+        const auto it = mClientRelayUrls.find(clientId);
+        if (it != mClientRelayUrls.end() && !it->second.empty()) {
+            relayUrl = *it->second.begin();
+        }
+    }
+    sendToRelayUrl(relayUrl, envelope);
     chatEmit(mCallbacks.onStatus, "GKA state sent to " + displayNameForClient(clientId));
     return true;
 }
@@ -900,7 +1433,7 @@ void HostSessionCore::rotateGroupKey(const std::string& reason) {
 }
 
 void HostSessionCore::sendGkaRequestToClients() {
-    if (!mWs || mWs->isClosed()) {
+    if (!hasOpenRelay()) {
         chatEmit(mCallbacks.onStatus, "Signaling channel is not open yet");
         return;
     }
@@ -915,7 +1448,7 @@ void HostSessionCore::sendGkaRequestToClients() {
         {"roomId", mRoomToken},
         {"epoch", epoch}
     };
-    mWs->send(msg.dump());
+    sendToAllRelays(msg);
     // 诊断状态：如果 Client 入房后从未打印 "GKA request received"，
     // 则 Server/proxy 路径没有投递该控制帧。
     chatEmit(mCallbacks.onStatus, "GKA request sent: epoch " + std::to_string(epoch));
@@ -1215,7 +1748,13 @@ bool HostSessionCore::sendAttachmentRelay(
     const auto actor = currentHostActorName();
     const auto targetName = targetId.empty() ? std::string() : displayNameForClient(targetId);
     Message meta = attachment::makeBinaryMeta(metaType, actor, filePath, mime, bytes.size());
+    const auto fileHash = attachment::sha256Hex(bytes);
+    const auto chunkHashes = attachment::chunkSha256Hexes(bytes, attachment::RelayChunkBytes);
     setCurrentHostActorMetadata(meta);
+    meta.payload["fileHash"] = fileHash;
+    meta.payload["chunkSize"] = static_cast<std::uint64_t>(attachment::RelayChunkBytes);
+    meta.payload["chunkCount"] = static_cast<std::uint64_t>(chunkHashes.size());
+    meta.payload["chunkHashes"] = chunkHashes;
     markPrivateTarget(meta, targetId, targetName);
     if (!sendRelayMessage(meta, chat::protocol::HostActorId, mDisplayName, chat::protocol::HostActorKind, targetId)) {
         return false;
@@ -1224,6 +1763,7 @@ bool HostSessionCore::sendAttachmentRelay(
     const auto transferId = attachment::transferIdFromMessage(meta);
     for (std::size_t offset = 0; offset < bytes.size(); offset += attachment::RelayChunkBytes) {
         const auto chunkSize = (std::min)(attachment::RelayChunkBytes, bytes.size() - offset);
+        const auto chunkIndex = offset / attachment::RelayChunkBytes;
         Message chunk;
         chunk.type = binaryType;
         chunk.from = actor;
@@ -1236,7 +1776,10 @@ bool HostSessionCore::sendAttachmentRelay(
             {"mime", meta.mime},
             {"size", static_cast<int>(bytes.size())},
             {"offset", static_cast<int>(offset)},
-            {"chunkSize", static_cast<int>(chunkSize)}
+            {"chunkSize", static_cast<int>(chunkSize)},
+            {"chunkIndex", static_cast<int>(chunkIndex)},
+            {"chunkHash", chunkHashes[chunkIndex]},
+            {"fileHash", fileHash}
         };
         setCurrentHostActorMetadata(chunk);
         markPrivateTarget(chunk, targetId, targetName);
@@ -1260,8 +1803,10 @@ bool HostSessionCore::sendAttachmentRelay(
 }
 
 // 处理发给 Host 房主的信令 WebSocket 消息。
-void HostSessionCore::handleSignalingMessage(const std::string& s) {
+void HostSessionCore::handleSignalingMessage(const SignalingFrame& frame) {
     if (mStopped.load()) return;
+    const auto& s = frame.payload;
+    const auto& relayUrl = frame.relayUrl;
 
     try {
         // 信令和中继消息都是不可信网络输入。
@@ -1273,9 +1818,23 @@ void HostSessionCore::handleSignalingMessage(const std::string& s) {
         std::string type = j.value("type", "");
 
         if (type == "room_created") {
-            mRoomCreated.store(true);
-            chatEmit(mCallbacks.onStatus, "Room created: " + mRoomId);
-            rotateGroupKey("room created");
+            {
+                std::lock_guard<std::mutex> lock(mRelayMutex);
+                if (mRelayRoomReady.size() < mRelayUrls.size()) mRelayRoomReady.resize(mRelayUrls.size(), false);
+                for (std::size_t i = 0; i < mRelayUrls.size(); ++i) {
+                    if (mRelayUrls[i] == relayUrl) {
+                        mRelayRoomReady[i] = true;
+                        break;
+                    }
+                }
+            }
+            if (!mRoomCreated.exchange(true)) {
+                chatEmit(mCallbacks.onStatus, "Room created: " + mRoomId);
+                rotateGroupKey("room created");
+            }
+            else {
+                chatEmit(mCallbacks.onStatus, "Relay room ready: " + relayLabel(relayUrl));
+            }
         }
         else if (type == "room_members") {
             std::ostringstream members;
@@ -1305,17 +1864,6 @@ void HostSessionCore::handleSignalingMessage(const std::string& s) {
                 }
             }
             chatEmit(mCallbacks.onStatus, "Room members: " + members.str());
-            {
-                std::lock_guard<std::mutex> lock(mClientsMutex);
-                for (auto it = mConnectedClientIds.begin(); it != mConnectedClientIds.end();) {
-                    if (onlineClientIds.find(*it) == onlineClientIds.end()) {
-                        it = mConnectedClientIds.erase(it);
-                    }
-                    else {
-                        ++it;
-                    }
-                }
-            }
             bool addedClient = false;
             bool onlineChanged = false;
             for (const auto& member : clientIdentityCandidates) {
@@ -1330,6 +1878,9 @@ void HostSessionCore::handleSignalingMessage(const std::string& s) {
                 {
                     std::lock_guard<std::mutex> lock(mClientsMutex);
                     alreadyKnown = mClientNames.find(id) != mClientNames.end();
+                    if (alreadyKnown) {
+                        mClientRelayUrls[id].insert(relayUrl);
+                    }
                     if (alreadyKnown && mConnectedClientIds.insert(id).second) {
                         onlineChanged = true;
                     }
@@ -1350,6 +1901,7 @@ void HostSessionCore::handleSignalingMessage(const std::string& s) {
                         mClientIdentitySubjects[id] = verified.subject;
                         mClientIdentityObjects[id] = *identity;
                         mConnectedClientIds.insert(id);
+                        mClientRelayUrls[id].insert(relayUrl);
                     }
                     chatEmit(mCallbacks.onStatus, "PKI member verified: " + (displayName.empty() ? username : displayName) + " / " + id + " / " + verified.fingerprint);
                     addedClient = true;
@@ -1413,8 +1965,7 @@ void HostSessionCore::handleSignalingMessage(const std::string& s) {
                     std::lock_guard<std::mutex> lock(mClientsMutex);
                     bannedCertificate = mBannedIdentityFingerprints.find(identityFingerprint) != mBannedIdentityFingerprints.end();
                     for (const auto& [knownId, knownFingerprint] : mClientIdentityFingerprints) {
-                        if (knownFingerprint == identityFingerprint &&
-                            mConnectedClientIds.find(knownId) == mConnectedClientIds.end()) {
+                        if (knownFingerprint == identityFingerprint) {
                             knownMemberRejoin = true;
                             break;
                         }
@@ -1437,19 +1988,20 @@ void HostSessionCore::handleSignalingMessage(const std::string& s) {
             json pending = j;
             pending["fingerprint"] = identityFingerprint;
             pending["subject"] = identitySubject;
+            pending["relayUrl"] = relayUrl;
             {
                 std::lock_guard<std::mutex> lock(mClientsMutex);
                 mPendingJoinRequests[requestId] = pending;
+            }
+            if (knownMemberRejoin) {
+                approvePendingJoin(requestId);
+                return;
             }
             chatEmit(
                 mCallbacks.onStatus,
                 "Pending join verified: " + (displayName.empty() ? username : displayName) +
                     " / " + requestId +
                     " / " + identityFingerprint);
-            if (knownMemberRejoin) {
-                chatEmit(mCallbacks.onStatus, "Known member rejoin approved automatically: " + username);
-                approvePendingJoin(requestId);
-            }
         }
         else if (type == "pending_join_cancelled") {
             const auto requestId = j.value("requestId", "");
@@ -1520,12 +2072,15 @@ void HostSessionCore::handleSignalingMessage(const std::string& s) {
                 rejectClient(clientId, "member certificate is banned");
                 return;
             }
+            bool wasKnownClient = false;
             {
                 std::lock_guard<std::mutex> lock(mClientsMutex);
+                wasKnownClient = mClientNames.find(clientId) != mClientNames.end();
                 mClientUsernames[clientId] = username;
                 mClientNames[clientId] = displayName.empty() ? username : displayName;
                 if (!publicKey.empty()) mClientPublicKeys[clientId] = publicKey;
                 if (!clientId.empty()) mConnectedClientIds.insert(clientId);
+                if (!clientId.empty()) mClientRelayUrls[clientId].insert(relayUrl);
                 if (!identityFingerprint.empty()) {
                     mClientIdentityFingerprints[clientId] = identityFingerprint;
                     mClientIdentitySubjects[clientId] = identitySubject;
@@ -1543,7 +2098,7 @@ void HostSessionCore::handleSignalingMessage(const std::string& s) {
                     }
                 }
             }
-            if (!clientId.empty()) {
+            if (!clientId.empty() && !wasKnownClient) {
                 chatEmit(mCallbacks.onStatus, "Client joined: " +
                     (displayName.empty() ? username : displayName) + " / " + clientId);
                 // 新成员加入意味着需要新的房间群密钥，
@@ -1553,6 +2108,17 @@ void HostSessionCore::handleSignalingMessage(const std::string& s) {
         }
         else if (type == "client_left") {
             const std::string clientId = j.value("clientId", "");
+            bool stillConnectedOnRelay = false;
+            {
+                std::lock_guard<std::mutex> lock(mClientsMutex);
+                auto it = mClientRelayUrls.find(clientId);
+                if (it != mClientRelayUrls.end()) {
+                    it->second.erase(relayUrl);
+                    stillConnectedOnRelay = !it->second.empty();
+                    if (it->second.empty()) mClientRelayUrls.erase(it);
+                }
+            }
+            if (stillConnectedOnRelay) return;
             markClientDisconnected(clientId);
         }
         else if (type == chat::secure_relay::GkaContributionType) {
@@ -1590,6 +2156,9 @@ void HostSessionCore::handleSignalingMessage(const std::string& s) {
                 // 非目标成员会静默丢弃它，避免暴露私发事件。
                 return;
             }
+            if (isReliablePayloadType(msg.type) && !rememberReliableInbound(msg)) {
+                return;
+            }
             if (msg.type == chat::secure_relay::PairwisePrivateType) {
                 try {
                     msg = decryptPairwiseFromClient(msg);
@@ -1606,14 +2175,14 @@ void HostSessionCore::handleSignalingMessage(const std::string& s) {
             chatEmit(mCallbacks.onStatus, "Room is no longer available: " + reason);
             mStopped.store(true);
             stopGkaTimeoutWorker();
-            if (mWs && !mWs->isClosed()) mWs->close();
+            requestStopNoJoin();
         }
         else if (type == "error") {
             const std::string message = j.value("message", "unknown");
             chatEmit(mCallbacks.onError, "Signaling server error: " + message);
             if (message == "room already exists") {
                 mStopped.store(true);
-                if (mWs && !mWs->isClosed()) mWs->close();
+                requestStopNoJoin();
                 chatEmit(mCallbacks.onStatus, "Session stopped");
             }
         }
@@ -1685,6 +2254,7 @@ void HostSessionCore::removeClient(const std::string& id) {
         knownClient = mClientIdentityFingerprints.erase(id) > 0 || knownClient;
         knownClient = mClientIdentitySubjects.erase(id) > 0 || knownClient;
         knownClient = mClientIdentityObjects.erase(id) > 0 || knownClient;
+        mClientRelayUrls.erase(id);
         mConnectedClientIds.erase(id);
         mSilencedClientIds.erase(id);
     }
@@ -1700,7 +2270,7 @@ void HostSessionCore::removeClient(const std::string& id) {
 }
 
 void HostSessionCore::setClientSilenced(const std::string& target, bool silenced) {
-    if (!mWs || mWs->isClosed()) {
+    if (!hasOpenRelay()) {
         chatEmit(mCallbacks.onStatus, "Signaling channel is not open yet");
         return;
     }
@@ -1739,7 +2309,7 @@ void HostSessionCore::setClientSilenced(const std::string& target, bool silenced
 }
 
 void HostSessionCore::evictClient(const std::string& target) {
-    if (!mWs || mWs->isClosed()) {
+    if (!hasOpenRelay()) {
         chatEmit(mCallbacks.onStatus, "Signaling channel is not open yet");
         return;
     }
@@ -1782,7 +2352,7 @@ void HostSessionCore::evictClient(const std::string& target) {
 }
 
 void HostSessionCore::sendClientModeration(const std::string& type, const std::string& clientId) {
-    if (clientId.empty() || !mWs || mWs->isClosed()) {
+    if (clientId.empty() || !hasOpenRelay()) {
         chatEmit(mCallbacks.onStatus, "Signaling channel is not open yet");
         return;
     }
@@ -1791,10 +2361,19 @@ void HostSessionCore::sendClientModeration(const std::string& type, const std::s
         {"roomId", mRoomToken},
         {"targetId", clientId}
     };
-    mWs->send(msg.dump());
+    sendToAllRelays(msg);
 }
 
 void HostSessionCore::handleRelayMessage(const Message& msg) {
+    if (msg.type == "relay_notice") {
+        handleReliableNotice(msg);
+        return;
+    }
+    if (msg.type == "missing_message") {
+        handleMissingMessage(msg);
+        return;
+    }
+
     // member_identity 是 Host 发起且只发给 Client 的控制消息；
     // 如果它回环到 Host，Host 会忽略。
     if (msg.type == "member_identity") {
@@ -1818,7 +2397,10 @@ void HostSessionCore::handleRelayMessage(const Message& msg) {
             kind,
             transferId,
             msg.name,
-            attachment::expectedSizeFromMeta(msg, kind));
+            attachment::expectedSizeFromMeta(msg, kind),
+            attachment::chunkSizeFromMeta(msg),
+            attachment::fileHashFromMeta(msg),
+            attachment::chunkHashesFromMeta(msg));
         Message out = msg;
         out.name = pending.name;
         out.payload["transferId"] = pending.transferId;
@@ -1851,7 +2433,10 @@ void HostSessionCore::handleRelayBinaryChunk(const std::string& senderKey, const
         if (transferId != mPendingTransfers.activeTransferId(senderKey)) {
             throw std::runtime_error("attachment chunk transfer id does not match pending meta");
         }
-        const auto result = mPendingTransfers.appendChunk(senderKey, attachment::base64DecodeToRtcBytes(msg.data));
+        const auto result = mPendingTransfers.appendChunk(
+            senderKey,
+            attachment::chunkOffsetFromMessage(msg),
+            attachment::base64DecodeToRtcBytes(msg.data));
         if (!result.found) {
             chatEmit(mCallbacks.onError, "Unexpected encrypted attachment chunk from " + senderKey);
             return;
@@ -1949,14 +2534,14 @@ std::string HostSessionCore::resolvePendingJoinId(const std::string& token) {
 }
 
 void HostSessionCore::rejectClient(const std::string& clientId, const std::string& reason) {
-    if (clientId.empty() || !mWs || mWs->isClosed()) return;
+    if (clientId.empty() || !hasOpenRelay()) return;
     json msg = {
         {"type", "reject_client"},
         {"roomId", mRoomToken},
         {"targetId", clientId},
         {"reason", reason}
     };
-    mWs->send(msg.dump());
+    sendToAllRelays(msg);
 }
 
 void HostSessionCore::announceVerifiedMember(

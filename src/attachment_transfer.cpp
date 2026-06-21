@@ -1,6 +1,7 @@
 // 附件传输实现。它校验本地文件、净化入站名称、分片载荷并保存接收附件缓存。
 #include "attachment_transfer.hpp"
 
+#include "cert_utils.hpp"
 #include "local_paths.hpp"
 
 #include <openssl/evp.h>
@@ -296,6 +297,52 @@ void validateSignatureOrThrow(const std::vector<unsigned char>& bytes, Kind kind
     }
 }
 
+bool isSha256Hex(const std::string& value) {
+    if (value.size() != 64) return false;
+    return std::all_of(value.begin(), value.end(), [](unsigned char ch) {
+        return std::isxdigit(ch) != 0;
+    });
+}
+
+std::size_t payloadSizeField(const Message& msg, const std::string& name, const std::string& label) {
+    if (!msg.payload.is_object() || !msg.payload.contains(name)) {
+        throw std::runtime_error(label + " is missing");
+    }
+
+    const auto& raw = msg.payload[name];
+    std::uint64_t value = 0;
+    if (raw.is_number_unsigned()) {
+        value = raw.get<std::uint64_t>();
+    }
+    else if (raw.is_number_integer()) {
+        const auto signedValue = raw.get<std::int64_t>();
+        if (signedValue < 0) throw std::runtime_error(label + " must be non-negative");
+        value = static_cast<std::uint64_t>(signedValue);
+    }
+    else {
+        throw std::runtime_error(label + " must be numeric");
+    }
+    if (value > static_cast<std::uint64_t>((std::numeric_limits<std::size_t>::max)())) {
+        throw std::runtime_error(label + " is too large");
+    }
+    return static_cast<std::size_t>(value);
+}
+
+std::string payloadStringField(const Message& msg, const std::string& name, const std::string& label) {
+    if (!msg.payload.is_object() || !msg.payload.contains(name) || !msg.payload[name].is_string()) {
+        throw std::runtime_error(label + " is missing");
+    }
+    return trimCopy(msg.payload[name].get<std::string>());
+}
+
+std::vector<unsigned char> readBytesFromPath(const std::string& path) {
+    std::ifstream file(pathFromUtf8(path), std::ios::binary);
+    if (!file) {
+        throw std::runtime_error("could not reopen received attachment cache");
+    }
+    return std::vector<unsigned char>((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+}
+
 void applyReceivedFileProtection(const std::string& path) {
 #ifdef _WIN32
     // Windows Mark-of-the-Web。使用 ADS 标记网络来源，使资源管理器和部分解析器
@@ -426,6 +473,48 @@ std::size_t expectedSizeFromMeta(const Message& msg, Kind kind) {
     return static_cast<std::size_t>(size);
 }
 
+std::size_t chunkSizeFromMeta(const Message& msg) {
+    const auto chunkSize = payloadSizeField(msg, "chunkSize", "attachment meta chunk size");
+    if (chunkSize == 0 || chunkSize > RelayChunkBytes) {
+        throw std::runtime_error("attachment meta chunk size is invalid");
+    }
+    return chunkSize;
+}
+
+std::string fileHashFromMeta(const Message& msg) {
+    auto hash = payloadStringField(msg, "fileHash", "attachment meta file hash");
+    if (!isSha256Hex(hash)) {
+        throw std::runtime_error("attachment meta file hash is invalid");
+    }
+    return hash;
+}
+
+std::vector<std::string> chunkHashesFromMeta(const Message& msg) {
+    if (!msg.payload.is_object() || !msg.payload.contains("chunkHashes") || !msg.payload["chunkHashes"].is_array()) {
+        throw std::runtime_error("attachment meta chunk hashes are missing");
+    }
+
+    std::vector<std::string> hashes;
+    for (const auto& item : msg.payload["chunkHashes"]) {
+        if (!item.is_string()) {
+            throw std::runtime_error("attachment meta chunk hash must be a string");
+        }
+        auto hash = trimCopy(item.get<std::string>());
+        if (!isSha256Hex(hash)) {
+            throw std::runtime_error("attachment meta chunk hash is invalid");
+        }
+        hashes.push_back(std::move(hash));
+    }
+    if (hashes.empty()) {
+        throw std::runtime_error("attachment meta chunk hashes are empty");
+    }
+    return hashes;
+}
+
+std::size_t chunkOffsetFromMessage(const Message& msg) {
+    return payloadSizeField(msg, "offset", "attachment chunk offset");
+}
+
 std::string transferIdFromMessage(const Message& msg) {
     if (msg.payload.is_object() && msg.payload.contains("transferId")) {
         const auto& value = msg.payload["transferId"];
@@ -446,6 +535,23 @@ std::string makeTransferId() {
     return out.str();
 }
 
+std::string sha256Hex(const std::vector<unsigned char>& data) {
+    return data.empty()
+        ? chat::cert_utils::sha256Hex(reinterpret_cast<const unsigned char*>(""), 0)
+        : chat::cert_utils::sha256Hex(data.data(), data.size());
+}
+
+std::vector<std::string> chunkSha256Hexes(const std::vector<unsigned char>& data, std::size_t chunkSize) {
+    if (chunkSize == 0) throw std::runtime_error("attachment chunk size is invalid");
+
+    std::vector<std::string> hashes;
+    for (std::size_t offset = 0; offset < data.size(); offset += chunkSize) {
+        const auto size = (std::min)(chunkSize, data.size() - offset);
+        hashes.push_back(chat::cert_utils::sha256Hex(data.data() + offset, size));
+    }
+    return hashes;
+}
+
 void ReceiveStore::setRoomContext(const std::string& roomName, const std::string& roomToken) {
     std::lock_guard<std::mutex> lock(mMutex);
     mRoomName = roomName;
@@ -457,7 +563,10 @@ ReceiveSlot ReceiveStore::stage(
     Kind kind,
     const std::string& transferId,
     const std::string& name,
-    std::size_t expectedSize) {
+    std::size_t expectedSize,
+    std::size_t chunkSize,
+    std::string fileHash,
+    std::vector<std::string> chunkHashes) {
     // 元数据先于分片到达。先暂存净化后的输出路径和预期大小，
     // 防止后续分片自行选择文件系统目标。
     if (transferId.empty()) {
@@ -468,6 +577,21 @@ ReceiveSlot ReceiveStore::stage(
     }
     if (expectedSize > maxBytes(kind)) {
         throw std::runtime_error(limitError(kind));
+    }
+    if (chunkSize == 0 || chunkSize > RelayChunkBytes) {
+        throw std::runtime_error("attachment chunk size is invalid");
+    }
+    if (!isSha256Hex(fileHash)) {
+        throw std::runtime_error("attachment file hash is invalid");
+    }
+    const auto expectedChunks = (expectedSize + chunkSize - 1) / chunkSize;
+    if (chunkHashes.size() != expectedChunks) {
+        throw std::runtime_error("attachment chunk hash count does not match file size");
+    }
+    for (const auto& hash : chunkHashes) {
+        if (!isSha256Hex(hash)) {
+            throw std::runtime_error("attachment chunk hash is invalid");
+        }
     }
     validateExtensionOrThrow(name, kind);
     pruneReceiveCacheFor(expectedSize);
@@ -480,6 +604,10 @@ ReceiveSlot ReceiveStore::stage(
     slot.path = transferPath(receiveDirectory(kind, mRoomName, mRoomToken), slot.name, fallback);
     slot.expectedSize = expectedSize;
     slot.receivedSize = 0;
+    slot.chunkSize = chunkSize;
+    slot.fileHash = std::move(fileHash);
+    slot.chunkHashes = std::move(chunkHashes);
+    slot.receivedChunks.assign(expectedChunks, false);
 
     std::lock_guard<std::mutex> lock(mMutex);
     if (mSlots.find(key) != mSlots.end()) {
@@ -505,26 +633,39 @@ void ReceiveStore::clear(const std::string& key) {
     mSlots.erase(key);
 }
 
-ReceiveChunkResult ReceiveStore::appendChunk(const std::string& key, const rtc::binary& data) {
-    // 为该发送者的活动传输精确追加一个已解密分片。
-    // 完成后清空待处理槽位，使下一个附件必须从新元数据开始。
+ReceiveChunkResult ReceiveStore::appendChunk(const std::string& key, std::size_t offset, const rtc::binary& data) {
+    // 为该发送者的活动传输写入一个已解密分片。分片可能从不同 relay 乱序到达，
+    // 因此这里按 offset 写文件，并用元数据中的 SHA-256 摘要校验完整性。
     std::lock_guard<std::mutex> lock(mMutex);
     auto pending = mSlots.find(key);
     if (pending == mSlots.end()) return {};
 
     auto& slot = pending->second;
-    if (slot.receivedSize + data.size() > maxBytes(slot.kind)) {
+    if (data.empty() || offset >= slot.expectedSize || offset + data.size() > slot.expectedSize) {
         const auto cachePath = slot.path;
         mSlots.erase(pending);
         std::filesystem::remove(pathFromUtf8(cachePath));
-        throw std::runtime_error(limitError(slot.kind));
+        throw std::runtime_error("attachment chunk range is invalid");
     }
-
-    std::ofstream file(
-        pathFromUtf8(slot.path),
-        slot.receivedSize == 0 ? std::ios::binary : (std::ios::binary | std::ios::app));
-    if (!file) {
-        throw std::runtime_error("could not open received attachment cache");
+    if (slot.chunkSize == 0 || offset % slot.chunkSize != 0) {
+        const auto cachePath = slot.path;
+        mSlots.erase(pending);
+        std::filesystem::remove(pathFromUtf8(cachePath));
+        throw std::runtime_error("attachment chunk offset is invalid");
+    }
+    const auto chunkIndex = offset / slot.chunkSize;
+    if (chunkIndex >= slot.receivedChunks.size() || chunkIndex >= slot.chunkHashes.size()) {
+        const auto cachePath = slot.path;
+        mSlots.erase(pending);
+        std::filesystem::remove(pathFromUtf8(cachePath));
+        throw std::runtime_error("attachment chunk index is invalid");
+    }
+    const auto expectedChunkSize = (std::min)(slot.chunkSize, slot.expectedSize - offset);
+    if (data.size() != expectedChunkSize) {
+        const auto cachePath = slot.path;
+        mSlots.erase(pending);
+        std::filesystem::remove(pathFromUtf8(cachePath));
+        throw std::runtime_error("attachment chunk size does not match metadata");
     }
 
     std::vector<unsigned char> bytes;
@@ -532,9 +673,15 @@ ReceiveChunkResult ReceiveStore::appendChunk(const std::string& key, const rtc::
     for (auto byte : data) {
         bytes.push_back(static_cast<unsigned char>(byte));
     }
+    if (sha256Hex(bytes) != slot.chunkHashes[chunkIndex]) {
+        const auto cachePath = slot.path;
+        mSlots.erase(pending);
+        std::filesystem::remove(pathFromUtf8(cachePath));
+        throw std::runtime_error("attachment chunk hash mismatch");
+    }
     // 在 UI 或转发路径把任意字节当作媒体处理前，拒绝伪装图片/语音。
     // 首分片足以立即验证 PNG/JPEG/BMP 和 WAV 文件头。
-    if (slot.receivedSize == 0 && slot.kind != Kind::Text) {
+    if (chunkIndex == 0 && slot.kind != Kind::Text) {
         try {
             validateSignatureOrThrow(bytes, slot.kind, slot.name);
         }
@@ -545,14 +692,38 @@ ReceiveChunkResult ReceiveStore::appendChunk(const std::string& key, const rtc::
             throw;
         }
     }
+
+    if (!slot.receivedChunks[chunkIndex] && slot.receivedSize + bytes.size() > maxBytes(slot.kind)) {
+        const auto cachePath = slot.path;
+        mSlots.erase(pending);
+        std::filesystem::remove(pathFromUtf8(cachePath));
+        throw std::runtime_error(limitError(slot.kind));
+    }
+
+    const auto filePath = pathFromUtf8(slot.path);
+    if (!std::filesystem::exists(filePath)) {
+        std::ofstream create(filePath, std::ios::binary | std::ios::trunc);
+        if (!create) throw std::runtime_error("could not create received attachment cache");
+    }
+
+    std::fstream file(filePath, std::ios::binary | std::ios::in | std::ios::out);
+    if (!file) {
+        throw std::runtime_error("could not open received attachment cache");
+    }
+    file.seekp(static_cast<std::streamoff>(offset), std::ios::beg);
     file.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
     file.close();
 
-    slot.receivedSize += bytes.size();
+    if (!slot.receivedChunks[chunkIndex]) {
+        slot.receivedChunks[chunkIndex] = true;
+        slot.receivedSize += bytes.size();
+    }
 
     ReceiveChunkResult result;
     result.found = true;
-    result.complete = slot.expectedSize == 0 || slot.receivedSize >= slot.expectedSize;
+    result.complete = std::all_of(slot.receivedChunks.begin(), slot.receivedChunks.end(), [](bool received) {
+        return received;
+    });
     if (result.complete && slot.kind != Kind::Text) {
         if (!hasExpectedFileSignature(slot.path, slot.kind)) {
             const auto cachePath = slot.path;
@@ -562,6 +733,13 @@ ReceiveChunkResult ReceiveStore::appendChunk(const std::string& key, const rtc::
         }
     }
     if (result.complete) {
+        const auto finalBytes = readBytesFromPath(slot.path);
+        if (finalBytes.size() != slot.expectedSize || sha256Hex(finalBytes) != slot.fileHash) {
+            const auto cachePath = slot.path;
+            mSlots.erase(pending);
+            std::filesystem::remove(pathFromUtf8(cachePath));
+            throw std::runtime_error("attachment file hash mismatch");
+        }
         applyReceivedFileProtection(slot.path);
     }
     result.slot = slot;

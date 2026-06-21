@@ -13,6 +13,7 @@
 #include "host_session_core.hpp"
 #include "client_session_core.hpp"
 #include "pki_application.hpp"
+#include "relay_pool.hpp"
 
 #include <nlohmann/json.hpp>
 #include <rtc/rtc.hpp>
@@ -85,6 +86,7 @@ ChatCallbacks makeCallbacks() {
     callbacks.onFile = [](const std::string& message) { emitEvent("file", message); };
     callbacks.onVoice = [](const std::string& message) { emitEvent("voice", message); };
     callbacks.onStatus = [](const std::string& message) { emitEvent("status", message); };
+    callbacks.onRelayStatus = [](const std::string& message) { emitEvent("relay_status", message); };
     return callbacks;
 }
 
@@ -334,7 +336,7 @@ int CHAT_CALL chat_list_local_room_dirs(
             safeString(room_name),
             safeString(username),
             safeString(role),
-            "logs/certs");
+            "logs");
         nlohmann::json payload = nlohmann::json::array();
         for (const auto& room : rooms) {
             payload.push_back({
@@ -388,7 +390,6 @@ int CHAT_CALL chat_get_message_history(char* output_json, int output_json_size) 
 
 // 从 room-dir 读取 room token 和房间级 Host PKI，然后创建 Host 会话。
 int CHAT_CALL chat_host_start(
-    const char* server_url,
     const char* room_dir,
     const char* username,
     const char* nickname,
@@ -402,16 +403,12 @@ int CHAT_CALL chat_host_start(
             retireActiveObjects(RetireMode::BlockingStop);
         }
 
-        const std::string serverUrl = safeString(server_url);
         const std::string roomDir = safeString(room_dir);
-        if (serverUrl.empty()) {
-            emitEvent("error", "Server URL is required");
-            return 0;
-        }
         if (roomDir.empty()) {
             emitEvent("error", "Room certificate directory is required");
             return 0;
         }
+        const auto relayUrl = chat::relay_pool::primaryRelayUrlFromRoomDir(std::filesystem::path(roomDir));
 
         const auto material = chat::certs::loadRoomRuntimeMaterial(
             roomDir,
@@ -424,7 +421,7 @@ int CHAT_CALL chat_host_start(
             safeString(key_pass));
 
         auto hostSession = std::make_shared<HostSessionCore>(
-            serverUrl,
+            relayUrl,
             material.roomName,
             material.username,
             material.baseUsername,
@@ -439,7 +436,7 @@ int CHAT_CALL chat_host_start(
         }
 
         hostSession->start();
-        emitEvent("status", "Hosting room through " + serverUrl);
+        emitEvent("status", "Hosting room through relay " + relayUrl);
         return 1;
     }
     catch (const std::exception& e) {
@@ -451,9 +448,8 @@ int CHAT_CALL chat_host_start(
 }
 
 // WinUI 自动创建房间级证书材料。用户只输入房间名；
-// room-dir 和 entrance.scp 路径作为内部实现细节写入 logs/certs/<digest>/。
+// room-dir 和 entrance.scp 路径作为内部实现细节写入 logs/<room>_<digest>/certs/。
 int CHAT_CALL chat_host_start_auto(
-    const char* server_url,
     const char* room_name,
     const char* username,
     const char* nickname,
@@ -475,11 +471,12 @@ int CHAT_CALL chat_host_start_auto(
         options.roomName = roomName;
         options.roomPhrase = roomName;
         options.hostName = user;
-        options.outputRoot = "logs/certs";
+        options.outputRoot = "logs";
+        options.relayPoolFile = trimCopy(safeString(std::getenv("SECURECHAT_RELAY_POOL_FILE")));
         options.memberKeyPassword = safeString(key_pass);
         const auto created = chat::certs::createRoomEntrance(options);
         emitEvent("status", "Entrance created: " + created.entranceFile);
-        return chat_host_start(server_url, created.roomDir.c_str(), user.c_str(), nickname, key_pass);
+        return chat_host_start(created.roomDir.c_str(), user.c_str(), nickname, key_pass);
     }
     catch (const std::exception& e) {
         emitEvent("error", e.what());
@@ -490,7 +487,6 @@ int CHAT_CALL chat_host_start_auto(
 // 从 room-dir 读取 room token 和房间级 Client PKI，
 // 然后创建 Client 会话。未安装 Host 签发响应时会明确报缺少链证书。
 int CHAT_CALL chat_join_start(
-    const char* url,
     const char* room_dir,
     const char* username,
     const char* nickname,
@@ -503,16 +499,12 @@ int CHAT_CALL chat_join_start(
             retireActiveObjects(RetireMode::BlockingStop);
         }
 
-        const std::string serverUrl = safeString(url);
         const std::string roomDir = safeString(room_dir);
-        if (serverUrl.empty()) {
-            emitEvent("error", "Server URL is required");
-            return 0;
-        }
         if (roomDir.empty()) {
             emitEvent("error", "Room certificate directory is required");
             return 0;
         }
+        const auto relayUrl = chat::relay_pool::primaryRelayUrlFromRoomDir(std::filesystem::path(roomDir));
 
         const auto material = chat::certs::loadRoomRuntimeMaterial(
             roomDir,
@@ -529,13 +521,14 @@ int CHAT_CALL chat_join_start(
         }
 
         auto plSession = std::make_shared<ClientSessionCore>(
-            serverUrl,
+            relayUrl,
             material.roomName,
             material.username,
             material.baseUsername,
             safeString(nickname),
             std::move(identity),
             material.roomInstanceToken,
+            material.admissionSecret,
             roomDir,
             safeString(key_pass));
         {
@@ -557,7 +550,6 @@ int CHAT_CALL chat_join_start(
 // WinUI 自动导入 Host 分发的 entrance.scp。导入后 Client 先进入
 // pending join，Host 审批时才收到成员证书链和当前 group key。
 int CHAT_CALL chat_join_start_auto(
-    const char* url,
     const char* room_name,
     const char* username,
     const char* nickname,
@@ -581,10 +573,10 @@ int CHAT_CALL chat_join_start_auto(
             return 0;
         }
 
-        const auto roomDir = chat::certs::roomDirForEntrance(entrance, roomName, "logs/certs");
+        const auto roomDir = chat::certs::roomDirForEntrance(entrance, roomName, "logs");
         const auto localRoomDir = std::filesystem::path(roomDir);
         bool alreadyImported = false;
-        if (std::filesystem::exists(localRoomDir / "room-state.scb")) {
+        if (std::filesystem::exists(localRoomDir / "certs" / "room-state.scb")) {
             try {
                 (void)chat::certs::loadRoomRuntimeMaterial(roomDir, user, false, false);
                 alreadyImported = true;
@@ -598,12 +590,12 @@ int CHAT_CALL chat_join_start_auto(
             options.entranceFile = entrance;
             options.roomPhrase = roomName;
             options.username = user;
-            options.outputRoot = "logs/certs";
+            options.outputRoot = "logs";
             options.memberKeyPassword = safeString(key_pass);
             const auto imported = chat::certs::importRoomEntrance(options);
             emitEvent("status", "Entrance imported: " + imported.roomDir);
         }
-        return chat_join_start(url, roomDir.c_str(), user.c_str(), nickname, key_pass);
+        return chat_join_start(roomDir.c_str(), user.c_str(), nickname, key_pass);
     }
     catch (const std::exception& e) {
         emitEvent("error", e.what());
@@ -841,31 +833,6 @@ void CHAT_CALL chat_stop() {
     std::lock_guard<std::recursive_mutex> lock(gMutex);
     retireActiveObjects(RetireMode::BlockingStop);
     emitEvent("status", "Session stopped");
-}
-
-void CHAT_CALL chat_close_room() {
-    installNativeCrashHandlersOnce();
-    std::shared_ptr<HostSessionCore> hostSession;
-    std::shared_ptr<ClientSessionCore> clientSession;
-    {
-        std::lock_guard<std::recursive_mutex> lock(gMutex);
-        hostSession = gHostSession;
-        clientSession = gPlSession;
-    }
-
-    if (hostSession && !hostSession->shouldStop()) {
-        hostSession->closeRoom();
-        return;
-    }
-
-    if (clientSession) {
-        std::lock_guard<std::recursive_mutex> lock(gMutex);
-        retireActiveObjects(RetireMode::BlockingStop);
-        emitEvent("status", "Session stopped");
-        return;
-    }
-
-    emitEvent("status", "No active room to close");
 }
 
 // GUI 进程关闭时执行最终清理。

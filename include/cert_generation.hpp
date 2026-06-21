@@ -28,8 +28,9 @@ struct RoomEntranceCreateOptions {
     std::string roomName;
     std::string roomPhrase;
     std::string hostName = "host";
-    std::string outputRoot = "logs/certs";
+    std::string outputRoot = "logs";
     std::string memberKeyPassword;
+    std::string relayPoolFile;
 };
 
 struct RoomEntranceCreateResult {
@@ -49,7 +50,7 @@ struct RoomEntranceImportOptions {
     std::string entranceFile;
     std::string roomPhrase;
     std::string username;
-    std::string outputRoot = "logs/certs";
+    std::string outputRoot = "logs";
     std::string memberKeyPassword;
 };
 
@@ -120,7 +121,7 @@ std::string inspectRoomEntrance(const std::string& entranceFile, const std::stri
 std::string roomDirForEntrance(
     const std::string& entranceFile,
     const std::string& roomPhrase,
-    const std::string& outputRoot = "logs/certs");
+    const std::string& outputRoot = "logs");
 
 // 列出所有匹配房间名、用户名和角色的本机 room-dir。WinUI 总是让用户
 // 显式选择 room instance，即使只有一个候选项，也避免同名房间自动选错。
@@ -128,7 +129,7 @@ std::vector<LocalRoomDirInfo> listLocalRoomDirs(
     const std::string& roomName,
     const std::string& username,
     const std::string& role,
-    const std::string& outputRoot = "logs/certs");
+    const std::string& outputRoot = "logs");
 
 // Client 导入 entrance.scp 后，在本机生成成员私钥和 CSR。私钥不会发给 Host。
 RoomEntranceImportResult importRoomEntrance(const RoomEntranceImportOptions& options);

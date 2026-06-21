@@ -32,7 +32,6 @@
                         <PivotItem x:Name="HostPivotItem" Header="Host">
                             <StackPanel Spacing="10" Padding="0,12,0,0">
                                 <TextBox x:Name="HostRoomBox" Header="Room" />
-                                <TextBox x:Name="HostServerUrlBox" Header="Server URL" />
                                 <TextBox x:Name="HostUserBox" Header="User" />
                                 <Button x:Name="HostJoinButton" Content="Join Room" Click="HostJoin_Click" HorizontalAlignment="Stretch" />
                                 <Button x:Name="HostCreateButton" Content="Create Room" Click="HostCreate_Click" HorizontalAlignment="Stretch" />
@@ -42,7 +41,6 @@
                         <PivotItem x:Name="JoinPivotItem" Header="Join">
                             <StackPanel Spacing="10" Padding="0,12,0,0">
                                 <TextBox x:Name="JoinRoomBox" Header="Room" />
-                                <TextBox x:Name="JoinUrlBox" Header="Server URL" />
                                 <TextBox x:Name="JoinUserBox" Header="User" />
                                 <Button x:Name="JoinExistingButton" Content="Join Room" Click="JoinExisting_Click" HorizontalAlignment="Stretch" />
                                 <Button x:Name="JoinImportButton" Content="Import Room" Click="JoinImport_Click" HorizontalAlignment="Stretch" />
@@ -62,6 +60,15 @@
                                         <TextBlock x:Name="RoomModeText" Text="Mode: not connected" TextWrapping="Wrap" />
                                         <TextBlock x:Name="RoomNameText" Text="Room: -" TextWrapping="Wrap" />
                                     </StackPanel>
+                                </Border>
+                                <TextBlock x:Name="RelayStatusHeaderText" Text="Relay status" FontWeight="SemiBold" />
+                                <Border
+                                    Padding="10"
+                                    Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                    BorderThickness="1"
+                                    CornerRadius="8">
+                                    <TextBlock x:Name="RelayStatusText" Text="-" TextWrapping="Wrap" />
                                 </Border>
                                 <TextBlock x:Name="RoomParticipantsHeaderText" Text="Participants" FontWeight="SemiBold" />
                                 <StackPanel x:Name="RoomParticipantsPanel" Spacing="6" />
@@ -181,10 +188,11 @@
             BorderThickness="0">
             <StackPanel Spacing="6" HorizontalAlignment="Center">
                 <Button
-                    x:Name="StopButton"
-                    Click="Stop_Click"
+                    x:Name="ExitButton"
+                    Click="Exit_Click"
                     Background="Transparent"
                     BorderBrush="Transparent"
+                    ToolTipService.ToolTip="Exit room"
                     Opacity="0.72"
                     Width="34"
                     Height="34"
@@ -192,7 +200,7 @@
                     IsEnabled="True">
                     <Canvas Width="24" Height="24">
                         <Path
-                            x:Name="StopIcon"
+                            x:Name="ExitIcon"
                             Data="M12,3 L12,11 M6.35,6.35 A8,8 0 1 0 17.65,6.35"
                             Stroke="#1C1C1C"
                             StrokeThickness="2"
