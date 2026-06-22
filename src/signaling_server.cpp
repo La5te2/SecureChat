@@ -652,8 +652,8 @@ void SignalingServer::handleRelayProbe(rtc::WebSocket* key, const json& data) {
 }
 
 void SignalingServer::handleCreateRoom(rtc::WebSocket* key, const json& data) {
-    // 房间创建是注册操作：Server 记录一个唯一 opaque room token 和 Host socket。
-    // Server 不创建群密钥，也不成为成员。
+    // 处理 Host 的 create_room 帧：绑定当前 socket、写入 open 状态，
+    // 并把积压的 pending join 交回 Host。
     const std::string roomId = data.value("roomId", "");
     const std::string username = data.value("username", "host");
     const std::string displayName = displayNameOrUsername(data, username);
