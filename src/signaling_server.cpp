@@ -3,6 +3,7 @@
 #include "signaling_server.hpp"
 
 #include "cert_generation.hpp"
+#include "cert_utils.hpp"
 #include "secure_relay.hpp"
 
 #include <algorithm>
@@ -44,6 +45,13 @@ constexpr const char* serverBuildMarker = "securechat-server-20260614-ws-frame-b
 std::string envValue(const char* name) {
     const char* value = std::getenv(name);
     return value == nullptr ? std::string() : std::string(value);
+}
+
+std::string randomRelayInstanceId() {
+    // 该值只在当前 Server 进程内稳定，用于建房前识别同一 backend 的多条访问路径。
+    // Server 重启后生成新值，符合“本次创建房间时去重”的需求。
+    const auto bytes = chat::cert_utils::randomBytes(32);
+    return chat::cert_utils::sha256Hex(bytes.data(), bytes.size());
 }
 
 bool envFlagEnabled(const std::string& value, bool defaultValue) {
@@ -213,7 +221,13 @@ void boundedObjectField(const json& data, const std::string& name, std::size_t m
 void requireFieldsForType(const json& data, const std::string& type) {
     // 信令属于公开网络输入。按类型保持 schema，
     // 避免未知字段变成意外协议扩展或伪造通道。
-    if (type == "create_room") {
+    if (type == "relay_probe") {
+        if (!hasOnlyFields(data, {"type", "nonce"})) {
+            throw std::runtime_error("relay_probe has unknown field");
+        }
+        stringField(data, "nonce", 64, true);
+    }
+    else if (type == "create_room") {
         if (!hasOnlyFields(data, {"type", "roomId", "username", "nickname", "publicKey", "identity"})) {
             throw std::runtime_error("create_room has unknown field");
         }
@@ -404,7 +418,8 @@ void validateIncomingSignaling(const json& data) {
 }
 }
 
-SignalingServer::SignalingServer(uint16_t port) {
+SignalingServer::SignalingServer(uint16_t port)
+    : mRelayInstanceId(randomRelayInstanceId()) {
     rtc::WebSocketServer::Configuration config;
     config.port = port;
     // 独立模式监听所有网卡。本机回环后端部署设置
@@ -573,7 +588,10 @@ void SignalingServer::handleMessage(rtc::WebSocket* key, const std::string& payl
         validateIncomingSignaling(data);
         const std::string type = data.value("type", "");
 
-        if (type == "create_room") {
+        if (type == "relay_probe") {
+            handleRelayProbe(key, data);
+        }
+        else if (type == "create_room") {
             handleCreateRoom(key, data);
         }
         else if (type == "join_room") {
@@ -619,6 +637,18 @@ void SignalingServer::handleMessage(rtc::WebSocket* key, const std::string& payl
     catch (const std::exception& e) {
         recordBadMessage(key, e.what());
     }
+}
+
+void SignalingServer::handleRelayProbe(rtc::WebSocket* key, const json& data) {
+    // relayInstanceId 只用于 Host 在建房前识别“不同 URL 指向同一 Server 进程”的情况。
+    // 它不是身份认证根，也不参与房间密钥协商。
+    sendToClient(key, {
+        {"type", "relay_probe_result"},
+        {"version", 1},
+        {"nonce", data.value("nonce", "")},
+        {"relayInstanceId", mRelayInstanceId},
+        {"scheme", mUrlScheme}
+    });
 }
 
 void SignalingServer::handleCreateRoom(rtc::WebSocket* key, const json& data) {

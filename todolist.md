@@ -970,7 +970,7 @@ PKI 身份认证现在强制绑定成员证书、临时 public key、GKA contrib
 
 ## 阶段 17：房间级本地目录重构与 Relay Mesh
 
-目标：把用户端本地材料统一收束到单个 room instance 根目录，并在该目录下引入房间级共享 relay pool。CLI Host 创建房间时通过 `--pool <file>` 导入原始候选 relay pool 文件；WinUI Host 创建房间时从本地 config 的 `[pool]` 段读取原始候选 relay pool。Host 创建 `entrance.scp` 时对候选 relay 去重，探测当前可连接 relay，再选择最多 4 个 relay 形成房间实际 relay set，并把规范化后的 manifest 写入 entrance 保密 payload。Host 的原始 pool 文件限定在 Host 本机；Client 导入 `entrance.scp` 后从保密 payload 获得同一 room instance 的实际 relay set，并在本机生成 SQLite 副本。网络状态正常时，每个成员都尝试连接房间实际 relay set。文本、附件元数据和附件分片由房间群密钥派生的调度摘要选择 relay；关闭房间事件向房间实际 relay set 投递。
+目标：把用户端本地材料统一收束到单个 room instance 根目录，并在该目录下引入房间级共享 relay pool。CLI Host 创建房间时通过 `--pool <file>` 导入原始候选 relay pool 文件；WinUI Host 创建房间时从本地 config 的 `[pool]` 段读取原始候选 relay pool。Host 创建 `entrance.scp` 时对候选 relay 做 URL 去重和 `relayInstanceId` 去重，探测当前可连接 relay，再选择最多 4 个不同 backend relay 形成房间实际 relay set，并把规范化后的 manifest 写入 entrance 保密 payload。Host 的原始 pool 文件限定在 Host 本机；Client 导入 `entrance.scp` 后从保密 payload 获得同一 room instance 的实际 relay set，并在本机生成 SQLite 副本。网络状态正常时，每个成员都尝试连接房间实际 relay set。文本、附件元数据和附件分片由房间群密钥派生的调度摘要选择 relay；关闭房间事件向房间实际 relay set 投递。
 
 - [x] 重构用户端本地目录模型。
   - 用户端本地材料统一放入 room instance 根目录：
@@ -1023,8 +1023,10 @@ PKI 身份认证现在强制绑定成员证书、临时 public key、GKA contrib
   - relay URL 默认使用 `wss://host:port`；不同 relay 可以使用不同端口，并配合云安全组开放对应端口。
   - 端口异构可以增加默认端口扫描和批量误扫的成本，也便于按 relay 配置安全组；地址或 manifest 泄露、全端口扫描、流量侧观察和定向扫描仍能发现开放端口，因此端口异构属于暴露面治理，不属于核心安全边界。
   - Host 解析原始候选 pool 后先按 URL 去重，再用 600ms 默认探测超时筛出当前可连接集合 `P`。
+  - Host 探测时发送 `relay_probe`，Server 返回当前进程的 `relayInstanceId`；本机地址、域名地址或 frp 地址指向同一 backend 时只保留一条访问路径。
+  - CLI 输出中的 `relayReachable` 表示按 `relayInstanceId` 去重后的可连接 relay/backend 数，不表示可连接 URL 数。
   - Host 从 `P` 中选择最多 4 个 relay 作为房间实际 relay set `N`，满足 `N ⊆ P`，并生成 canonical relay manifest。
-  - canonical relay manifest 字段包括格式版本、manifest id、relay URL、权重、来源、候选数量、可连接数量、选中数量和签名。
+  - canonical relay manifest 字段包括格式版本、manifest id、relay URL、relayInstanceId、权重、来源、候选 URL 数量、可连接 URL 数量、可连接 relay 数量、选中 relay 数量和签名。
   - Host 把 canonical relay manifest 写入 `entrance.scp` 的保密 payload，并把 `N` 的 SQLite 副本写入 `room-dir/relay/relay-pool.sqlite3`。
   - Client 导入 `entrance.scp` 后解出 canonical relay manifest，校验格式、manifest 摘要和 room instance 绑定，再生成自己的 `room-dir/relay/relay-pool.sqlite3`。
   - 同一 room instance 默认共享同一实际 relay set；该集合由 `entrance.scp` 框定。

@@ -22,7 +22,7 @@
 
 ## 房间级 Relay Pool
 
-Host 创建 `entrance.scp` 时读取本机候选 pool，按 URL 去重，使用 600ms 默认探测超时筛出当前可连接 relay，再选择最多 4 个 relay 生成房间级 manifest。候选集合记为 `C`，当前可连接集合记为 `P`，房间实际 relay set 记为 `N`，三者关系为 `N ⊆ P ⊆ C` 且 `|N| <= 4`。Client 导入 `entrance.scp` 后生成同一份 `relay/relay-pool.sqlite3` 本地副本。Host/Client 启动时读取 `N`，每次发送时从本机当前可用子集 `M(t) ⊆ N` 中选择 relay。连接失败的 relay 会进入 degraded/offline 和本机沉默期，同一次失败尝试只记录一次错误；沉默期内不重复重连或刷屏提示，后续发送前再尝试恢复。
+Host 创建 `entrance.scp` 时读取本机候选 pool，按 URL 去重，使用 600ms 默认探测超时筛出当前可连接访问路径。探测阶段会发送 `relay_probe`，Server 返回当前进程的 `relayInstanceId`，Host 再按 `relayInstanceId` 去重，避免本机地址、域名地址或 frp 地址同时指向同一 backend 时被当作多个 relay。候选 URL 集合记为 `C`，按 `relayInstanceId` 去重后的当前可连接 relay 集合记为 `P`，房间实际 relay set 记为 `N`，三者关系为 `N ⊆ P` 且 `|N| <= 4`。Client 导入 `entrance.scp` 后生成同一份 `relay/relay-pool.sqlite3` 本地副本。Host/Client 启动时读取 `N`，每次发送时从本机当前可用子集 `M(t) ⊆ N` 中选择 relay。连接失败的 relay 会进入 degraded/offline 和本机沉默期，同一次失败尝试只记录一次错误；沉默期内不重复重连或刷屏提示，后续发送前再尝试恢复。
 
 Host 只在房间实际 relay set 上创建同一个 room instance。Client 首次加入时从 `N` 中选择一个 admission relay 发送 pending join；如果该 relay 连接失败，Client 会按 admission secret 派生的排序尝试下一个未处于沉默期的 relay。Host 在产生 pending join 的 relay 上 approve 或 reject。Client 获批并安装房间级成员证书后，会自动连接剩余 relay。Host 对同一已验证成员在其他 relay 上的重复 pending join 做静默批准，不生成新的 pending 卡片，也不触发新的 GKA epoch。
 

@@ -85,6 +85,8 @@ private:
     void addClient(std::shared_ptr<rtc::WebSocket> ws);
     // 校验一个 JSON 信令帧，并按协议类型分发。
     void handleMessage(rtc::WebSocket* key, const std::string& payload);
+    // 返回当前 Server 进程的 relay 实例身份，用于 Host 创建房间前去重。
+    void handleRelayProbe(rtc::WebSocket* key, const json& data);
     // 允许 Host 成员在该 Server 上注册唯一房间。
     void handleCreateRoom(rtc::WebSocket* key, const json& data);
     // 允许 Client 成员加入已有房间并发布其 GKA 公钥。
@@ -134,6 +136,7 @@ private:
 
     std::unique_ptr<rtc::WebSocketServer> mServer;
     std::string mUrlScheme = "wss";
+    std::string mRelayInstanceId;
     std::atomic_bool mStopping = false;
     std::thread mMaintenanceThread;
     std::condition_variable mMaintenanceCv;

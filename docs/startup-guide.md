@@ -12,7 +12,7 @@
 
 Server 只需要 TLS 证书和监听参数，不需要成员 PKI。Host 和 Client 使用 `--room-dir` 时会从房间目录自动读取 trust store、成员证书链、成员私钥、room instance token 和 relay pool。
 
-relay pool 可以只有一个入口，也可以有多个入口。多个入口时，每行写一个 `wss://host:port`。Host 创建房间时会先对候选入口去重，再用 600ms 默认探测超时筛出当前可连接 relay，最后选择最多 4 个 relay 写入 `entrance.scp` 和本机 `relay-pool.sqlite3`。Host 只在这组房间实际 relay set 上创建同一个 room instance；Client 获批后会连接同一组 relay。pool 地址集合在 room instance 生命周期内固定，运行时不新增地址；每次发送时从当前可用子集 `M(t)` 中选择 relay。pending join 使用 admission secret 选择 relay，GKA 完成后的文本和附件分片使用 room group key 选择 relay。
+relay pool 可以只有一个入口，也可以有多个入口。多个入口时，每行写一个 `wss://host:port`。Host 创建房间时会先对候选入口去重，再用 600ms 默认探测超时筛出当前可连接 relay，并通过 `relay_probe` 返回的 `relayInstanceId` 合并同一 Server backend 的多条访问路径，最后选择最多 4 个 relay 写入 `entrance.scp` 和本机 `relay-pool.sqlite3`。Host 只在这组房间实际 relay set 上创建同一个 room instance；Client 获批后会连接同一组 relay。pool 地址集合在 room instance 生命周期内固定，运行时不新增地址；每次发送时从当前可用子集 `M(t)` 中选择 relay。pending join 使用 admission secret 选择 relay，GKA 完成后的文本和附件分片使用 room group key 选择 relay。
 
 ## Server TLS 证书选择
 
