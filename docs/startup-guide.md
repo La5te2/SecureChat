@@ -358,6 +358,5 @@ Host 管理命令：
 /silence <fingerprint-prefix>
 /unsilence <fingerprint-prefix>
 /evict <fingerprint-prefix>
-/ban <fingerprint-prefix>
 ```
 

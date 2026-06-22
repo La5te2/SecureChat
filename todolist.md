@@ -474,7 +474,7 @@ PKI 身份认证现在强制绑定成员证书、临时 public key、GKA contrib
   - Client 验证 Host 证书链和签名后，才解封装 group state；随后验证每个成员 contribution 签名，再导出 group key。
 
 - [x] 增加当前房间内证书封禁和密钥轮换机制。
-  - `/evict` 和 `/ban` 会把目标成员已验证证书指纹记录在当前 Host 房间内存中，防止同一证书在本房间生命周期内重新加入。
+  - `/evict` 会把目标成员已验证证书指纹记录在当前 Host 房间内存中，防止同一证书在本房间生命周期内重新加入。
   - 成员证书过期、Key Usage 错误或签名错误时拒绝旧证书。
   - 驱逐成员后触发 Host 发起新的 GKA epoch。
 
@@ -530,7 +530,7 @@ PKI 身份认证现在强制绑定成员证书、临时 public key、GKA contrib
 - [x] 增加 Host 管理命令。
   - `/silence <member>`：禁言目标 Client，Server 拒绝其后续 `encrypted_relay` 发送；目标仍保持连接并可接收 Host 后续重密钥。
   - `/unsilence <member>`：解除当前房间内的禁言。
-  - `/evict <member>` 和 `/ban <member>`：驱逐目标 Client，并把已验证成员证书指纹加入当前房间内存封禁集。
+  - `/evict <fingerprint-prefix>`：驱逐目标 Client，并把已验证成员证书指纹加入当前房间内存封禁集。
 
 - [x] 实现 eviction 后的证书指纹封禁。
   - Host 驱逐成员时记录其 PKI SHA-256 证书指纹。
@@ -619,7 +619,7 @@ PKI 身份认证现在强制绑定成员证书、临时 public key、GKA contrib
   - 每个成员本地保存自己接受过的房间状态摘要序列，例如 `T_0 -> T_1 -> T_2`。
   - 新状态必须引用上一个已接受状态摘要，形成房间内的可验证 hash chain。
   - 该机制的目标是让成员发现 Server 重放旧状态、投递不同成员集合、制造 transcript fork 或伪造管理动作。
-  - 主要应用在 GKA epoch、成员集合变更、pending join、approve join、evict、ban、silence、Host rejoin、close room 和 Server open/closed 状态校验边界。
+  - 主要应用在 GKA epoch、成员集合变更、pending join、approve join、evict、silence、Host rejoin、close room 和 Server open/closed 状态校验边界。
   - 对应定位是：E2EE 保护内容明文，PKI 保护身份绑定，GKA 保护群密钥协商，transcript hash chain 保护房间状态连续性，capability signature 保护管理动作授权。
   - 后续实现可引入类似结构：
     ```cpp
@@ -657,14 +657,14 @@ PKI 身份认证现在强制绑定成员证书、临时 public key、GKA contrib
   - 每个 epoch 应维护群状态摘要 `T_e`。
   - `T_e` 绑定 room instance token、epoch、成员集合、成员贡献集合和控制动作。
   - 候选形式为 `T_e = Hash(T_{e-1} || roomInstanceToken || epoch || memberSet || contributionSet || controlAction)`。
-  - GKA contribution、group state、join、leave、evict、ban、silence 等状态变化都应绑定当前 transcript。
+  - GKA contribution、group state、join、leave、evict、silence 等状态变化都应绑定当前 transcript。
   - Client 验证 transcript 连续性，拒绝跨房间、跨 epoch、回滚或分叉的 group state。
   - Server 即使错误投递、重放旧状态或向不同成员投递不一致状态，也应尽量被成员本地发现。
 
 - **capability-based Host 原则。**
   - Host 权力从“当前连接身份”逐步转为“可验证的房间 owner capability”。
   - owner capability 绑定 room instance token、Host 证书指纹、权限集合、有效期和签发者。
-  - `stop_session`、`approve_join`、`evict`、`ban` 等管理动作必须携带 capability 绑定签名。
+  - `stop_session`、`approve_join`、`evict` 等管理动作必须携带 capability 绑定签名。
   - Host 暂离、Host 重连和房间显式关闭的具体状态机由阶段 15 定义。
   - Host 重连时，成员本地验证 capability 连续性和签名，而不是只相信 Server 的连接声明。
 
@@ -798,7 +798,7 @@ PKI 身份认证现在强制绑定成员证书、临时 public key、GKA contrib
   - 用户 A 拉黑用户 B 时，只影响用户 A 的本地接收、显示、附件预览和信任策略。
   - Host 在某个房间内驱逐成员时，只影响该 room instance 的成员资格和后续 epoch。
   - Host `/reject` pending join 时只封禁该申请对应的当前房间指纹；申请者断线取消 pending 不产生封禁。
-  - Host `/evict` 或 `/ban` active 成员时封禁该 room instance 内的证书指纹，并触发后续 group key rotation。
+  - Host `/evict` active 成员时封禁该 room instance 内的证书指纹，并触发后续 group key rotation。
   - 证书过期、私钥泄露或设备丢失时，通过重新签发房间证书、用户本地拉黑旧指纹和房间内移除来收敛风险。
   - 不引入默认在线查询机制，避免向 Server 或第三方暴露成员证书、房间关系和查询时间。
 
@@ -863,12 +863,12 @@ PKI 身份认证现在强制绑定成员证书、临时 public key、GKA contrib
   - Client 断线时 Host 只移除当前连接状态和未完成附件传输，不删除成员证书指纹，不自动轮换 `K_G`。
   - Client 断线发生在 GKA epoch 进行中时，Host 会从当前待贡献集合移除该连接，避免网络波动拖住房间。
   - 已批准成员用同一房间成员证书重新连接时，Host 自动批准其 rejoin，并为在线成员推进新 GKA epoch。
-  - Host 显式 `/evict` 或 `/ban` 成员后，才移除成员资格、封禁当前房间内证书指纹并触发 group key rotation。
+  - Host 显式 `/evict` 成员后，才移除成员资格、封禁当前房间内证书指纹并触发 group key rotation。
 
 - [x] 设计 Host 不在场时的 GKA 行为。
-  - Host 离线期间不推进成员集合变更，不批准 pending join，不执行 remove/ban。
+  - Host 离线期间不推进成员集合变更，不批准 pending join，不执行 evict。
   - 已经 active 且持有当前 `K_G` 的在线成员可以继续发送和接收当前 epoch 的消息。
-  - Host 重新加入后，处理 pending join、leave request 和 remove/ban 队列，并在需要时发起新 epoch。
+  - Host 重新加入后，处理 pending join、leave request 和 evict 队列，并在需要时发起新 epoch。
   - 新 epoch 必须绑定最新 room instance token、成员集合、控制动作和 transcript 摘要。
   - 已实现 Host 离线期间不批准 pending join；Host 重新连接后 Server 会转交积压 pending join，Host 再显式 approve/reject。
 

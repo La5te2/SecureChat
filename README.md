@@ -400,7 +400,6 @@ Host 管理命令在 Host 输入框或 CLI 标准输入中发送：
 /silence <fingerprint-prefix>
 /unsilence <fingerprint-prefix>
 /evict <fingerprint-prefix>
-/ban <fingerprint-prefix>
 /list
 /approve <requestId>
 /reject <requestId> [原因]
@@ -409,7 +408,7 @@ Host 管理命令在 Host 输入框或 CLI 标准输入中发送：
 
 `silence` 是当前房间内的发送限制。目标成员仍在线并继续参与后续 GKA epoch。
 
-`evict` 和 `ban` 会驱逐目标成员，并把该成员已验证证书指纹加入当前房间内存封禁集。封禁不写入磁盘，房间结束后失效。
+`evict` 会驱逐目标成员，并把该成员已验证证书指纹加入当前房间内存封禁集。封禁不写入磁盘，房间结束后失效。
 
 `list` 会显示 Host、active Client 和 pending join 的 display name、system username、证书指纹和 pending requestId。`approve` 会把已验证的 pending join 提升为 active 成员。`reject` 会拒绝 pending 成员，拒绝响应带 Host 签名。`stop_session` 显式关闭当前 room instance。WinUI 不显示 requestId，点击 pending 成员卡片时会在内部使用 requestId。
 
@@ -438,7 +437,7 @@ Server 使用 SQLite 只保存 room instance 的 open/closed 状态和 pending j
 
 Server 进程停止或重启只表示中继暂时不可用，不会把 open 房间标记为 closed。房间进入 closed 状态只能来自 Host 在线发送的签名 `close_room`。
 
-Client 关闭进程或网络断开只表示当前连接离线，不自动吊销成员资格，也不把成员证书指纹写入封禁集。已批准成员重新连接时会再次经过 Host 验证并进入新的 GKA epoch。Host 显式 `/evict` 或 `/ban` 才移除成员资格、封禁当前房间内证书指纹并触发后续 group key rotation。禁言不改变成员资格，因此不触发重密钥。
+Client 关闭进程或网络断开只表示当前连接离线，不自动吊销成员资格，也不把成员证书指纹写入封禁集。已批准成员重新连接时会再次经过 Host 验证并进入新的 GKA epoch。Host 显式 `/evict` 才移除成员资格、封禁当前房间内证书指纹并触发后续 group key rotation。禁言不改变成员资格，因此不触发重密钥。
 
 ## 附件处理
 

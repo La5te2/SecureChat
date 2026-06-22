@@ -92,7 +92,6 @@ Host 可以通过普通输入框发送以下本地管理命令：
 /silence <fingerprint-prefix>
 /unsilence <fingerprint-prefix>
 /evict <fingerprint-prefix>
-/ban <fingerprint-prefix>
 /list
 /approve <request-id>
 /reject <request-id> [reason]
@@ -101,7 +100,7 @@ Host 可以通过普通输入框发送以下本地管理命令：
 
 `/silence` 和 `/unsilence` 会转换为 Host 到 Server 的 `silence_client` / `unsilence_client` 信令。Host 本地先用至少 8 位证书指纹前缀解析目标成员。Server 验证发送方确实是当前 room 的 Host 后，只在当前房间内记录目标 clientId 的发送限制。被禁言 Client 保持连接，可以继续参与后续 GKA epoch，但它发送 `encrypted_relay` 时 Server 返回 `member is silenced`，不会转发文本或附件。
 
-`/evict` 和 `/ban` 使用现有 `reject_client` 关闭目标 Client WebSocket。Host 同时把该成员已经通过 PKI 验证的证书 SHA-256 指纹记录到当前房间内存封禁集中。相同证书再次加入时，Host 会在验证 identity 后拒绝该成员，不记录 public key，也不允许其参与 GKA epoch。该封禁不写入磁盘，Host 进程或房间结束后失效。
+`/evict` 使用现有 `reject_client` 关闭目标 Client WebSocket。Host 同时把该成员已经通过 PKI 验证的证书 SHA-256 指纹记录到当前房间内存封禁集中。相同证书再次加入时，Host 会在验证 identity 后拒绝该成员，不记录 public key，也不允许其参与 GKA epoch。该封禁不写入磁盘，Host 进程或房间结束后失效。
 
 新成员发送 `join_room` 后先进入 `pending_join`。Server 为该次入房申请生成 `requestId`，它只是 pending join 的内部审批 id，不是成员身份、密钥或聊天内容。Server 只保存和转发该 opaque 请求，不给 pending 成员下发 group key。首次导入 `entrance.scp` 的 Client 会把 CSR bundle、设备声明和 join proof 放入 admission-encrypted payload；该 payload 使用 admission secret 经 HKDF-SHA256 派生 AES-256-GCM key 加密。Host 解密后验证 CSR、成员声明、room instance 绑定和 pending join proof，可以用 `/list` 查看 pending requestId，再用 `/approve <request-id>` 在线签发成员证书响应，并发送带 Host 签名的 `approve_join`；WinUI Host 左键 pending 成员卡片时会在内部使用对应 requestId。签发响应同样放入 admission-encrypted payload。验证失败或 Host 主动拒绝时使用 `/reject <request-id>` 发送带签名的拒绝响应。Client 收到 `joined` 后会解密并安装签发响应，再验证 Host 的 approval 签名，验证通过才进入 active 成员状态。
 

@@ -823,7 +823,7 @@ bool HostSessionCore::handleHostCommand(const std::string& line) {
         for (const auto& row : rows) chatEmit(mCallbacks.onStatus, "Member: " + row);
         return true;
     }
-    if (command != "/silence" && command != "/unsilence" && command != "/evict" && command != "/ban") {
+    if (command != "/silence" && command != "/unsilence" && command != "/evict") {
         return false;
     }
 

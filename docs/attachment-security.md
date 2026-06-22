@@ -52,7 +52,7 @@ Server 会校验 WebSocket 会话所属 room token 和 sender connection id，�
 
 - 新成员加入：Host 记录该成员 public key，发起新的 GKA epoch，并把新 group state 发给当前所有 Client。
 - 成员离开：Host 删除该成员 public key，发起新的 GKA epoch，并只发给剩余 Client。
-- 成员被 Host `/evict` 或 `/ban`：Host 删除该成员 public key，发起新的 GKA epoch，并把该成员证书指纹加入当前房间内存封禁集。
+- 成员被 Host `/evict`：Host 删除该成员 public key，发起新的 GKA epoch，并把该成员证书指纹加入当前房间内存封禁集。
 - 成员被 Host `/silence`：只禁止其发送文本和附件，不改变成员资格，因此不轮换 room group key。
 - 历史消息对曾持有旧 key 的成员无法撤回；轮换只保护后续消息。
 - 恶意成员如果拒绝提交 GKA contribution，会造成可用性问题；当前 Host 在 10 秒 GKA 超时后自动驱逐未贡献成员，并用剩余成员重新发起 epoch。
