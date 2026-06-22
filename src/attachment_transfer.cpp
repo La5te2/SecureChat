@@ -19,6 +19,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <system_error>
+#include <utility>
 #include <vector>
 
 namespace chat::attachment {
@@ -304,6 +305,79 @@ bool isSha256Hex(const std::string& value) {
     });
 }
 
+std::string normalizeSha256Hex(std::string value, const std::string& label) {
+    value = lowerAscii(trimCopy(std::move(value)));
+    if (!isSha256Hex(value)) {
+        throw std::runtime_error(label + " is invalid");
+    }
+    return value;
+}
+
+std::string merkleLeafHash(const std::string& chunkHash) {
+    // 叶子节点和父节点使用不同域标签，避免不同层级的节点值被混用。
+    std::string material = "securechat-attachment-merkle-leaf\n";
+    chat::cert_utils::appendCanonicalField(material, "chunkHash", normalizeSha256Hex(chunkHash, "attachment chunk hash"));
+    return chat::cert_utils::sha256Hex(material);
+}
+
+std::string merkleParentHash(const std::string& left, const std::string& right) {
+    std::string material = "securechat-attachment-merkle-parent\n";
+    chat::cert_utils::appendCanonicalField(material, "left", normalizeSha256Hex(left, "attachment merkle left node"));
+    chat::cert_utils::appendCanonicalField(material, "right", normalizeSha256Hex(right, "attachment merkle right node"));
+    return chat::cert_utils::sha256Hex(material);
+}
+
+std::vector<std::string> merkleLeafLevel(const std::vector<std::string>& chunkHashes) {
+    if (chunkHashes.empty()) {
+        throw std::runtime_error("attachment chunk hashes are empty");
+    }
+    std::vector<std::string> level;
+    level.reserve(chunkHashes.size());
+    for (const auto& hash : chunkHashes) {
+        level.push_back(merkleLeafHash(hash));
+    }
+    return level;
+}
+
+std::vector<std::string> nextMerkleLevel(const std::vector<std::string>& level) {
+    std::vector<std::string> next;
+    next.reserve((level.size() + 1) / 2);
+    for (std::size_t i = 0; i < level.size(); i += 2) {
+        const auto& left = level[i];
+        const auto& right = (i + 1 < level.size()) ? level[i + 1] : level[i];
+        next.push_back(merkleParentHash(left, right));
+    }
+    return next;
+}
+
+bool verifyMerkleProof(
+    const std::string& chunkHash,
+    std::size_t chunkIndex,
+    std::size_t chunkCount,
+    const std::vector<std::string>& proof,
+    const std::string& root) {
+    if (chunkCount == 0 || chunkIndex >= chunkCount) return false;
+    std::size_t expectedProofItems = 0;
+    for (std::size_t width = chunkCount; width > 1; width = (width + 1) / 2) {
+        ++expectedProofItems;
+    }
+    if (proof.size() != expectedProofItems) return false;
+
+    auto node = merkleLeafHash(chunkHash);
+    auto index = chunkIndex;
+    for (const auto& siblingRaw : proof) {
+        const auto sibling = normalizeSha256Hex(siblingRaw, "attachment merkle proof item");
+        if ((index % 2) == 0) {
+            node = merkleParentHash(node, sibling);
+        }
+        else {
+            node = merkleParentHash(sibling, node);
+        }
+        index /= 2;
+    }
+    return node == normalizeSha256Hex(root, "attachment merkle root");
+}
+
 std::size_t payloadSizeField(const Message& msg, const std::string& name, const std::string& label) {
     if (!msg.payload.is_object() || !msg.payload.contains(name)) {
         throw std::runtime_error(label + " is missing");
@@ -482,11 +556,15 @@ std::size_t chunkSizeFromMeta(const Message& msg) {
 }
 
 std::string fileHashFromMeta(const Message& msg) {
-    auto hash = payloadStringField(msg, "fileHash", "attachment meta file hash");
-    if (!isSha256Hex(hash)) {
-        throw std::runtime_error("attachment meta file hash is invalid");
-    }
-    return hash;
+    return normalizeSha256Hex(
+        payloadStringField(msg, "fileHash", "attachment meta file hash"),
+        "attachment meta file hash");
+}
+
+std::string merkleRootFromMeta(const Message& msg) {
+    return normalizeSha256Hex(
+        payloadStringField(msg, "merkleRoot", "attachment meta merkle root"),
+        "attachment meta merkle root");
 }
 
 std::vector<std::string> chunkHashesFromMeta(const Message& msg) {
@@ -499,11 +577,7 @@ std::vector<std::string> chunkHashesFromMeta(const Message& msg) {
         if (!item.is_string()) {
             throw std::runtime_error("attachment meta chunk hash must be a string");
         }
-        auto hash = trimCopy(item.get<std::string>());
-        if (!isSha256Hex(hash)) {
-            throw std::runtime_error("attachment meta chunk hash is invalid");
-        }
-        hashes.push_back(std::move(hash));
+        hashes.push_back(normalizeSha256Hex(item.get<std::string>(), "attachment meta chunk hash"));
     }
     if (hashes.empty()) {
         throw std::runtime_error("attachment meta chunk hashes are empty");
@@ -513,6 +587,27 @@ std::vector<std::string> chunkHashesFromMeta(const Message& msg) {
 
 std::size_t chunkOffsetFromMessage(const Message& msg) {
     return payloadSizeField(msg, "offset", "attachment chunk offset");
+}
+
+std::string chunkHashFromMessage(const Message& msg) {
+    return normalizeSha256Hex(
+        payloadStringField(msg, "chunkHash", "attachment chunk hash"),
+        "attachment chunk hash");
+}
+
+std::vector<std::string> merkleProofFromMessage(const Message& msg) {
+    if (!msg.payload.is_object() || !msg.payload.contains("merkleProof") || !msg.payload["merkleProof"].is_array()) {
+        throw std::runtime_error("attachment merkle proof is missing");
+    }
+
+    std::vector<std::string> proof;
+    for (const auto& item : msg.payload["merkleProof"]) {
+        if (!item.is_string()) {
+            throw std::runtime_error("attachment merkle proof item must be a string");
+        }
+        proof.push_back(normalizeSha256Hex(item.get<std::string>(), "attachment merkle proof item"));
+    }
+    return proof;
 }
 
 std::string transferIdFromMessage(const Message& msg) {
@@ -552,6 +647,31 @@ std::vector<std::string> chunkSha256Hexes(const std::vector<unsigned char>& data
     return hashes;
 }
 
+std::string merkleRootForChunkHashes(const std::vector<std::string>& chunkHashes) {
+    auto level = merkleLeafLevel(chunkHashes);
+    while (level.size() > 1) {
+        level = nextMerkleLevel(level);
+    }
+    return level.front();
+}
+
+std::vector<std::string> merkleProofForChunk(const std::vector<std::string>& chunkHashes, std::size_t chunkIndex) {
+    auto level = merkleLeafLevel(chunkHashes);
+    if (chunkIndex >= level.size()) {
+        throw std::runtime_error("attachment merkle chunk index is invalid");
+    }
+
+    std::vector<std::string> proof;
+    auto index = chunkIndex;
+    while (level.size() > 1) {
+        const auto siblingIndex = (index % 2 == 0) ? index + 1 : index - 1;
+        proof.push_back(siblingIndex < level.size() ? level[siblingIndex] : level[index]);
+        level = nextMerkleLevel(level);
+        index /= 2;
+    }
+    return proof;
+}
+
 void ReceiveStore::setRoomContext(const std::string& roomName, const std::string& roomToken) {
     std::lock_guard<std::mutex> lock(mMutex);
     mRoomName = roomName;
@@ -566,6 +686,7 @@ ReceiveSlot ReceiveStore::stage(
     std::size_t expectedSize,
     std::size_t chunkSize,
     std::string fileHash,
+    std::string merkleRoot,
     std::vector<std::string> chunkHashes) {
     // 元数据先于分片到达。先暂存净化后的输出路径和预期大小，
     // 防止后续分片自行选择文件系统目标。
@@ -581,17 +702,17 @@ ReceiveSlot ReceiveStore::stage(
     if (chunkSize == 0 || chunkSize > RelayChunkBytes) {
         throw std::runtime_error("attachment chunk size is invalid");
     }
-    if (!isSha256Hex(fileHash)) {
-        throw std::runtime_error("attachment file hash is invalid");
-    }
+    fileHash = normalizeSha256Hex(std::move(fileHash), "attachment file hash");
+    merkleRoot = normalizeSha256Hex(std::move(merkleRoot), "attachment merkle root");
     const auto expectedChunks = (expectedSize + chunkSize - 1) / chunkSize;
     if (chunkHashes.size() != expectedChunks) {
         throw std::runtime_error("attachment chunk hash count does not match file size");
     }
-    for (const auto& hash : chunkHashes) {
-        if (!isSha256Hex(hash)) {
-            throw std::runtime_error("attachment chunk hash is invalid");
-        }
+    for (auto& hash : chunkHashes) {
+        hash = normalizeSha256Hex(std::move(hash), "attachment chunk hash");
+    }
+    if (merkleRootForChunkHashes(chunkHashes) != merkleRoot) {
+        throw std::runtime_error("attachment merkle root does not match chunk hashes");
     }
     validateExtensionOrThrow(name, kind);
     pruneReceiveCacheFor(expectedSize);
@@ -606,6 +727,7 @@ ReceiveSlot ReceiveStore::stage(
     slot.receivedSize = 0;
     slot.chunkSize = chunkSize;
     slot.fileHash = std::move(fileHash);
+    slot.merkleRoot = std::move(merkleRoot);
     slot.chunkHashes = std::move(chunkHashes);
     slot.receivedChunks.assign(expectedChunks, false);
 
@@ -628,14 +750,32 @@ std::string ReceiveStore::activeTransferId(const std::string& key) const {
     return pending == mSlots.end() ? "" : pending->second.transferId;
 }
 
+std::string ReceiveStore::missingBitmapFor(const std::string& key, const std::string& transferId) const {
+    std::lock_guard<std::mutex> lock(mMutex);
+    auto pending = mSlots.find(key);
+    if (pending == mSlots.end() || pending->second.transferId != transferId) return "";
+
+    std::string bitmap;
+    bitmap.reserve(pending->second.receivedChunks.size());
+    for (bool received : pending->second.receivedChunks) {
+        bitmap.push_back(received ? '0' : '1');
+    }
+    return bitmap;
+}
+
 void ReceiveStore::clear(const std::string& key) {
     std::lock_guard<std::mutex> lock(mMutex);
     mSlots.erase(key);
 }
 
-ReceiveChunkResult ReceiveStore::appendChunk(const std::string& key, std::size_t offset, const rtc::binary& data) {
+ReceiveChunkResult ReceiveStore::appendChunk(
+    const std::string& key,
+    std::size_t offset,
+    const rtc::binary& data,
+    std::string chunkHash,
+    std::vector<std::string> merkleProof) {
     // 为该发送者的活动传输写入一个已解密分片。分片可能从不同 relay 乱序到达，
-    // 因此这里按 offset 写文件，并用元数据中的 SHA-256 摘要校验完整性。
+    // 因此这里按 offset 写文件，并验证分片摘要、Merkle proof 和最终文件摘要。
     std::lock_guard<std::mutex> lock(mMutex);
     auto pending = mSlots.find(key);
     if (pending == mSlots.end()) return {};
@@ -673,11 +813,21 @@ ReceiveChunkResult ReceiveStore::appendChunk(const std::string& key, std::size_t
     for (auto byte : data) {
         bytes.push_back(static_cast<unsigned char>(byte));
     }
-    if (sha256Hex(bytes) != slot.chunkHashes[chunkIndex]) {
+    chunkHash = normalizeSha256Hex(std::move(chunkHash), "attachment chunk hash");
+    for (auto& item : merkleProof) {
+        item = normalizeSha256Hex(std::move(item), "attachment merkle proof item");
+    }
+    if (sha256Hex(bytes) != chunkHash || chunkHash != slot.chunkHashes[chunkIndex]) {
         const auto cachePath = slot.path;
         mSlots.erase(pending);
         std::filesystem::remove(pathFromUtf8(cachePath));
         throw std::runtime_error("attachment chunk hash mismatch");
+    }
+    if (!verifyMerkleProof(chunkHash, chunkIndex, slot.chunkHashes.size(), merkleProof, slot.merkleRoot)) {
+        const auto cachePath = slot.path;
+        mSlots.erase(pending);
+        std::filesystem::remove(pathFromUtf8(cachePath));
+        throw std::runtime_error("attachment merkle proof mismatch");
     }
     // 在 UI 或转发路径把任意字节当作媒体处理前，拒绝伪装图片/语音。
     // 首分片足以立即验证 PNG/JPEG/BMP 和 WAV 文件头。

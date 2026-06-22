@@ -25,10 +25,7 @@ struct RelayStatusSummary {
     int total = 0;
     int healthy = 0;
     int connecting = 0;
-    int candidate = 0;
-    int degraded = 0;
     int offline = 0;
-    int banned = 0;
     std::string lastUsedRelay;
     std::string lastFailedRelay;
     int recentFailures = 0;

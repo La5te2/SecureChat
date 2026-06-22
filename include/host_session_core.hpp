@@ -248,6 +248,7 @@ private:
     std::deque<std::string> mRecentRelayOrder;
     std::mutex mReliableMutex;
     std::unordered_map<std::string, ReliableOutbound> mReliableOutbound;
+    std::unordered_map<std::string, std::unordered_map<std::size_t, std::string>> mReliableChunkMessagesByTransfer;
     std::unordered_map<std::string, std::string> mReliableSeen;
     std::deque<std::string> mReliableSeenOrder;
     std::mutex mSignalingQueueMutex;

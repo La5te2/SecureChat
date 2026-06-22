@@ -218,7 +218,37 @@ std::string reliablePayloadHashFor(Message msg) {
 std::string reliableMissingBitmapFor(const Message& msg) {
     if (!isAttachmentBinaryType(msg.type) || !msg.payload.is_object()) return "";
     const auto chunkIndex = jsonStringField(msg.payload, "chunkIndex");
-    return chunkIndex.empty() ? "" : chunkIndex;
+    const auto chunkCount = jsonStringField(msg.payload, "chunkCount");
+    if (chunkIndex.empty() || chunkCount.empty()) return "";
+    try {
+        const auto index = static_cast<std::size_t>(std::stoull(chunkIndex));
+        const auto count = static_cast<std::size_t>(std::stoull(chunkCount));
+        if (count == 0 || index >= count || count > 8192) return "";
+        std::string bitmap(count, '0');
+        bitmap[index] = '1';
+        return bitmap;
+    }
+    catch (...) {
+        return "";
+    }
+}
+
+bool bitmapHasMissing(const std::string& bitmap) {
+    return bitmap.find('1') != std::string::npos;
+}
+
+std::vector<std::size_t> missingIndicesFromBitmap(const std::string& bitmap) {
+    if (bitmap.empty() || bitmap.size() > 8192) return {};
+    std::vector<std::size_t> indices;
+    for (std::size_t i = 0; i < bitmap.size(); ++i) {
+        if (bitmap[i] == '1') {
+            indices.push_back(i);
+        }
+        else if (bitmap[i] != '0') {
+            return {};
+        }
+    }
+    return indices;
 }
 
 std::vector<std::size_t> admissionRelayOrder(
@@ -445,7 +475,7 @@ void ClientSessionCore::connectRelay(std::size_t relayIndex) {
     });
 
     ws->onError([this, url, relayIndex](std::string error) {
-        const auto report = markRelayFailure(relayIndex, url, "degraded");
+        const auto report = markRelayFailure(relayIndex, url, "offline");
         if (report) {
             chatEmit(mCallbacks.onError, "Relay error: " + relayLabel(url) + ": " + error);
             emitRelayStatus();
@@ -1072,6 +1102,7 @@ void ClientSessionCore::handleRelayMessage(const Message& msg) {
             attachment::expectedSizeFromMeta(msg, kind),
             attachment::chunkSizeFromMeta(msg),
             attachment::fileHashFromMeta(msg),
+            attachment::merkleRootFromMeta(msg),
             attachment::chunkHashesFromMeta(msg));
         Message out = msg;
         out.name = pending.name;
@@ -1108,7 +1139,9 @@ void ClientSessionCore::handleRelayBinaryChunk(const std::string& senderKey, con
         const auto result = mPendingTransfers.appendChunk(
             senderKey,
             attachment::chunkOffsetFromMessage(msg),
-            attachment::base64DecodeToRtcBytes(msg.data));
+            attachment::base64DecodeToRtcBytes(msg.data),
+            attachment::chunkHashFromMessage(msg),
+            attachment::merkleProofFromMessage(msg));
         if (!result.found) {
             chatEmit(mCallbacks.onError, "Unexpected encrypted attachment chunk from " + senderKey);
             return;
@@ -1304,6 +1337,18 @@ void ClientSessionCore::rememberReliableOutbound(const ReliableOutbound& outboun
     if (outbound.messageId.empty()) return;
     std::lock_guard<std::mutex> lock(mReliableMutex);
     mReliableOutbound[outbound.messageId] = outbound;
+    if (isAttachmentBinaryType(outbound.message.type) && outbound.message.payload.is_object()) {
+        const auto transferId = payloadStringField(outbound.message, "transferId");
+        const auto chunkIndex = payloadStringField(outbound.message, "chunkIndex");
+        if (!transferId.empty() && !chunkIndex.empty()) {
+            try {
+                mReliableChunkMessagesByTransfer[transferId][static_cast<std::size_t>(std::stoull(chunkIndex))] =
+                    outbound.messageId;
+            }
+            catch (...) {
+            }
+        }
+    }
     while (mReliableOutbound.size() > ReliableCacheLimit && !mReliableOutbound.empty()) {
         mReliableOutbound.erase(mReliableOutbound.begin());
     }
@@ -1379,19 +1424,25 @@ void ClientSessionCore::handleReliableNotice(const Message& msg) {
         {"targetSenderId", senderId},
         {"requesterId", mClientId}
     };
-    const auto chunkIndex = payloadStringField(msg, "chunkIndex");
-    if (!chunkIndex.empty()) {
-        missing.payload["missingChunks"] = json::array({chunkIndex});
-    }
     const auto transferId = payloadStringField(msg, "transferId");
     if (!transferId.empty()) {
         missing.payload["transferId"] = transferId;
     }
+    auto bitmap = transferId.empty() ? std::string() : mPendingTransfers.missingBitmapFor(senderId, transferId);
+    if (bitmap.empty()) {
+        Message noticePayload;
+        noticePayload.type = payloadStringField(msg, "payloadType");
+        noticePayload.payload = msg.payload;
+        bitmap = reliableMissingBitmapFor(noticePayload);
+    }
+    if (!bitmap.empty() && bitmapHasMissing(bitmap)) {
+        missing.payload["missingBitmap"] = bitmap;
+    }
 
-    const auto bitmap = chunkIndex.empty() ? messageId : chunkIndex;
+    const auto recordKey = bitmap.empty() ? messageId : bitmap;
     const auto requestId = chat::cert_utils::sha256Hex(messageId + "\n" + payloadHash + "\n" + bitmap);
     try {
-        chat::relay_pool::recordRelayMissing(mRoomDir, requestId, messageId, bitmap, 0);
+        chat::relay_pool::recordRelayMissing(mRoomDir, requestId, transferId.empty() ? messageId : transferId, recordKey, 0);
     }
     catch (...) {
     }
@@ -1404,6 +1455,46 @@ void ClientSessionCore::handleMissingMessage(const Message& msg) {
     if (!targetSenderId.empty() && targetSenderId != mClientId) return;
     const auto messageId = payloadStringField(msg, "messageId");
     const auto payloadHash = payloadStringField(msg, "payloadHash");
+    const auto transferId = payloadStringField(msg, "transferId");
+    const auto missingBitmap = payloadStringField(msg, "missingBitmap");
+    if (!transferId.empty() && !missingBitmap.empty()) {
+        const auto missingIndices = missingIndicesFromBitmap(missingBitmap);
+        if (missingIndices.empty()) return;
+
+        std::vector<ReliableOutbound> outbounds;
+        {
+            std::lock_guard<std::mutex> lock(mReliableMutex);
+            auto byTransfer = mReliableChunkMessagesByTransfer.find(transferId);
+            if (byTransfer == mReliableChunkMessagesByTransfer.end()) return;
+            for (const auto chunkIndex : missingIndices) {
+                auto mapped = byTransfer->second.find(chunkIndex);
+                if (mapped == byTransfer->second.end()) continue;
+                auto it = mReliableOutbound.find(mapped->second);
+                if (it == mReliableOutbound.end() || it->second.retryCount >= ReliableRetryLimit) continue;
+                ++it->second.retryCount;
+                if (!it->second.message.payload.is_object()) it->second.message.payload = json::object();
+                it->second.message.payload["attempt"] = it->second.retryCount;
+                it->second.message.payload.erase("routeNonce");
+                outbounds.push_back(it->second);
+            }
+        }
+
+        const auto requestId = chat::cert_utils::sha256Hex(transferId + "\n" + missingBitmap);
+        try {
+            chat::relay_pool::recordRelayMissing(
+                mRoomDir,
+                requestId,
+                transferId,
+                missingBitmap,
+                outbounds.empty() ? 0 : outbounds.front().retryCount);
+        }
+        catch (...) {
+        }
+        for (auto& outbound : outbounds) {
+            sendPreparedRelayMessage(std::move(outbound), true);
+        }
+        return;
+    }
     if (messageId.empty() || payloadHash.empty()) return;
 
     ReliableOutbound outbound;
@@ -1537,6 +1628,7 @@ bool ClientSessionCore::sendAttachmentRelay(
     Message meta = attachment::makeBinaryMeta(metaType, mDisplayName, filePath, mime, bytes.size());
     const auto fileHash = attachment::sha256Hex(bytes);
     const auto chunkHashes = attachment::chunkSha256Hexes(bytes, attachment::RelayChunkBytes);
+    const auto merkleRoot = attachment::merkleRootForChunkHashes(chunkHashes);
     // actor 元数据让 UI 在解密后区分发送者身份，
     // 同时中继元数据仍绑定到 Server 侧连接状态。
     meta.payload["actorId"] = mClientId;
@@ -1546,6 +1638,7 @@ bool ClientSessionCore::sendAttachmentRelay(
     meta.payload["chunkSize"] = static_cast<std::uint64_t>(attachment::RelayChunkBytes);
     meta.payload["chunkCount"] = static_cast<std::uint64_t>(chunkHashes.size());
     meta.payload["chunkHashes"] = chunkHashes;
+    meta.payload["merkleRoot"] = merkleRoot;
     markPrivateTarget(meta, targetId, targetName);
     if (!sendRelayMessage(meta, mClientId, mDisplayName, chat::protocol::ClientActorKind, targetId)) {
         return false;
@@ -1570,8 +1663,10 @@ bool ClientSessionCore::sendAttachmentRelay(
             {"size", static_cast<int>(bytes.size())},
             {"offset", static_cast<int>(offset)},
             {"chunkSize", static_cast<int>(chunkSize)},
+            {"chunkCount", static_cast<int>(chunkHashes.size())},
             {"chunkIndex", static_cast<int>(chunkIndex)},
             {"chunkHash", chunkHashes[chunkIndex]},
+            {"merkleProof", attachment::merkleProofForChunk(chunkHashes, chunkIndex)},
             {"fileHash", fileHash},
             {"actorId", mClientId},
             {"actorKind", chat::protocol::ClientActorKind},
@@ -2057,7 +2152,7 @@ void ClientSessionCore::handleSignalingMessage(const SignalingFrame& frame) {
             else if (message == "room not found" && mRelayUrls.size() > 1) {
                 for (std::size_t i = 0; i < mRelayUrls.size(); ++i) {
                     if (mRelayUrls[i] == relayUrl) {
-                        markRelayFailure(i, relayUrl, "degraded");
+                        markRelayFailure(i, relayUrl, "offline");
                         break;
                     }
                 }

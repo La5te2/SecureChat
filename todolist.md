@@ -989,7 +989,7 @@ PKI 身份认证现在强制绑定成员证书、临时 public key、GKA contrib
   - `certs/` 保存 `entrance.scp`、房间级 CA、成员证书链、成员私钥和加密 room state。
   - `texts/` 保存本机文本历史，例如 `texts/<systemUsername>.sqlite3`。
   - `files/`、`images/` 和 `voice/` 保存对应附件缓存。
-  - `state/` 保存本机 replay cache、运行状态和后续本地配置。
+  - `state/` 保存本机 replay cache、运行状态和本地配置。
   - `relay/` 保存 relay pool SQLite 和 relay 调度缓存。
   - WinUI 房间实例选择枚举 `logs/<room>_<digest8>`，并显示房间名、创建/导入时间和 room instance 摘要。
   - 删除某个 room instance 时可以直接删除对应 room root，用户端本地材料随房间一起清理。
@@ -998,7 +998,8 @@ PKI 身份认证现在强制绑定成员证书、临时 public key、GKA contrib
   - `cert_generation.cpp`、`local_paths.cpp`、`local_message_store.cpp`、附件落地逻辑和 WinUI 房间选择逻辑统一使用 room root。
   - `cert.exe create-entrance` 输出 Host room root，并在其中创建 `certs/entrance.scp`。
   - `cert.exe import-entrance` 输出 Client room root，把导入后的成员材料写入 `certs/`，并把用户选择的原始 `entrance.scp` 复制为 `room-dir/certs/entrance.scp`。
-  - Host 和 Client 后续重新加入同一 room instance 时都从 `room-dir/certs/entrance.scp` 读取 admission secret；该文件作为重入房准入副本，文件缺失或被移动时需要重新导入原始 `entrance.scp` 后再进入房间。
+  - Host 和 Client 重新加入同一 room instance 时通过 `room-dir` 读取本机运行材料、成员证书、成员私钥和 relay pool；`admissionSecret` 在创建或导入 `entrance.scp` 时写入本机加密 room state。
+  - `room-dir/certs/entrance.scp` 是准入容器副本，用于备份、重新导入或继续分发，不是重连时的直接运行数据源。
   - `entrance.scp` 携带固定 relay manifest、manifest 摘要和签名信息，使导入成员获得同一 room instance 的实际 relay set。
   - Host/Client 启动读取 `room-dir/certs/` 中的 `entrance.scp`、trust store、成员证书链、成员私钥和加密 room state。
   - 文档中的 `logs/certs/<room>_<digest8>`、`logs/texts/<room>_<digest8>`、`logs/files/<room>_<digest8>` 等旧路径统一替换为 room root 下的子目录。
@@ -1033,8 +1034,8 @@ PKI 身份认证现在强制绑定成员证书、临时 public key、GKA contrib
   - 实际 relay set 在 room instance 生命周期内保持地址集合固定，记为 `N`，其大小 `n` 不变且 `n <= 4`。
   - 每次广播或发送时，成员根据本机连接状态得到当前可用子集 `M(t) ⊆ N`，其大小 `m(t) <= n`。
   - 实际发送由房间群密钥派生的调度摘要在 `M(t)` 中选择 relay；这里的“动态”只表示可用子集和调度结果随时间变化。
-  - `N` 中暂时不可用的 relay 会进入 degraded/offline 状态和本机沉默期；沉默期内不重复重连或刷屏提示。如果对应服务器恢复，客户端后续发送前可以重新连接并把它恢复为 healthy，使它重新进入后续发送时的 `M(t)`。
-  - relay 状态至少包括 `candidate`、`connecting`、`healthy`、`degraded`、`offline`、`banned`。
+  - `N` 中暂时不可用的 relay 会进入 `offline` 状态和本机沉默期；沉默期内不重复重连或刷屏提示。如果对应服务器恢复，客户端发送前可以重新连接并把它恢复为 `healthy`，使它重新进入发送时的 `M(t)`。
+  - relay 运行状态包括 `connecting`、`healthy`、`offline`。候选 URL 只存在于建房探测过程，不写入房间级运行状态。
   - active Host 和 active Client 在数据通路上使用同一等级的房间成员能力；安全判断位于成员端，Server/Relay 的处理范围是 opaque envelope。
 
 - [x] 实现可运行的多 relay 基础连接和发送路径。
@@ -1053,7 +1054,7 @@ PKI 身份认证现在强制绑定成员证书、临时 public key、GKA contrib
   - relay 调度采用统一的确定性 selector：对当前可用集合 `M(t)` 中的每个 relay 计算 HMAC-SHA256 score，再按 score 从小到大排序。
   - 排序输入必须绑定每条 payload 的唯一材料，例如 messageId、routeNonce、transferId、chunkIndex 和 attempt；因此即使 `M(t)` 长期不变，不同 payload 也会得到不同的 relay 顺序。
   - 单 relay 投递场景取“当前 payload 对应排序”的第一项，例如 pending join、approve/reject、普通文本消息；它不是长期固定的全局第一项，也不是 `1,2,3` 这种短周期轮询。
-  - 多 relay 场景使用当前 payload 对应排序的前缀或后续位置，例如附件 manifest、附件 chunk 重传和 notice/missing。
+  - 多 relay 场景使用当前 payload 对应排序的前缀或指定排序位置，例如附件 manifest、附件 chunk 重传和 notice/missing。
   - pending join 发生在 room group key 产生前，selector 使用 admission secret；active 消息和附件发生在 GKA 完成后，selector 使用当前 epoch 的 `K_G`。
   - 文本消息、附件元数据和附件分片使用不同调度标签，附件分片还绑定 transferId、chunkIndex、offset 等字段。
   - 附件分片的 chunkIndex 不同，因此不同分片会得到不同 relay 顺序并自然分散到多个 relay。
@@ -1093,11 +1094,11 @@ PKI 身份认证现在强制绑定成员证书、临时 public key、GKA contrib
     ```text
     logs/<room>_<digest8>/relay/relay-pool.sqlite3
     ```
-  - `relay_nodes` 表保存 relay URL、来源、schema version、状态、RTT、成功/失败次数、权重、本地禁用标记和最近使用时间。
+  - `relay_nodes` 表保存 relay URL、来源、schema version、状态、RTT、成功/失败次数、权重和最近使用时间。
   - `relay_manifests` 表保存 manifest id、schema version、来源和原始 JSON。
   - `relay_room_states` 表保存每个 relay 见过的 room open/closed 状态副本、Host 签名事件 hash 和原始签名事件。
   - Host/Client 启动时读取 `relay_nodes` 作为房间实际 relay set。
-  - 当前实现写入 manifest、relay 节点和 room state 表，并保留发送统计、调度事件、缺失请求等诊断表。
+  - 数据库写入 manifest、relay 节点和 room state 表，并保留发送统计、调度事件、缺失请求等诊断表。
 
 - [x] 扩展 SQLite relay 诊断和重传状态表。
   - `relay_send_stats` 表按 room instance 记录每个 relay 的消息数、chunk 数、失败次数和最近使用时间。
@@ -1115,33 +1116,37 @@ PKI 身份认证现在强制绑定成员证书、临时 public key、GKA contrib
 
 - [x] 完善固定 relay pool 的健康恢复。
   - relay pool 地址集合由 `entrance.scp` 固定，运行时不追加新 relay 地址。
-  - 每个 relay 维护本机状态：`candidate`、`connecting`、`healthy`、`degraded`、`offline`、`banned`。
-  - 连接失败的 relay 进入 degraded/offline，并按失败次数进入 5s、10s、20s、40s、60s 上限的本机沉默期。
+  - 每个 relay 维护本机状态：`connecting`、`healthy`、`offline`。
+  - 连接失败的 relay 进入 `offline`，并按失败次数进入 5s、10s、20s、40s、60s 上限的本机沉默期。
   - 同一次连接尝试的 error/closed 双回调只记录一次失败，沉默期内不重复重连或刷屏。
   - Client 首次 pending join 使用的 admission relay 失败时，会按 admission secret 派生的排序尝试下一个未处于沉默期的 relay。
-  - 后续发送前会检查沉默期已结束的 relay；连接成功后恢复为 healthy。
+  - 发送前会检查沉默期已结束的 relay；连接成功后恢复为 `healthy`。
   - 发送调度先重新计算当前可用集合 `M(t)`，再在 `M(t)` 内执行 HMAC-SHA256 relay 选择。
   - 全部 relay 不可用时进入 relay unavailable 状态。
 
-- [x] 增加 notice/missing 可靠投递。
-  - 文本 notice 使用统一 selector 的 `route:notice` 标签发送 `messageId`、epoch、sender fingerprint 和 payloadHash。
+- [x] 增加基础 notice/missing 短期重传。
+  - 文本、附件元数据和附件分片都会写入 `messageId`、`payloadHash` 和 `attempt`。
+  - notice 使用统一 selector 的 `route:notice` 标签发送 `messageId`、epoch、sender fingerprint、targetId、payloadType 和 payloadHash。
   - 接收端收到 notice 后检查本机 seen cache；缺少对应 payload 时发送 `missing_message(messageId)`。
-  - 发送端收到 missing request 后提升 `attempt`，用统一 selector 重新计算 relay 顺序并重发 payload。
+  - 发送端收到 missing request 后提升 `attempt`，清空旧 routeNonce，用统一 selector 重新计算 relay 顺序并重发该 payload。
   - 同一 `messageId` 且 `payloadHash` 相同的副本只作为重传、重复投递或重放防御处理；同一 `messageId` 且 `payloadHash` 不同表示实现错误、状态污染或恶意篡改，接收端拒绝该 payload 并上报安全异常。
   - 已实现 Host/Client 对称的短期发送缓存、入站 seen cache、notice 加密投递、missing 加密请求和最多 3 次重传限制。
-  - `relay_missing_requests` 会记录本机发出或处理过的 missing request，便于排查 relay 丢帧和附件缺块。
+  - `relay_missing_requests` 会记录本机发出或处理过的 missing request，作为恢复队列和排障记录。
 
 - [x] 增强附件分片完整性校验。
-  - 附件 manifest 增加 `fileHash`、`chunkSize`、`chunkCount` 和 `chunkHashes` 或 Merkle root。
+  - 附件 manifest 增加 `fileHash`、`chunkSize`、`chunkCount`、`chunkHashes` 和 `merkleRoot`。
   - manifest 使用统一 selector 的 `route:manifest` 标签选择 relay；chunk 使用 `route:chunk` 标签选择 relay。
-  - 接收端用 received bitmap 跟踪 chunk，并按 offset 写入本地缓存，支持分片乱序到达。
-  - 每个 chunk 先通过 AEAD tag 验证，再检查 chunk hash；所有 chunk 收齐后计算 fileHash，并用 Merkle root 或 chunkHashes 校验完整性。
+  - 接收端用 `receivedChunks` 跟踪 chunk，并按 offset 写入本地缓存，支持分片乱序到达。
+  - 接收端在打开接收槽位前，用 `chunkHashes` 计算 Merkle root，并拒绝与 manifest `merkleRoot` 不一致的附件。
+  - 每个 chunk 携带 `chunkHash` 和 `merkleProof`，接收端先通过 AEAD tag 验证，再校验分片摘要、manifest 分片摘要位置和 Merkle proof。
+  - 所有 chunk 收齐后计算最终 `fileHash`，拒绝被截断、拼接、错序或篡改的附件缓存。
 
-- [x] 增强附件分片缺失恢复。
-  - 接收端收到 chunk notice 但缺少对应 chunk payload 时发送 missing bitmap/NACK。
-  - 发送端按 missing bitmap 对缺失 chunk 提升 `attempt` 并通过统一 selector 重新计算 relay 顺序。
-  - 附件 chunk 的 notice/missing 绑定 `transferId`、`chunkIndex`、`messageId` 和 `payloadHash`，重传仍保留 AEAD tag、chunk hash 和最终 fileHash 校验。
-  - 纠删码属于后续可选增强；当前完成的是 NACK 重传和完整性校验闭环。
+- [x] 完善附件分片缺失恢复。
+  - 接收端基于 `receivedChunks` 生成完整 `missingBitmap`，其中 `1` 表示缺失分片，`0` 表示已收到分片。
+  - 发送端维护 `transferId + chunkIndex -> messageId` 索引，收到 bitmap 后按缺失位批量重发多个 chunk。
+  - missing 请求绑定 `transferId`、`missingBitmap`、`messageId`、`payloadHash`、`targetSenderId` 和 `requesterId`。
+  - 重发 chunk 会提升 `attempt`、清空旧 `routeNonce`，再通过统一 relay selector 重新选择 relay。
+  - `relay_missing_requests` 记录每次缺失请求、缺失 bitmap 和重传次数。
 
 - [x] 增加 relay 状态可视化。
   - WinUI 在 Room 区域下方显示 `Relay status / 中继器状态`，展示当前 relay pool 健康摘要，例如可用 relay 数、当前发送 relay 和最近失败情况。
@@ -1150,5 +1155,74 @@ PKI 身份认证现在强制绑定成员证书、临时 public key、GKA contrib
   - 已完成 Windows `build_win.bat` 构建验证。
   - 已完成两个本地回环 WSS relay（25566/25567）的 CLI 烟测，覆盖 Host 创建房间、Client pending join、Host approve、GKA ready、双向文本收发和 relay 状态输出。
   - 已通过烟测修复两个多 relay 边界问题：selector 只选择本机已打开 relay；Host 只向已确认 `room_created` 的 relay 发送房间控制帧和应用中继。
-  - 可靠投递代码路径覆盖 messageId/payloadHash 判重、notice/missing 加密控制消息、重传 attempt 更新、payloadHash 异常拒绝和附件 chunk missing bitmap 生成。
+  - 可靠投递代码路径覆盖 messageId/payloadHash 判重、notice/missing 加密控制消息、重传 attempt 更新、payloadHash 异常拒绝和附件 missing bitmap 批量重传路径。
   - 增加安全测试：攻击者监控一个 relay 时，可见内容限于该 relay 子集上的 ciphertext、chunk 和 notice；监控所有 relay 时，可见内容限于应用层密文和元数据。
+
+## 阶段 18：旧成员任意重连与房间留言板
+
+目标：在最小修改原则下完成两件事。第一，已被批准入房且未被驱逐的成员可以在任何时候断线重连，包括 Host 不在线或房间内没有其他在线成员时。第二，增加只支持文本的房间留言板，使离线成员重新上线后可以读取留言板内容。
+
+- [ ] 明确成员资格和连接状态的边界。
+  - 成员资格由房间级成员证书和 Host 签名的成员资格事件决定。
+  - 在线连接只是成员当前是否连接 relay，不改变成员资格。
+  - Host 断线、Client 断线、旧成员重连都不产生新 epoch。
+  - 新 epoch 只发生在 Host 在线创建房间、approve 新成员或 evict 成员时。
+  - 新成员继续走 pending join，等待 Host 手动 approve。
+
+- [ ] 持久化 Host 签名的成员资格事件。
+  - Host approve 新成员时生成 signed approve event。
+  - Host `/evict` 成员时生成 signed eviction event。
+  - approve/evict event 绑定 room instance token、成员证书指纹、事件类型、事件序号、时间、nonce 和 Host 签名。
+  - relay pool 保存这些签名事件，使离线成员重连后可以同步到 missed approve/evict。
+  - Server/Relay 只保存和转发签名事件，不决定成员资格是否有效。
+
+- [ ] 实现旧成员重连路径。
+  - 增加 `member_rejoin`，用于已经持有房间级成员证书的旧成员。
+  - `member_rejoin` 携带成员证书链、成员签名、会话 public key、nonce 和本地已知成员资格事件摘要。
+  - Host 在线时，Host 验证该成员仍被批准且未被驱逐后恢复其连接。
+  - Host 不在线但存在其他在线成员时，其他在线成员验证该成员仍被批准且未被驱逐后接受其连接状态。
+  - Host 不在线且该成员是唯一在线成员时，该成员可以恢复连接状态；此时没有实时聊天对象，不推进 GKA。
+
+- [ ] 保持当前贡献式 GKA 框架。
+  - 阶段 18 不重写 GKA，不引入 member-initiated epoch。
+  - 旧成员重连只恢复连接状态，不改变成员集合，不产生新 epoch。
+  - Host 每次推进新 epoch 时，为所有仍具备成员资格且未被驱逐的成员生成当前 group state envelope。
+  - 发给离线成员的 group state envelope 作为 opaque 密文写入 relay pool；Server/Relay 只保存和转发密文 envelope。
+  - 旧成员重连后，优先从 relay pool 拉取属于自己的最新 group state envelope，并用本机成员私钥解封装当前 group state。
+  - 如果 relay pool 中缺少该成员的最新 envelope，且房间内存在其他 active 成员，active 成员可以补发当前已有 epoch 的 group state envelope。
+  - group state envelope 只能发给已经批准且未被驱逐的旧成员，不能授予新成员资格，也不能绕过 Host approve。
+
+- [ ] 实现留言板文本记录格式。
+  - 留言板只支持文本，不支持附件、图片、语音和文件。
+  - 每条留言包含 boardMessageId、作者成员证书指纹、创建时间、密文正文、签名和 record hash。
+  - 留言正文使用独立随机 post key 加密。
+  - post key 按当前已批准且未被驱逐的成员证书公钥分别封装，保证离线成员重新上线后可以解密其有资格读取的留言。
+  - relay 只保存密文记录、key envelopes、hash、大小和时间。
+
+- [ ] 实现留言板在 relay pool 上的存储和同步。
+  - 发送留言时，把同一条加密 BoardRecord 写入房间实际 relay set 中的多个 relay。
+  - 读取留言板时，从 relay pool 拉取 BoardRecord 列表，按 boardMessageId 和 record hash 去重。
+  - 同一 boardMessageId 出现不同 record hash 时拒绝自动合并，并上报状态异常。
+  - 离线成员重新上线后自动拉取缺失 BoardRecord，组合成本地留言板视图。
+  - 留言板设置单条文本大小、单房间记录数和 relay 缓存上限。
+
+- [ ] 增加 WinUI 留言板界面。
+  - 右侧边栏增加菱形图标按钮，点击打开留言板面板。
+  - 留言列表区域可以滚动。
+  - 留言发送栏固定在面板底部，不随列表滚动。
+  - 留言板面板中不提供附件、图片、语音和文件发送入口。
+  - 重新上线时自动刷新留言板并显示同步状态。
+
+- [ ] 增加 CLI 留言板命令。
+  - `/forum` 输出当前本地已同步的留言板内容。
+  - `/forum sync` 主动从 relay pool 拉取缺失留言。
+  - `/forum post <text>` 发布文本留言。
+  - `/forum` 系列命令不接受附件路径。
+
+- [ ] 测试阶段 18 目标。
+  - 测试 Host 离线时，已批准且未被驱逐的旧成员可以重连。
+  - 测试 Host 离线且无其他在线成员时，旧成员可以恢复连接状态。
+  - 测试新成员在 Host 离线时仍保持 pending。
+  - 测试被 `/evict` 的成员重连会被拒绝。
+  - 测试离线成员重新上线后可以同步并读取留言板文本。
+  - 测试 relay 只能看到留言板密文、key envelope、record id、大小和时序。

@@ -36,6 +36,7 @@ struct ReceiveSlot {
     std::size_t receivedSize = 0;
     std::size_t chunkSize = 0;
     std::string fileHash;
+    std::string merkleRoot;
     std::vector<std::string> chunkHashes;
     std::vector<bool> receivedChunks;
 };
@@ -62,15 +63,23 @@ public:
         std::size_t expectedSize,
         std::size_t chunkSize,
         std::string fileHash,
+        std::string merkleRoot,
         std::vector<std::string> chunkHashes);
     // 返回某个发送者当前是否还有待接收的二进制载荷。
     bool has(const std::string& key) const;
     // 返回活动传输 id，用于校验协议标记。
     std::string activeTransferId(const std::string& key) const;
+    // 返回当前传输的缺失分片 bitmap；'1' 表示缺失，'0' 表示已收到。
+    std::string missingBitmapFor(const std::string& key, const std::string& transferId) const;
     // 清除断连发送者的所有待接收传输。
     void clear(const std::string& key);
-    // 向磁盘追加一个二进制分片；传输完成后清空槽位。
-    ReceiveChunkResult appendChunk(const std::string& key, std::size_t offset, const rtc::binary& data);
+    // 向磁盘追加一个二进制分片；写入前验证分片摘要和 Merkle proof。
+    ReceiveChunkResult appendChunk(
+        const std::string& key,
+        std::size_t offset,
+        const rtc::binary& data,
+        std::string chunkHash,
+        std::vector<std::string> merkleProof);
 
 private:
     mutable std::mutex mMutex;
@@ -106,9 +115,12 @@ std::size_t expectedSizeFromMeta(const Message& msg, Kind kind);
 // 从 *_meta 载荷中提取分片大小、整体摘要和分片摘要列表。
 std::size_t chunkSizeFromMeta(const Message& msg);
 std::string fileHashFromMeta(const Message& msg);
+std::string merkleRootFromMeta(const Message& msg);
 std::vector<std::string> chunkHashesFromMeta(const Message& msg);
-// 从 *_binary 载荷中提取分片偏移，用于乱序分片重组。
+// 从 *_binary 载荷中提取分片偏移、摘要和 Merkle proof，用于乱序分片重组。
 std::size_t chunkOffsetFromMessage(const Message& msg);
+std::string chunkHashFromMessage(const Message& msg);
+std::vector<std::string> merkleProofFromMessage(const Message& msg);
 
 // 从协议载荷中提取并校验传输 id。
 std::string transferIdFromMessage(const Message& msg);
@@ -116,9 +128,11 @@ std::string transferIdFromMessage(const Message& msg);
 // 创建紧凑 id，用于匹配 *_meta、*_binary 标记和取消消息。
 std::string makeTransferId();
 
-// 计算附件整体和分片摘要，用于接收端完整性校验。
+// 计算附件整体摘要、分片摘要和 Merkle 树证明，用于接收端完整性校验。
 std::string sha256Hex(const std::vector<unsigned char>& data);
 std::vector<std::string> chunkSha256Hexes(const std::vector<unsigned char>& data, std::size_t chunkSize);
+std::string merkleRootForChunkHashes(const std::vector<std::string>& chunkHashes);
+std::vector<std::string> merkleProofForChunk(const std::vector<std::string>& chunkHashes, std::size_t chunkIndex);
 
 // 检查磁盘文件字节是否符合声明类型要求的文件头。
 bool hasExpectedFileSignature(const std::string& filePath, Kind kind);

@@ -43,6 +43,14 @@ bool isRelayUrl(const std::string& value) {
     return startsWith(value, "wss://");
 }
 
+std::string relayRuntimeStatus(std::string status) {
+    status = trim(std::move(status));
+    if (status == "connecting" || status == "healthy" || status == "offline") {
+        return status;
+    }
+    return "offline";
+}
+
 int relayProbeTimeoutMs() {
     const char* raw = std::getenv("SECURECHAT_RELAY_PROBE_TIMEOUT_MS");
     if (raw == nullptr || *raw == '\0') return 600;
@@ -276,7 +284,7 @@ void createSchema(sqlite3* db) {
         "source TEXT NOT NULL,"
         "manifest_id TEXT NOT NULL,"
         "schema_version INTEGER NOT NULL,"
-        "status TEXT NOT NULL DEFAULT 'candidate',"
+        "status TEXT NOT NULL DEFAULT 'offline',"
         "weight INTEGER NOT NULL DEFAULT 100,"
         "rtt_ms INTEGER NOT NULL DEFAULT 0,"
         "success_count INTEGER NOT NULL DEFAULT 0,"
@@ -502,7 +510,7 @@ void writeRelayPoolDatabase(const std::filesystem::path& roomDir, const json& ma
             const auto url = relay.value("url", "");
             Statement stmt(database.db,
                 "INSERT OR REPLACE INTO relay_nodes "
-                "(url, source, manifest_id, schema_version, status, weight) VALUES (?, ?, ?, ?, 'candidate', ?)");
+                "(url, source, manifest_id, schema_version, status, weight) VALUES (?, ?, ?, ?, 'offline', ?)");
             bindText(stmt.stmt, 1, url);
             bindText(stmt.stmt, 2, relay.value("source", source));
             bindText(stmt.stmt, 3, manifestId);
@@ -529,8 +537,7 @@ std::string primaryRelayUrlFromRoomDir(const std::filesystem::path& roomDir) {
     createSchema(database.db);
     Statement stmt(database.db,
         "SELECT url FROM relay_nodes "
-        "WHERE status <> 'banned' "
-        "ORDER BY CASE status WHEN 'healthy' THEN 0 WHEN 'candidate' THEN 1 ELSE 2 END, id "
+        "ORDER BY CASE status WHEN 'healthy' THEN 0 WHEN 'connecting' THEN 1 ELSE 2 END, id "
         "LIMIT 1");
     if (sqlite3_step(stmt.stmt) != SQLITE_ROW) {
         throw std::runtime_error("relay pool has no usable relay");
@@ -549,8 +556,7 @@ std::vector<std::string> relayUrlsFromRoomDir(const std::filesystem::path& roomD
     createSchema(database.db);
     Statement stmt(database.db,
         "SELECT url FROM relay_nodes "
-        "WHERE status <> 'banned' "
-        "ORDER BY CASE status WHEN 'healthy' THEN 0 WHEN 'candidate' THEN 1 ELSE 2 END, id");
+        "ORDER BY CASE status WHEN 'healthy' THEN 0 WHEN 'connecting' THEN 1 ELSE 2 END, id");
 
     std::vector<std::string> urls;
     while (sqlite3_step(stmt.stmt) == SQLITE_ROW) {
@@ -569,7 +575,7 @@ void markRelayStatus(const std::filesystem::path& roomDir, const std::string& ur
     createSchema(database.db);
     Statement stmt(database.db,
         "UPDATE relay_nodes SET status = ? WHERE url = ?");
-    bindText(stmt.stmt, 1, status);
+    bindText(stmt.stmt, 1, relayRuntimeStatus(status));
     bindText(stmt.stmt, 2, url);
     sqlite3_step(stmt.stmt);
 }
@@ -610,7 +616,7 @@ void recordRelaySend(
             "failure_count = failure_count + ?,"
             "last_used_unix_ms = ? "
             "WHERE url = ?");
-        bindText(stmt.stmt, 1, success ? "healthy" : "degraded");
+        bindText(stmt.stmt, 1, success ? "healthy" : "offline");
         sqlite3_bind_int64(stmt.stmt, 2, success ? 1 : 0);
         sqlite3_bind_int64(stmt.stmt, 3, success ? 0 : 1);
         sqlite3_bind_int64(stmt.stmt, 4, now);
@@ -662,10 +668,7 @@ RelayStatusSummary relayStatusSummary(const std::filesystem::path& roomDir) {
             summary.total += count;
             if (status == "healthy") summary.healthy += count;
             else if (status == "connecting") summary.connecting += count;
-            else if (status == "candidate") summary.candidate += count;
-            else if (status == "degraded") summary.degraded += count;
-            else if (status == "offline") summary.offline += count;
-            else if (status == "banned") summary.banned += count;
+            else summary.offline += count;
         }
     }
 
@@ -698,7 +701,6 @@ std::string relayStatusSummaryText(const std::filesystem::path& roomDir) {
     std::ostringstream out;
     out << "available " << summary.healthy << " / " << summary.total;
     if (summary.connecting > 0) out << "; connecting " << summary.connecting;
-    if (summary.degraded > 0) out << "; degraded " << summary.degraded;
     if (summary.offline > 0) out << "; offline " << summary.offline;
     if (!summary.lastUsedRelay.empty()) out << "; current " << summary.lastUsedRelay;
     if (!summary.lastFailedRelay.empty()) {

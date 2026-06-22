@@ -132,15 +132,15 @@ Server 的安全边界是“不读取应用明文”。Server 仍可见部分元
 
 ### Relay Pool
 
-每个 room instance 都有自己的固定 relay pool。Host 创建 `entrance.scp` 时读取本机候选 pool，先按 URL 去重，再向每个当前可连接访问路径发送 `relay_probe`，用 Server 返回的 `relayInstanceId` 识别同一 backend 的多条访问路径，最后选择最多 4 个不同 backend relay 写入准入容器的保密 payload。候选 URL 集合记为 `C`，按 `relayInstanceId` 去重后的当前可连接 relay 集合记为 `P`，房间实际 relay set 记为 `N`，三者关系为 `N ⊆ P` 且 `|N| <= 4`。如果 `wss://127.0.0.1:25566` 和某个 frp 地址最终指向同一个 Server 进程，二者会返回同一个 `relayInstanceId`，实际 relay set 只保留其中一个。Client 导入 `entrance.scp` 后生成同一份 `relay/relay-pool.sqlite3` 本地副本。Host/Client 启动时从 `--room-dir` 读取房间实际 relay set，界面不需要手动填写 Server URL。运行时每次发送都会根据本机连接状态得到当前可用子集 `M(t)`，其中 `M(t) ⊆ N`；暂时不可用的 relay 会进入 degraded/offline 和本机沉默期，沉默期内不重复重连或刷屏提示，后续发送前再尝试恢复。
+每个 room instance 都有自己的固定 relay pool。Host 创建 `entrance.scp` 时读取本机候选 pool，先按 URL 去重，再向每个当前可连接访问路径发送 `relay_probe`，用 Server 返回的 `relayInstanceId` 识别同一 backend 的多条访问路径，最后选择最多 4 个不同 backend relay 写入准入容器的保密 payload。候选 URL 集合记为 `C`，按 `relayInstanceId` 去重后的当前可连接 relay 集合记为 `P`，房间实际 relay set 记为 `N`，三者关系为 `N ⊆ P` 且 `|N| <= 4`。如果 `wss://127.0.0.1:25566` 和某个 frp 地址最终指向同一个 Server 进程，二者会返回同一个 `relayInstanceId`，实际 relay set 只保留其中一个。Client 导入 `entrance.scp` 后生成同一份 `relay/relay-pool.sqlite3` 本地副本。Host/Client 启动时从 `--room-dir` 读取房间实际 relay set，界面不需要手动填写 Server URL。运行时每次发送都会根据本机连接状态得到当前可用子集 `M(t)`，其中 `M(t) ⊆ N`；暂时不可用的 relay 会进入 `offline` 和本机沉默期，沉默期内不重复重连或刷屏提示，发送前再尝试恢复。
 
 Host 只在房间实际 relay set 上创建同一个 room instance。Client 首次加入时从 `N` 中选择一个 admission relay 发送 pending join；如果该 relay 连接失败，Client 会按 admission secret 派生的排序尝试下一个未处于沉默期的 relay。Host 在产生 pending join 的 relay 上 approve 或 reject。Client 获批并安装房间级成员证书后，会自动连接剩余 relay。Host 对同一已验证成员在其他 relay 上的重复 pending join 做静默批准，不生成新的 pending 卡片，也不触发新的 GKA epoch。
 
 SecureChat 使用一套固定的确定性 relay selector。selector 会对当前可用子集 `M(t)` 中的每个 relay 计算 HMAC-SHA256 score，并按 score 得到 relay 顺序。pending join 阶段还没有 room group key，因此使用 `entrance.scp` 中的 admission secret；GKA 完成后的文本、附件元数据和附件分片使用当前 room group key、room token、epoch、消息类型、routeNonce、messageId、transferId/chunkIndex 和 attempt 等字段派生调度摘要。单 relay 投递取当前 payload 对应排序的第一项，因此相同 pool 长期可用时，不同消息仍会得到不同 relay 顺序。Host 只向已经确认 `room_created` 的 relay 发送房间控制帧和应用中继，避免把房间控制消息投递到尚未承载该 room instance 的 relay。`close_room` 会向 `N` 中已 ready 的 relay 投递同一个 Host 签名关闭事件。
 
-附件元数据会携带整体 `fileHash`、`chunkSize`、`chunkCount` 和 `chunkHashes`。接收端先验证外层 AEAD，再按 offset 写入分片并校验每个 chunk hash；所有分片收齐后计算最终 fileHash。这样不同 relay 上乱序到达的分片不会靠到达顺序拼接，损坏或篡改的分片会被拒绝。
+附件元数据会携带整体 `fileHash`、`chunkSize`、`chunkCount`、`chunkHashes` 和 `merkleRoot`。每个附件分片会携带 `chunkHash` 和 `merkleProof`。接收端先验证外层 AEAD，再验证 manifest 中的 Merkle root、分片摘要位置和分片 Merkle proof，最后按 offset 写入缓存并在收齐后计算最终 `fileHash`。这样不同 relay 上乱序到达的分片不会靠到达顺序拼接，损坏或篡改的分片会被拒绝。
 
-文本、附件元数据和附件分片会写入 `messageId` 和 `payloadHash`。发送方保存短期重传副本，并在 payload 发送成功后发送加密 `relay_notice`。接收端收到 notice 后检查本机 seen cache；如果缺少对应 payload，就通过加密 `missing_message` 请求发送方重传。发送方重传时提升 `attempt`，重新计算 relay 顺序，并保留原始 payloadHash。相同 `messageId` 和相同 `payloadHash` 的副本被视为重复投递；相同 `messageId` 但不同 `payloadHash` 的 payload 会被拒绝为异常投递。
+文本、附件元数据和附件分片会写入 `messageId` 和 `payloadHash`。发送方保存短期重传副本，并在 payload 发送成功后发送加密 `relay_notice`。接收端收到 notice 后检查本机 seen cache；如果缺少对应 payload，就通过加密 `missing_message` 请求发送方重传。附件接收端会基于 `receivedChunks` 生成 `missingBitmap`，发送端按 bitmap 批量重发缺失 chunk。发送方重传时提升 `attempt`，重新计算 relay 顺序，并保留原始 payloadHash。相同 `messageId` 和相同 `payloadHash` 的副本被视为重复投递；相同 `messageId` 但不同 `payloadHash` 的 payload 会被拒绝为异常投递。
 
 ## 构建
 
