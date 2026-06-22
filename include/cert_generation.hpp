@@ -5,6 +5,7 @@
 
 #include "common.hpp"
 
+#include <cstddef>
 #include <string>
 #include <vector>
 
@@ -44,6 +45,9 @@ struct RoomEntranceCreateResult {
     std::string rootFingerprint;
     std::string intermediateFingerprint;
     std::string hostFingerprint;
+    std::size_t candidateRelayCount = 0;
+    std::size_t reachableRelayCount = 0;
+    std::size_t selectedRelayCount = 0;
 };
 
 struct RoomEntranceImportOptions {

@@ -1761,7 +1761,10 @@ RoomEntranceCreateResult createRoomEntrance(const RoomEntranceCreateOptions& opt
         digest,
         rootFp,
         intermediateFp,
-        hostFp};
+        hostFp,
+        relayPool.candidateCount,
+        relayPool.reachableCount,
+        relayPool.urls.size()};
 }
 
 std::string inspectRoomEntrance(const std::string& entranceFile, const std::string& roomPhrase) {

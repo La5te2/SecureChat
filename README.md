@@ -132,11 +132,11 @@ Server 的安全边界是“不读取应用明文”。Server 仍可见部分元
 
 ### Relay Pool
 
-每个 room instance 都有自己的固定 relay pool。Host 创建 `entrance.scp` 时把 relay pool manifest 写入准入容器的保密 payload；Client 导入 `entrance.scp` 后生成同一份 `relay/relay-pool.sqlite3` 本地副本。Host/Client 启动时从 `--room-dir` 读取完整 pool，而不是让用户在界面里手动填写 Server URL。pool 中的地址集合由 Host 创建房间时导入的文件决定，记为 `N`，其大小 `n` 在房间生命周期内不变。运行时每次发送都会根据本机连接状态得到当前可用子集 `M(t)`，其中 `m(t) <= n`；暂时不可用的 relay 会进入 degraded/offline 和本机沉默期，沉默期内不重复重连或刷屏提示，后续发送前再尝试恢复。
+每个 room instance 都有自己的固定 relay pool。Host 创建 `entrance.scp` 时读取本机候选 pool，先按 URL 去重，再探测当前可连接 relay，最后选择最多 4 个 relay 写入准入容器的保密 payload。候选集合记为 `C`，当前可连接集合记为 `P`，房间实际 relay set 记为 `N`，三者关系为 `N ⊆ P ⊆ C` 且 `|N| <= 4`。Client 导入 `entrance.scp` 后生成同一份 `relay/relay-pool.sqlite3` 本地副本。Host/Client 启动时从 `--room-dir` 读取房间实际 relay set，界面不需要手动填写 Server URL。运行时每次发送都会根据本机连接状态得到当前可用子集 `M(t)`，其中 `M(t) ⊆ N`；暂时不可用的 relay 会进入 degraded/offline 和本机沉默期，沉默期内不重复重连或刷屏提示，后续发送前再尝试恢复。
 
-Host 会在完整 pool 上创建同一个 room instance。Client 首次加入时从 pool 中选择一个 admission relay 发送 pending join；如果该 relay 连接失败，Client 会按 admission secret 派生的排序尝试下一个未处于沉默期的 relay。Host 在产生 pending join 的 relay 上 approve 或 reject。Client 获批并安装房间级成员证书后，会自动连接剩余 relay。Host 对同一已验证成员在其他 relay 上的重复 pending join 做静默批准，不生成新的 pending 卡片，也不触发新的 GKA epoch。
+Host 只在房间实际 relay set 上创建同一个 room instance。Client 首次加入时从 `N` 中选择一个 admission relay 发送 pending join；如果该 relay 连接失败，Client 会按 admission secret 派生的排序尝试下一个未处于沉默期的 relay。Host 在产生 pending join 的 relay 上 approve 或 reject。Client 获批并安装房间级成员证书后，会自动连接剩余 relay。Host 对同一已验证成员在其他 relay 上的重复 pending join 做静默批准，不生成新的 pending 卡片，也不触发新的 GKA epoch。
 
-SecureChat 使用一套固定的确定性 relay selector。selector 会对当前可用子集 `M(t)` 中的每个 relay 计算 HMAC-SHA256 score，并按 score 得到 relay 顺序。pending join 阶段还没有 room group key，因此使用 `entrance.scp` 中的 admission secret；GKA 完成后的文本、附件元数据和附件分片使用当前 room group key、room token、epoch、消息类型、routeNonce、messageId、transferId/chunkIndex 和 attempt 等字段派生调度摘要。单 relay 投递取当前 payload 对应排序的第一项，因此相同 pool 长期可用时，不同消息仍会得到不同 relay 顺序。Host 只向已经确认 `room_created` 的 relay 发送房间控制帧和应用中继，避免把房间控制消息投递到尚未承载该 room instance 的 relay。`close_room` 会向完整 pool 中已 ready 的 relay 投递同一个 Host 签名关闭事件。
+SecureChat 使用一套固定的确定性 relay selector。selector 会对当前可用子集 `M(t)` 中的每个 relay 计算 HMAC-SHA256 score，并按 score 得到 relay 顺序。pending join 阶段还没有 room group key，因此使用 `entrance.scp` 中的 admission secret；GKA 完成后的文本、附件元数据和附件分片使用当前 room group key、room token、epoch、消息类型、routeNonce、messageId、transferId/chunkIndex 和 attempt 等字段派生调度摘要。单 relay 投递取当前 payload 对应排序的第一项，因此相同 pool 长期可用时，不同消息仍会得到不同 relay 顺序。Host 只向已经确认 `room_created` 的 relay 发送房间控制帧和应用中继，避免把房间控制消息投递到尚未承载该 room instance 的 relay。`close_room` 会向 `N` 中已 ready 的 relay 投递同一个 Host 签名关闭事件。
 
 附件元数据会携带整体 `fileHash`、`chunkSize`、`chunkCount` 和 `chunkHashes`。接收端先验证外层 AEAD，再按 offset 写入分片并校验每个 chunk hash；所有分片收齐后计算最终 fileHash。这样不同 relay 上乱序到达的分片不会靠到达顺序拼接，损坏或篡改的分片会被拒绝。
 
@@ -503,6 +503,7 @@ logs/texts/<room>_<roomInstanceTokenDigest前8位>/<systemUsername>.sqlite3
 | `SECURECHAT_SIGNALING_TLS` | Server 是否启用 TLS；默认启用，设为 `0` 时要求 loopback 绑定，用于本机回环 WS backend |
 | `SECURECHAT_LOCAL_TLS_CA` | Host/Client/WinUI 连接本地或局域网自签 WSS 时使用的服务器 CA |
 | `SECURECHAT_TLS_AUTO_DIR` | 手动运行 Server 时自动生成本地/局域网 TLS 材料的目录 |
+| `SECURECHAT_RELAY_PROBE_TIMEOUT_MS` | Host 创建 entrance 时探测候选 relay 的单个 WSS 连接超时，默认 600ms |
 | `SECURECHAT_BIND_ADDRESS` | Server 监听地址 |
 | `SECURECHAT_PORT` | Server 默认端口 |
 | `SECURECHAT_ATTACHMENT_MAX_BYTES` | 附件发送大小上限 |

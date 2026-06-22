@@ -3,13 +3,18 @@
 #include "relay_pool.hpp"
 
 #include "cert_utils.hpp"
+#include "websocket_config.hpp"
 
 #include <sqlite3.h>
 
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <condition_variable>
+#include <cstdlib>
 #include <fstream>
+#include <memory>
+#include <mutex>
 #include <sstream>
 #include <stdexcept>
 
@@ -30,6 +35,105 @@ bool startsWith(const std::string& value, const std::string& prefix) {
 bool isRelayUrl(const std::string& value) {
     // 房间级 pool 面向成员可直接访问的 TLS relay 入口。
     return startsWith(value, "wss://");
+}
+
+int relayProbeTimeoutMs() {
+    const char* raw = std::getenv("SECURECHAT_RELAY_PROBE_TIMEOUT_MS");
+    if (raw == nullptr || *raw == '\0') return 600;
+    try {
+        const auto value = std::stoi(raw);
+        return std::max(250, std::min(value, 10000));
+    }
+    catch (...) {
+        return 600;
+    }
+}
+
+bool probeRelayOpen(const std::string& url, int timeoutMs) {
+    struct ProbeState {
+        std::mutex mutex;
+        std::condition_variable ready;
+        bool finished = false;
+        bool opened = false;
+    };
+
+    rtc::WebSocket::Configuration config;
+    chat::websocket_config::applyClientTlsFromEnvironment(config);
+    auto state = std::make_shared<ProbeState>();
+    auto ws = std::make_shared<rtc::WebSocket>(config);
+
+    ws->onOpen([state]() {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        state->opened = true;
+        state->finished = true;
+        state->ready.notify_all();
+    });
+    ws->onError([state](std::string) {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        state->finished = true;
+        state->ready.notify_all();
+    });
+    ws->onClosed([state]() {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        state->finished = true;
+        state->ready.notify_all();
+    });
+
+    try {
+        ws->open(url);
+    }
+    catch (...) {
+        return false;
+    }
+
+    bool opened = false;
+    {
+        std::unique_lock<std::mutex> lock(state->mutex);
+        state->ready.wait_for(lock, std::chrono::milliseconds(timeoutMs), [&]() {
+            return state->finished;
+        });
+        opened = state->opened;
+    }
+    try {
+        ws->close();
+    }
+    catch (...) {
+    }
+    return opened;
+}
+
+std::vector<std::string> uniqueRelayUrls(const std::vector<std::string>& urls) {
+    std::vector<std::string> unique;
+    for (const auto& url : urls) {
+        if (!isRelayUrl(url)) throw std::runtime_error("invalid relay URL in pool: " + url);
+        if (std::find(unique.begin(), unique.end(), url) == unique.end()) {
+            unique.push_back(url);
+        }
+    }
+    if (unique.empty()) throw std::runtime_error("relay pool is empty");
+    return unique;
+}
+
+std::vector<std::string> selectRoomRelays(const std::vector<std::string>& candidateUrls) {
+    auto selected = uniqueRelayUrls(candidateUrls);
+    if (selected.size() > MaxRoomRelayCount) {
+        selected.resize(MaxRoomRelayCount);
+    }
+    return selected;
+}
+
+std::vector<std::string> reachableRelayUrls(const std::vector<std::string>& candidateUrls) {
+    const auto timeoutMs = relayProbeTimeoutMs();
+    std::vector<std::string> reachable;
+    for (const auto& url : candidateUrls) {
+        if (probeRelayOpen(url, timeoutMs)) {
+            reachable.push_back(url);
+        }
+    }
+    if (reachable.empty()) {
+        throw std::runtime_error("relay pool has no currently reachable relay");
+    }
+    return reachable;
 }
 
 long long nowUnixMs() {
@@ -194,18 +298,16 @@ std::vector<std::string> readRelayUrlsFromFile(const std::filesystem::path& path
             }
             continue;
         }
-        if (std::find(urls.begin(), urls.end(), line) == urls.end()) urls.push_back(std::move(line));
+        urls.push_back(std::move(line));
     }
 
-    if (urls.empty()) throw std::runtime_error("relay pool is empty");
-    return urls;
+    return uniqueRelayUrls(urls);
 }
 
 json buildRelayManifest(const std::vector<std::string>& urls, const std::string& source) {
-    if (urls.empty()) throw std::runtime_error("relay pool is empty");
+    const auto roomRelays = selectRoomRelays(urls);
     json relays = json::array();
-    for (const auto& url : urls) {
-        if (!isRelayUrl(url)) throw std::runtime_error("invalid relay URL in manifest: " + url);
+    for (const auto& url : roomRelays) {
         relays.push_back({
             {"url", url},
             {"weight", 100},
@@ -217,6 +319,8 @@ json buildRelayManifest(const std::vector<std::string>& urls, const std::string&
         {"version", 1},
         {"kind", "securechat-relay-pool"},
         {"source", source.empty() ? "local" : source},
+        {"maxRelayCount", static_cast<int>(MaxRoomRelayCount)},
+        {"selectedRelayCount", static_cast<int>(roomRelays.size())},
         {"relays", relays}
     };
     manifest["manifestId"] = chat::cert_utils::sha256Hex(canonicalRelayManifest(manifest));
@@ -231,9 +335,15 @@ std::string canonicalRelayManifest(const json& manifest) {
 }
 
 RelayPoolLoadResult loadRelayPoolFile(const std::filesystem::path& path, const std::string& source) {
-    auto urls = readRelayUrlsFromFile(path);
-    auto manifest = buildRelayManifest(urls, source);
-    return {std::move(manifest), std::move(urls)};
+    auto candidates = readRelayUrlsFromFile(path);
+    auto reachable = reachableRelayUrls(candidates);
+    auto selected = selectRoomRelays(reachable);
+    auto manifest = buildRelayManifest(selected, source);
+    manifest["candidateRelayCount"] = static_cast<int>(candidates.size());
+    manifest["reachableRelayCount"] = static_cast<int>(reachable.size());
+    manifest["selectedRelayCount"] = static_cast<int>(selected.size());
+    manifest["manifestId"] = chat::cert_utils::sha256Hex(canonicalRelayManifest(manifest));
+    return {std::move(manifest), std::move(selected), candidates.size(), reachable.size()};
 }
 
 std::filesystem::path relayPoolDatabasePath(const std::filesystem::path& roomDir) {
@@ -244,6 +354,23 @@ void writeRelayPoolDatabase(const std::filesystem::path& roomDir, const json& ma
     if (!manifest.is_object() || manifest.value("kind", "") != "securechat-relay-pool") {
         throw std::runtime_error("relay pool manifest is invalid");
     }
+    const auto relays = manifest.value("relays", json::array());
+    if (!relays.is_array() || relays.empty()) {
+        throw std::runtime_error("relay pool manifest has no relay URL");
+    }
+    if (relays.size() > MaxRoomRelayCount) {
+        throw std::runtime_error("relay pool manifest exceeds room relay limit");
+    }
+    std::vector<std::string> seenUrls;
+    for (const auto& relay : relays) {
+        const auto url = relay.value("url", "");
+        if (!isRelayUrl(url)) throw std::runtime_error("relay pool manifest has invalid URL");
+        if (std::find(seenUrls.begin(), seenUrls.end(), url) != seenUrls.end()) {
+            throw std::runtime_error("relay pool manifest has duplicate URL");
+        }
+        seenUrls.push_back(url);
+    }
+
     const auto dbPath = relayPoolDatabasePath(roomDir);
     ensureDirectory(dbPath.parent_path());
     Database database(dbPath);
@@ -269,9 +396,8 @@ void writeRelayPoolDatabase(const std::filesystem::path& roomDir, const json& ma
             }
         }
 
-        for (const auto& relay : manifest.value("relays", json::array())) {
+        for (const auto& relay : relays) {
             const auto url = relay.value("url", "");
-            if (!isRelayUrl(url)) throw std::runtime_error("relay pool manifest has invalid URL");
             Statement stmt(database.db,
                 "INSERT OR REPLACE INTO relay_nodes "
                 "(url, source, manifest_id, schema_version, status, weight) VALUES (?, ?, ?, ?, 'candidate', ?)");

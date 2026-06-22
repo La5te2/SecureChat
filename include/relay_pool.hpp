@@ -5,15 +5,20 @@
 
 #include "common.hpp"
 
+#include <cstddef>
 #include <filesystem>
 #include <string>
 #include <vector>
 
 namespace chat::relay_pool {
 
+constexpr std::size_t MaxRoomRelayCount = 4;
+
 struct RelayPoolLoadResult {
     json manifest = json::object();
     std::vector<std::string> urls;
+    std::size_t candidateCount = 0;
+    std::size_t reachableCount = 0;
 };
 
 struct RelayStatusSummary {
@@ -38,7 +43,7 @@ json buildRelayManifest(const std::vector<std::string>& urls, const std::string&
 // 用稳定 JSON 文本作为签名和 manifest id 输入。
 std::string canonicalRelayManifest(const json& manifest);
 
-// 读取 pool 文件并返回 manifest 与 URL 列表。
+// 读取 pool 文件，裁剪为当前 room instance 的实际 relay set 后返回 manifest 与 URL 列表。
 RelayPoolLoadResult loadRelayPoolFile(const std::filesystem::path& path, const std::string& source);
 
 // 把房间级 manifest 写成 SQLite 副本。

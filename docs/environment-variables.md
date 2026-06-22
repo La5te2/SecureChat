@@ -4,7 +4,7 @@
 
 ## 总览
 
-当前共有 15 个 `SECURECHAT_*` 变量：
+当前共有 16 个 `SECURECHAT_*` 变量：
 
 ```text
 SECURECHAT_ALLOW_ROOT
@@ -12,6 +12,7 @@ SECURECHAT_ATTACHMENT_MAX_BYTES
 SECURECHAT_BIND_ADDRESS
 SECURECHAT_LOGS_MAX_BYTES
 SECURECHAT_PORT
+SECURECHAT_RELAY_PROBE_TIMEOUT_MS
 SECURECHAT_SERVER_BIN
 SECURECHAT_SERVER_LOG_ENABLED
 SECURECHAT_SERVER_PID_FILE
@@ -48,6 +49,12 @@ SECURECHAT_TLS_KEY_PASS
 | `SECURECHAT_TLS_AUTO_DIR` | `certs` | 手动运行 `server` 且 TLS 路径环境变量为空时，C++ Server 自动生成本地/局域网 TLS 材料的目录。 |
 
 房间 relay pool 面向成员连接的入口使用 `wss://`。`ws://` 仅作为本机回环 backend 使用；当 `SECURECHAT_SIGNALING_TLS=0` 时，Server 要求 loopback 绑定，并由外层 TLS 入口或受保护隧道接入。
+
+## Relay Pool
+
+| 变量 | 默认值 | 用途 |
+| --- | --- | --- |
+| `SECURECHAT_RELAY_PROBE_TIMEOUT_MS` | `600` | `cert.exe create-entrance` 从候选 relay pool 生成房间实际 relay set 时使用的单个 WSS relay 探测超时，取值限制在 250 到 10000 毫秒之间。 |
 
 ## 房间级成员身份
 

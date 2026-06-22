@@ -22,11 +22,11 @@
 
 ## 房间级 Relay Pool
 
-Host 创建 `entrance.scp` 时会把 relay pool manifest 写入准入容器的保密 payload。Client 导入 `entrance.scp` 后生成同一份 `relay/relay-pool.sqlite3` 本地副本。Host/Client 启动时读取完整 pool，并尝试连接 pool 中的 WSS relay。该 pool 是房间级固定候选集合 `N`，运行时不追加新地址；每次发送时从本机当前可用子集 `M(t) ⊆ N` 中选择 relay。连接失败的 relay 会进入 degraded/offline 和本机沉默期，同一次失败尝试只记录一次错误；沉默期内不重复重连或刷屏提示，后续发送前再尝试恢复。
+Host 创建 `entrance.scp` 时读取本机候选 pool，按 URL 去重，使用 600ms 默认探测超时筛出当前可连接 relay，再选择最多 4 个 relay 生成房间级 manifest。候选集合记为 `C`，当前可连接集合记为 `P`，房间实际 relay set 记为 `N`，三者关系为 `N ⊆ P ⊆ C` 且 `|N| <= 4`。Client 导入 `entrance.scp` 后生成同一份 `relay/relay-pool.sqlite3` 本地副本。Host/Client 启动时读取 `N`，每次发送时从本机当前可用子集 `M(t) ⊆ N` 中选择 relay。连接失败的 relay 会进入 degraded/offline 和本机沉默期，同一次失败尝试只记录一次错误；沉默期内不重复重连或刷屏提示，后续发送前再尝试恢复。
 
-Host 在完整 pool 上创建同一个 room instance。Client 首次加入时从 pool 中选择一个 admission relay 发送 pending join；如果该 relay 连接失败，Client 会按 admission secret 派生的排序尝试下一个未处于沉默期的 relay。Host 在产生 pending join 的 relay 上 approve 或 reject。Client 获批并安装房间级成员证书后，会自动连接剩余 relay。Host 对同一已验证成员在其他 relay 上的重复 pending join 做静默批准，不生成新的 pending 卡片，也不触发新的 GKA epoch。
+Host 只在房间实际 relay set 上创建同一个 room instance。Client 首次加入时从 `N` 中选择一个 admission relay 发送 pending join；如果该 relay 连接失败，Client 会按 admission secret 派生的排序尝试下一个未处于沉默期的 relay。Host 在产生 pending join 的 relay 上 approve 或 reject。Client 获批并安装房间级成员证书后，会自动连接剩余 relay。Host 对同一已验证成员在其他 relay 上的重复 pending join 做静默批准，不生成新的 pending 卡片，也不触发新的 GKA epoch。
 
-SecureChat 使用一套固定的确定性 relay selector。selector 会对 `M(t)` 中的每个 relay 计算 HMAC-SHA256 score，并按 score 得到 relay 顺序。pending join 阶段使用 admission secret；GKA 完成后的文本、附件元数据和附件分片使用当前 room group key、room token、epoch、消息类型、routeNonce、messageId、transferId/chunkIndex 和 attempt 等字段派生调度摘要。单 relay 投递取当前 payload 对应排序的第一项，因此相同 pool 长期可用时，不同消息仍会得到不同 relay 顺序。Host 只向已经确认 `room_created` 的 relay 发送房间控制帧和应用中继。relay 只能看到自己承载的 ciphertext、帧大小、连接 id 和时序。Host 显式关闭房间时，`close_room` 会向完整 pool 中已 ready 的 relay 投递同一个 Host 签名关闭事件。
+SecureChat 使用一套固定的确定性 relay selector。selector 会对 `M(t)` 中的每个 relay 计算 HMAC-SHA256 score，并按 score 得到 relay 顺序。pending join 阶段使用 admission secret；GKA 完成后的文本、附件元数据和附件分片使用当前 room group key、room token、epoch、消息类型、routeNonce、messageId、transferId/chunkIndex 和 attempt 等字段派生调度摘要。单 relay 投递取当前 payload 对应排序的第一项，因此相同 pool 长期可用时，不同消息仍会得到不同 relay 顺序。Host 只向已经确认 `room_created` 的 relay 发送房间控制帧和应用中继。relay 只能看到自己承载的 ciphertext、帧大小、连接 id 和时序。Host 显式关闭房间时，`close_room` 会向 `N` 中已 ready 的 relay 投递同一个 Host 签名关闭事件。
 
 附件元数据携带整体文件摘要和分片摘要列表。接收端先验证加密中继 AEAD，再按 offset 写入分片并校验每个 chunk hash；全部分片收齐后计算最终 fileHash。该设计支持不同 relay 上的分片乱序到达，并把损坏、错序拼接或篡改分片转化为本地校验失败。
 

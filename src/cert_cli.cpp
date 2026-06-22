@@ -74,6 +74,9 @@ int main(int argc, char** argv) {
             std::cout << "intermediateFingerprint: " << result.intermediateFingerprint << "\n";
             std::cout << "hostFingerprint: " << result.hostFingerprint << "\n";
             std::cout << "roomInstanceTokenDigest: " << result.roomInstanceTokenDigest << "\n";
+            std::cout << "relayCandidates: " << result.candidateRelayCount << "\n";
+            std::cout << "relayReachable: " << result.reachableRelayCount << "\n";
+            std::cout << "relaySelected: " << result.selectedRelayCount << "\n";
             return 0;
         }
 

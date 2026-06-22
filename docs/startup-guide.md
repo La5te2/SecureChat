@@ -1,6 +1,6 @@
 # SecureChat 启动手册
 
-本文档说明 Windows 和 Linux 上启动 Server、Host、Client 的最小流程。当前对外信令入口使用 WSS，也就是 WebSocket over TLS。Host、Client 和 WinUI 从房间目录中的 relay pool 读取连接入口；WinUI 创建房间时从本地 `config.yml` 的 `[pool]` 段读取原始 pool。
+本文档说明 Windows 和 Linux 上启动 Server、Host、Client 的最小流程。当前对外信令入口使用 WSS，也就是 WebSocket over TLS。Host、Client 和 WinUI 从房间目录中的 relay pool 读取连接入口；WinUI 创建房间时从本地 `config.yml` 的 `[pool]` 段读取原始候选 pool。
 
 ## 共同前提
 
@@ -12,7 +12,7 @@
 
 Server 只需要 TLS 证书和监听参数，不需要成员 PKI。Host 和 Client 使用 `--room-dir` 时会从房间目录自动读取 trust store、成员证书链、成员私钥、room instance token 和 relay pool。
 
-relay pool 可以只有一个入口，也可以有多个入口。多个入口时，每行写一个 `wss://host:port`。Host 会在完整 pool 上创建同一个 room instance；Client 获批后会连接完整 pool。pool 地址集合由创建房间时导入的文件决定，运行时不新增地址；每次发送时从当前可用子集 `M(t)` 中选择 relay。pending join 使用 admission secret 选择 relay，GKA 完成后的文本和附件分片使用 room group key 选择 relay。
+relay pool 可以只有一个入口，也可以有多个入口。多个入口时，每行写一个 `wss://host:port`。Host 创建房间时会先对候选入口去重，再用 600ms 默认探测超时筛出当前可连接 relay，最后选择最多 4 个 relay 写入 `entrance.scp` 和本机 `relay-pool.sqlite3`。Host 只在这组房间实际 relay set 上创建同一个 room instance；Client 获批后会连接同一组 relay。pool 地址集合在 room instance 生命周期内固定，运行时不新增地址；每次发送时从当前可用子集 `M(t)` 中选择 relay。pending join 使用 admission secret 选择 relay，GKA 完成后的文本和附件分片使用 room group key 选择 relay。
 
 ## Server TLS 证书选择
 

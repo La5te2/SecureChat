@@ -212,7 +212,7 @@ Host/Client CLI 已支持 `--room-dir` 直接加载房间级 PKI 和 room instan
 .\out\build\x64-release\client.exe --room-dir logs\<room-dir> bob
 ```
 
-WinUI 不显示 `room-dir` 路径。Host 面板只需要 Room 和 User，点击创建房间后会自动读取本机 `config.yml` 的 `[pool]` 段，生成 `logs/<原始房间名>_<digest前8位>/certs/entrance.scp`、Host 房间级证书材料和 relay pool SQLite 副本。Join 面板只需要 Room 和 User，点击导入房间后选择 Host 分发的 `entrance.scp`，WinUI 会自动导入并生成本机成员私钥、准入副本和加密运行材料。Client 会先进入 pending 状态，Host 左键 pending 成员卡片允许加入，右键拒绝并封禁该申请指纹。审批通过时，Host 签发成员证书响应，Client 安装后再参与 GKA。
+WinUI 不显示 `room-dir` 路径。Host 面板只需要 Room 和 User，点击创建房间后会自动读取本机 `config.yml` 的 `[pool]` 段，对候选 relay 去重并探测当前可连接入口，生成 `logs/<原始房间名>_<digest前8位>/certs/entrance.scp`、Host 房间级证书材料和房间实际 relay set 的 SQLite 副本。Join 面板只需要 Room 和 User，点击导入房间后选择 Host 分发的 `entrance.scp`，WinUI 会自动导入并生成本机成员私钥、准入副本和加密运行材料。Client 会先进入 pending 状态，Host 左键 pending 成员卡片允许加入，右键拒绝并封禁该申请指纹。审批通过时，Host 签发成员证书响应，Client 安装后再参与 GKA。
 
 ## 成员 PKI 在协议中的作用
 

@@ -970,7 +970,7 @@ PKI 身份认证现在强制绑定成员证书、临时 public key、GKA contrib
 
 ## 阶段 17：房间级本地目录重构与 Relay Mesh
 
-目标：把用户端本地材料统一收束到单个 room instance 根目录，并在该目录下引入房间级共享 relay pool。CLI Host 创建房间时通过 `--pool <file>` 导入原始 relay pool 文件；WinUI Host 创建房间时从本地 config 的 `[pool]` 段读取原始 relay pool。Host 创建 `entrance.scp` 时把规范化后的 pool manifest 写入 entrance 保密 payload。Host 的原始 pool 文件和本机 SQLite 副本限定在 Host 本机；Client 导入 `entrance.scp` 后从保密 payload 获得同一 room instance 的 relay pool，并在本机生成 SQLite 副本。网络状态正常时，每个成员都尝试连接完整 pool。文本、附件元数据和附件分片由房间群密钥派生的调度摘要选择 relay；关闭房间事件向完整 pool 投递。
+目标：把用户端本地材料统一收束到单个 room instance 根目录，并在该目录下引入房间级共享 relay pool。CLI Host 创建房间时通过 `--pool <file>` 导入原始候选 relay pool 文件；WinUI Host 创建房间时从本地 config 的 `[pool]` 段读取原始候选 relay pool。Host 创建 `entrance.scp` 时对候选 relay 去重，探测当前可连接 relay，再选择最多 4 个 relay 形成房间实际 relay set，并把规范化后的 manifest 写入 entrance 保密 payload。Host 的原始 pool 文件限定在 Host 本机；Client 导入 `entrance.scp` 后从保密 payload 获得同一 room instance 的实际 relay set，并在本机生成 SQLite 副本。网络状态正常时，每个成员都尝试连接房间实际 relay set。文本、附件元数据和附件分片由房间群密钥派生的调度摘要选择 relay；关闭房间事件向房间实际 relay set 投递。
 
 - [x] 重构用户端本地目录模型。
   - 用户端本地材料统一放入 room instance 根目录：
@@ -999,14 +999,14 @@ PKI 身份认证现在强制绑定成员证书、临时 public key、GKA contrib
   - `cert.exe create-entrance` 输出 Host room root，并在其中创建 `certs/entrance.scp`。
   - `cert.exe import-entrance` 输出 Client room root，把导入后的成员材料写入 `certs/`，并把用户选择的原始 `entrance.scp` 复制为 `room-dir/certs/entrance.scp`。
   - Host 和 Client 后续重新加入同一 room instance 时都从 `room-dir/certs/entrance.scp` 读取 admission secret；该文件作为重入房准入副本，文件缺失或被移动时需要重新导入原始 `entrance.scp` 后再进入房间。
-  - `entrance.scp` 携带固定 relay manifest、manifest 摘要和签名信息，使导入成员获得同一 room instance 的 relay pool 范围。
+  - `entrance.scp` 携带固定 relay manifest、manifest 摘要和签名信息，使导入成员获得同一 room instance 的实际 relay set。
   - Host/Client 启动读取 `room-dir/certs/` 中的 `entrance.scp`、trust store、成员证书链、成员私钥和加密 room state。
   - 文档中的 `logs/certs/<room>_<digest8>`、`logs/texts/<room>_<digest8>`、`logs/files/<room>_<digest8>` 等旧路径统一替换为 room root 下的子目录。
   - Server 自身状态继续放在 `server/state/` 和 `server/logs/`，与用户端 `logs/` 分离。
 
 - [x] 定义 entrance 与共享 relay pool 的初始导入模型。
-  - CLI Host 创建房间时通过 `--pool <file>` 导入原始 relay pool 文件。
-  - WinUI Host 创建房间时从本地 config 的 `[pool]` 段读取原始 relay pool，设置面板保持房间名、用户昵称和本地 TLS 信任根等用户级选项。
+  - CLI Host 创建房间时通过 `--pool <file>` 导入原始候选 relay pool 文件。
+  - WinUI Host 创建房间时从本地 config 的 `[pool]` 段读取原始候选 relay pool，设置面板保持房间名、用户昵称和本地 TLS 信任根等用户级选项。
   - WinUI config 的 `[pool]` 段允许 Host 本地手动编辑，每个非空行表示一个 relay URL，例如：
     ```text
     [pool]
@@ -1022,26 +1022,28 @@ PKI 身份认证现在强制绑定成员证书、临时 public key、GKA contrib
     ```
   - relay URL 默认使用 `wss://host:port`；不同 relay 可以使用不同端口，并配合云安全组开放对应端口。
   - 端口异构可以增加默认端口扫描和批量误扫的成本，也便于按 relay 配置安全组；地址或 manifest 泄露、全端口扫描、流量侧观察和定向扫描仍能发现开放端口，因此端口异构属于暴露面治理，不属于核心安全边界。
-  - Host 解析原始 pool 后生成 canonical relay manifest，字段包括格式版本、manifest id、relay URL、权重、来源和签名。
-  - Host 把 canonical relay manifest 写入 `entrance.scp` 的保密 payload，并把 SQLite 副本写入 `room-dir/relay/relay-pool.sqlite3`。
+  - Host 解析原始候选 pool 后先按 URL 去重，再用 600ms 默认探测超时筛出当前可连接集合 `P`。
+  - Host 从 `P` 中选择最多 4 个 relay 作为房间实际 relay set `N`，满足 `N ⊆ P`，并生成 canonical relay manifest。
+  - canonical relay manifest 字段包括格式版本、manifest id、relay URL、权重、来源、候选数量、可连接数量、选中数量和签名。
+  - Host 把 canonical relay manifest 写入 `entrance.scp` 的保密 payload，并把 `N` 的 SQLite 副本写入 `room-dir/relay/relay-pool.sqlite3`。
   - Client 导入 `entrance.scp` 后解出 canonical relay manifest，校验格式、manifest 摘要和 room instance 绑定，再生成自己的 `room-dir/relay/relay-pool.sqlite3`。
-  - 同一 room instance 默认共享同一 relay pool；初始 pool 范围由 `entrance.scp` 框定。
-  - relay pool 在 room instance 生命周期内保持地址集合固定，记为 `N`，其大小 `n` 不变。
+  - 同一 room instance 默认共享同一实际 relay set；该集合由 `entrance.scp` 框定。
+  - 实际 relay set 在 room instance 生命周期内保持地址集合固定，记为 `N`，其大小 `n` 不变且 `n <= 4`。
   - 每次广播或发送时，成员根据本机连接状态得到当前可用子集 `M(t) ⊆ N`，其大小 `m(t) <= n`。
   - 实际发送由房间群密钥派生的调度摘要在 `M(t)` 中选择 relay；这里的“动态”只表示可用子集和调度结果随时间变化。
-  - 原始 pool 中暂时不可用的 relay 会进入 degraded/offline 状态和本机沉默期；沉默期内不重复重连或刷屏提示。如果对应服务器恢复，客户端后续发送前可以重新连接并把它恢复为 healthy，使它重新进入后续发送时的 `M(t)`。
+  - `N` 中暂时不可用的 relay 会进入 degraded/offline 状态和本机沉默期；沉默期内不重复重连或刷屏提示。如果对应服务器恢复，客户端后续发送前可以重新连接并把它恢复为 healthy，使它重新进入后续发送时的 `M(t)`。
   - relay 状态至少包括 `candidate`、`connecting`、`healthy`、`degraded`、`offline`、`banned`。
   - active Host 和 active Client 在数据通路上使用同一等级的房间成员能力；安全判断位于成员端，Server/Relay 的处理范围是 opaque envelope。
 
 - [x] 实现可运行的多 relay 基础连接和发送路径。
-  - Host/Client 启动时从 `room-dir/relay/relay-pool.sqlite3` 读取完整 relay URL 列表。
-  - Host 在完整 relay pool 上创建同一个 room instance。
+  - Host/Client 启动时从 `room-dir/relay/relay-pool.sqlite3` 读取房间实际 relay set。
+  - Host 在房间实际 relay set 上创建同一个 room instance。
   - Client 首次使用 entrance 入房时，用 admission secret、room token、username 和本次会话 X25519 public key 通过统一 relay selector 选择一个 admission relay 发送 pending join。
   - Host 在产生 pending join 的 relay 上返回 approve/reject。
   - Client 获得房间级成员证书并安装 room group key 后，自动连接剩余 relay。
   - Host 对已验证成员在其他 relay 上的重复 pending join 做静默批准，不生成新的 UI pending 卡片，也不触发新的 GKA epoch。
   - Host/Client 的文本消息和附件分片通过统一 relay selector 在当前可用 relay 中选择；附件分片因此会自然分散到多个 relay。
-  - Host 的 `close_room` 向完整 relay pool 投递同一个 Host 签名关闭事件。
+  - Host 的 `close_room` 向房间实际 relay set 投递同一个 Host 签名关闭事件。
   - 单个 relay 的 `room_members` 只用于更新该 relay 上出现的成员，不再被当作全局成员在线列表。
   - 已完成两个本地回环 WSS relay（25566/25567）的 CLI 烟测，覆盖 Host 创建房间、Client pending join、Host approve、GKA ready 和双向文本收发。
 
@@ -1070,7 +1072,7 @@ PKI 身份认证现在强制绑定成员证书、临时 public key、GKA contrib
   - 算法公开，`K_G` 保持在当前 active 成员本地；relay 和外部观察者的可见内容限于所在通路上的 ciphertext、大小和时序。
   - 成员和 relay 构成二分图。成员 `M_i` 的 relay 邻居集合记为 `N(M_i)`。
   - 直接覆盖范围由 sender 选择的 relay 子集和接收者当前可用 relay 交集决定。
-  - 可达性优化集中在客户端侧：提高完整 pool 连接率，保持同一 room instance 使用同一 pool。
+  - 可达性优化集中在客户端侧：提高实际 relay set 连接率，保持同一 room instance 使用同一 relay set。
   - 成员全部 relay 暂不可用时进入 relay unavailable 状态；房间 open/closed 生命周期保持原有语义。
 
 - [x] 实现多 relay 房间状态收敛基础模型。
@@ -1081,7 +1083,7 @@ PKI 身份认证现在强制绑定成员证书、临时 public key、GKA contrib
   - 多 relay 暂时状态不一致时，Client 以已验证的 Host 签名事件为准。
   - Host 离线只表示 Host disconnected；房间保持 open。Host 手动输入 `/stop_session` 产生签名 `close_room` 后，房间进入 closed。
   - Host/Client 的 `/exit` 只表示当前进程离开房间并关闭本地连接；它不产生 `close_room`，也不改变 room instance 的 open 状态。
-  - 多 relay 实现中，Host 产生 `close_room` 后向完整房间级 relay pool 投递关闭事件；每个健康 relay 都应收到同一个 Host 签名事件。
+  - 多 relay 实现中，Host 产生 `close_room` 后向房间实际 relay set 投递关闭事件；每个健康 relay 都应收到同一个 Host 签名事件。
   - Server/Relay 在本地状态表中按 room instance 记录 `status`、`openEventHash`、`closeEventHash`、Host fingerprint、更新时间和原始签名事件。
 
 - [x] 使用 SQLite 保存 relay pool 基础状态。
@@ -1092,7 +1094,7 @@ PKI 身份认证现在强制绑定成员证书、临时 public key、GKA contrib
   - `relay_nodes` 表保存 relay URL、来源、schema version、状态、RTT、成功/失败次数、权重、本地禁用标记和最近使用时间。
   - `relay_manifests` 表保存 manifest id、schema version、来源和原始 JSON。
   - `relay_room_states` 表保存每个 relay 见过的 room open/closed 状态副本、Host 签名事件 hash 和原始签名事件。
-  - Host/Client 启动时读取 `relay_nodes` 作为完整 relay pool。
+  - Host/Client 启动时读取 `relay_nodes` 作为房间实际 relay set。
   - 当前实现写入 manifest、relay 节点和 room state 表，并保留发送统计、调度事件、缺失请求等诊断表。
 
 - [x] 扩展 SQLite relay 诊断和重传状态表。
