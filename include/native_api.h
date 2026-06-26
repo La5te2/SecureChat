@@ -38,6 +38,10 @@ CHAT_API int CHAT_CALL chat_list_local_room_dirs(
 CHAT_API int CHAT_CALL chat_get_message_history(
     char* output_json,
     int output_json_size);
+// 返回当前会话已解密的留言板 JSON 数组；传空 buffer 时返回所需字节数。
+CHAT_API int CHAT_CALL chat_get_forum_history(
+    char* output_json,
+    int output_json_size);
 // 从 room-dir 加载 room token 和房间级 PKI 后启动 Host。
 CHAT_API int CHAT_CALL chat_host_start(
     const char* room_dir,
@@ -67,6 +71,10 @@ CHAT_API int CHAT_CALL chat_join_start_auto(
 CHAT_API int CHAT_CALL chat_send_line(const char* line);
 // 向证书指纹前缀匹配到的成员发送文本行。
 CHAT_API int CHAT_CALL chat_send_line_to(const char* target, const char* line);
+// 请求 relay 返回当前房间的留言板密文记录。
+CHAT_API int CHAT_CALL chat_forum_sync();
+// 发送一条文本留言板记录。附件仍走聊天附件路径。
+CHAT_API int CHAT_CALL chat_forum_post(const char* text);
 // 广播一个指定媒体类型的附件。
 CHAT_API int CHAT_CALL chat_send_image(const char* file_path);
 // 向证书指纹前缀匹配到的成员发送一个图片附件。

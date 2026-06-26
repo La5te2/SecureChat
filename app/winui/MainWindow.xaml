@@ -210,6 +210,31 @@
                     </Canvas>
                 </Button>
                 <Button
+                    x:Name="ForumButton"
+                    Click="Forum_Click"
+                    Background="Transparent"
+                    BorderBrush="Transparent"
+                    ToolTipService.ToolTip="Forum"
+                    Opacity="0.72"
+                    Width="34"
+                    Height="34"
+                    Padding="0">
+                    <Canvas Width="24" Height="24">
+                        <Path
+                            x:Name="ForumIconOuter"
+                            Data="M12,3 L21,12 L12,21 L3,12 Z"
+                            Stroke="#1C1C1C"
+                            StrokeThickness="2"
+                            StrokeLineJoin="Round" />
+                        <Path
+                            x:Name="ForumIconInner"
+                            Data="M12,7 L17,12 L12,17 L7,12 Z"
+                            Stroke="#1C1C1C"
+                            StrokeThickness="1.5"
+                            StrokeLineJoin="Round" />
+                    </Canvas>
+                </Button>
+                <Button
                     x:Name="SettingsButton"
                     Click="Settings_Click"
                     Background="Transparent"
@@ -363,6 +388,65 @@
                         <Slider x:Name="MetaFontSizeSlider" Header="Label font size" Minimum="9" Maximum="16" Value="11" StepFrequency="1" ValueChanged="MetaTextStyle_Changed" />
                     </StackPanel>
                 </ScrollViewer>
+            </Border>
+        </Grid>
+
+        <Grid
+            x:Name="ForumOverlay"
+            Grid.ColumnSpan="4"
+            Background="#B3000000"
+            PointerPressed="ForumOverlay_PointerPressed"
+            Visibility="Collapsed">
+            <Border
+                x:Name="ForumPanel"
+                Width="520"
+                MaxHeight="680"
+                Padding="18"
+                CornerRadius="8"
+                HorizontalAlignment="Center"
+                VerticalAlignment="Center"
+                PointerPressed="ForumPanel_PointerPressed"
+                Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                BorderThickness="1">
+                <Grid RowSpacing="12">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+                    <Grid Grid.Row="0" ColumnSpacing="8">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock x:Name="ForumTitleText" Text="Forum" FontWeight="SemiBold" />
+                        <Button x:Name="ForumSyncButton" Grid.Column="1" Content="Sync" Click="ForumSync_Click" />
+                    </Grid>
+                    <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+                        <StackPanel x:Name="ForumListPanel" Spacing="8" />
+                    </ScrollViewer>
+                    <Grid Grid.Row="2" ColumnSpacing="8">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="86" />
+                        </Grid.ColumnDefinitions>
+                        <TextBox
+                            x:Name="ForumPostBox"
+                            MinHeight="36"
+                            MaxHeight="96"
+                            AcceptsReturn="True"
+                            TextWrapping="Wrap"
+                            PlaceholderText="Forum message" />
+                        <Button
+                            x:Name="ForumSendButton"
+                            Grid.Column="1"
+                            Content="Send"
+                            Click="ForumSend_Click"
+                            HorizontalAlignment="Stretch"
+                            VerticalAlignment="Center" />
+                    </Grid>
+                </Grid>
             </Border>
         </Grid>
 

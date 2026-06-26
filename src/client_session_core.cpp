@@ -5,6 +5,7 @@
 #include "attachment_transfer.hpp"
 #include "cert_generation.hpp"
 #include "cert_utils.hpp"
+#include "forum_board.hpp"
 #include "relay_pool.hpp"
 #include "secure_relay.hpp"
 
@@ -414,7 +415,7 @@ void ClientSessionCore::connectRelay(std::size_t relayIndex) {
         chatEmit(mCallbacks.onStatus, "Relay connected: " + relayLabel(url));
         emitRelayStatus();
         json msg = {
-            {"type", "join_room"},
+            {"type", mIdentity.enabled() ? "member_rejoin" : "join_room"},
             {"roomId", mRoomToken},
             {"username", mUsername},
             {"nickname", mDisplayName},
@@ -424,6 +425,7 @@ void ClientSessionCore::connectRelay(std::size_t relayIndex) {
             chatEmit(mCallbacks.onStatus, "PKI identity ready: " + mIdentity.fingerprint());
             // 对 roomId、username 和临时 X25519 公钥签名，
             // 使 Host 在给该 Client 发送房间群密钥前能检测替换攻击。
+            msg["memberFingerprint"] = mIdentity.fingerprint();
             msg["identity"] = mIdentity.signJoinRoom(mRoomId, mUsername, mMemberKeys.publicKey);
         }
         else {
@@ -672,6 +674,7 @@ void ClientSessionCore::sendLine(const std::string& line) {
 
     if (line.empty()) return;
     if (handleAttachmentTrustCommand(line)) return;
+    if (handleForumCommand(line)) return;
     if (mClientId.empty()) {
         chatEmit(mCallbacks.onStatus, "Client identity is not ready yet");
         return;
@@ -802,6 +805,44 @@ bool ClientSessionCore::handleAttachmentTrustCommand(const std::string& line) {
     return true;
 }
 
+bool ClientSessionCore::handleForumCommand(const std::string& line) {
+    const auto trimmed = trimCopy(line);
+    if (trimmed != "/forum" &&
+        trimmed != "/forum sync" &&
+        trimmed.rfind("/forum post ", 0) != 0) {
+        return false;
+    }
+
+    if (trimmed == "/forum") {
+        std::vector<chat::forum_board::DisplayRecord> records;
+        {
+            std::lock_guard<std::mutex> lock(mForumMutex);
+            records = mForumRecords;
+        }
+        if (records.empty()) {
+            chatEmit(mCallbacks.onStatus, "Forum is empty");
+            return true;
+        }
+        for (const auto& record : records) {
+            chatEmit(mCallbacks.onStatus, "Forum: " + record.authorName + ": " + record.text);
+        }
+        return true;
+    }
+
+    if (trimmed == "/forum sync") {
+        requestForumSync();
+        return true;
+    }
+
+    const auto text = trimCopy(trimmed.substr(std::string("/forum post ").size()));
+    if (text.empty()) {
+        chatEmit(mCallbacks.onError, "Usage: /forum post <text>");
+        return true;
+    }
+    sendForumPost(text);
+    return true;
+}
+
 Message ClientSessionCore::parseInput(const std::string& line) {
     // Client 文本消息使用 Server 分配的 client id 作为协议发送者，
     // 并把人类可读显示名保存在载荷元数据中。
@@ -865,6 +906,7 @@ bool ClientSessionCore::rememberVerifiedMemberIdentity(
             mMemberUsernamesById[memberId] = identityName.empty() ? memberId : identityName;
             mMemberPublicKeysById[memberId] = publicKey;
             mMemberFingerprintsById[memberId] = verified.fingerprint;
+            mMemberIdentityObjectsById[memberId] = identity;
         }
 
         chatEmit(
@@ -954,7 +996,7 @@ void ClientSessionCore::sendGkaContribution(std::uint64_t epoch) {
             ", bytes " + std::to_string(serialized.size()));
 }
 
-bool ClientSessionCore::installGroupState(const json& groupState, std::uint64_t epoch) {
+bool ClientSessionCore::installGroupState(const json& groupState, std::uint64_t epoch, bool allowStoredSelfSessionKey) {
     if (groupState.value("version", 0) != 3 ||
         groupState.value("roomId", "") != mRoomToken ||
         groupState.value("epoch", 0ULL) != epoch ||
@@ -997,7 +1039,9 @@ bool ClientSessionCore::installGroupState(const json& groupState, std::uint64_t 
             }
             if (memberId == mClientId) {
                 sawSelf = true;
-                if (publicKey != mMemberKeys.publicKey || verified.fingerprint != mIdentity.fingerprint()) {
+                const bool sameIdentity = verified.fingerprint == mIdentity.fingerprint();
+                const bool sameSessionKey = publicKey == mMemberKeys.publicKey;
+                if (!sameIdentity || (!sameSessionKey && !allowStoredSelfSessionKey)) {
                     throw std::runtime_error("GKA state does not include this Client identity");
                 }
             }
@@ -1025,6 +1069,7 @@ bool ClientSessionCore::installGroupState(const json& groupState, std::uint64_t 
                 }
                 mMemberPublicKeysById[memberId] = publicKey;
                 mMemberFingerprintsById[memberId] = verified.fingerprint;
+                mMemberIdentityObjectsById[memberId] = *identity;
             }
         }
         catch (const std::exception& e) {
@@ -1788,6 +1833,7 @@ void ClientSessionCore::handleSignalingMessage(const SignalingFrame& frame) {
                 requestShutdown("Host approval verification failed");
                 return;
             }
+            const bool rejoin = j.value("rejoin", false);
             const auto hostPublicKey = j.value("hostPublicKey", "");
             const auto hostUsername = j.value("hostUsername", chat::protocol::HostActorId);
             const auto hostIdentity = j.find("hostIdentity");
@@ -1829,68 +1875,76 @@ void ClientSessionCore::handleSignalingMessage(const SignalingFrame& frame) {
             if (hostPublicKey.empty() || hostIdentity == j.end() || !hostIdentity->is_object()) {
                 // Client 只有认证 Host 签名的 identity/publicKey 绑定后才能参与 GKA。
                 // 此处字段缺失通常表示仍在运行旧 Server 构建。
-                chatEmit(
-                    mCallbacks.onError,
-                    "Host identity is missing from join response; check that Server, Host, and Client are the same build");
-                requestShutdown("Host identity verification failed");
-                return;
+                if (!rejoin) {
+                    chatEmit(
+                        mCallbacks.onError,
+                        "Host identity is missing from join response; check that Server, Host, and Client are the same build");
+                    requestShutdown("Host identity verification failed");
+                    return;
+                }
             }
-            const auto hostDisplayName = j.value("hostDisplayName", hostUsername);
-            if (!rememberVerifiedMemberIdentity(
-                    chat::protocol::HostActorId,
-                    hostUsername,
-                    hostDisplayName,
-                    hostPublicKey,
-                    *hostIdentity,
-                    "",
-                    "joined")) {
-                // 验证失败是终止性错误。继续保持连接只会导致 GKA 超时，
-                // 并掩盖真正的 PKI 根因。
-                chatEmit(
-                    mCallbacks.onError,
-                    "Host identity verification failed; check Client trust store, Host certificate chain, room name, and rebuild all components if one executable was updated");
-                requestShutdown("Host identity verification failed");
-                return;
+            if (hostIdentity != j.end() && hostIdentity->is_object() && !hostPublicKey.empty()) {
+                const auto hostDisplayName = j.value("hostDisplayName", hostUsername);
+                if (!rememberVerifiedMemberIdentity(
+                        chat::protocol::HostActorId,
+                        hostUsername,
+                        hostDisplayName,
+                        hostPublicKey,
+                        *hostIdentity,
+                        "",
+                        "joined")) {
+                    // 验证失败是终止性错误。继续保持连接只会导致 GKA 超时，
+                    // 并掩盖真正的 PKI 根因。
+                    chatEmit(
+                        mCallbacks.onError,
+                        "Host identity verification failed; check Client trust store, Host certificate chain, room name, and rebuild all components if one executable was updated");
+                    requestShutdown("Host identity verification failed");
+                    return;
+                }
             }
             const auto approvalRequestId = j.value("approvalRequestId", "");
             const auto approvalDigest = j.value("approvalPayloadDigest", "");
             const auto approvalEpoch = j.value("approvalEpoch", 0ULL);
             const auto approvalControl = j.find("approvalControl");
-            if (approvalRequestId.empty() || approvalDigest.empty() ||
-                approvalControl == j.end() || !approvalControl->is_object() ||
-                approvalDigest != pendingJoinDigest(approvalRequestId, mUsername, mMemberKeys.publicKey)) {
-                chatEmit(mCallbacks.onError, "Join response is missing a valid Host approval signature");
-                requestShutdown("Host approval verification failed");
-                return;
-            }
-            try {
-                const auto approvalSigner = mIdentity.verifyRoomControl(
-                    mRoomId,
-                    mRoomToken,
-                    "approve_join",
-                    approvalEpoch,
-                    approvalDigest,
-                    *approvalControl);
-                std::lock_guard<std::mutex> lock(mMembersMutex);
-                const auto hostFp = mMemberFingerprintsById.find(chat::protocol::HostActorId);
-                if (hostFp != mMemberFingerprintsById.end() && hostFp->second != approvalSigner.fingerprint) {
-                    throw std::runtime_error("approval signer is not the verified Host");
+            if (!rejoin) {
+                if (approvalRequestId.empty() || approvalDigest.empty() ||
+                    approvalControl == j.end() || !approvalControl->is_object() ||
+                    approvalDigest != pendingJoinDigest(approvalRequestId, mUsername, mMemberKeys.publicKey)) {
+                    chatEmit(mCallbacks.onError, "Join response is missing a valid Host approval signature");
+                    requestShutdown("Host approval verification failed");
+                    return;
                 }
-            }
-            catch (const std::exception& e) {
-                chatEmit(mCallbacks.onError, std::string("Host approval rejected: ") + e.what());
-                requestShutdown("Host approval verification failed");
-                return;
+                try {
+                    const auto approvalSigner = mIdentity.verifyRoomControl(
+                        mRoomId,
+                        mRoomToken,
+                        "approve_join",
+                        approvalEpoch,
+                        approvalDigest,
+                        *approvalControl);
+                    std::lock_guard<std::mutex> lock(mMembersMutex);
+                    const auto hostFp = mMemberFingerprintsById.find(chat::protocol::HostActorId);
+                    if (hostFp != mMemberFingerprintsById.end() && hostFp->second != approvalSigner.fingerprint) {
+                        throw std::runtime_error("approval signer is not the verified Host");
+                    }
+                }
+                catch (const std::exception& e) {
+                    chatEmit(mCallbacks.onError, std::string("Host approval rejected: ") + e.what());
+                    requestShutdown("Host approval verification failed");
+                    return;
+                }
             }
             const bool alreadyJoined = mJoinedRoom.exchange(true);
             if (!alreadyJoined) {
                 chatEmit(mCallbacks.onLog, "own_actor_id " + mClientId);
                 chatEmit(
                     mCallbacks.onStatus,
-                    "Joined room " + mRoomId + " as " + mUsername + " (" + mClientId + ")");
+                    std::string(rejoin ? "Rejoined room " : "Joined room ") + mRoomId +
+                        " as " + mUsername + " (" + mClientId + ")");
                 if (!chat::secure_relay::hasUsableGroupKey(mGroupKey)) {
                     chatEmit(mCallbacks.onStatus, "Waiting for room group key");
                 }
+                requestForumSync();
             }
         }
         else if (type == "join_pending") {
@@ -1985,6 +2039,33 @@ void ClientSessionCore::handleSignalingMessage(const SignalingFrame& frame) {
             }
             chatEmit(mCallbacks.onStatus, "Room members: " + members.str());
         }
+        else if (type == "stored_group_state") {
+            const auto envelope = j.find("envelope");
+            if (envelope == j.end() || !envelope->is_object()) {
+                chatEmit(mCallbacks.onError, "Stored group state is missing");
+                return;
+            }
+            try {
+                const auto plaintext = mIdentity.openSealedText("group_state", *envelope);
+                const auto groupState = chat::protocol::parseJsonObjectWithBudget(
+                    plaintext,
+                    chat::protocol::MaxSignalingMessageBytes,
+                    "stored group state");
+                const auto epoch = groupState.value("epoch", 0ULL);
+                if (epoch <= mGroupKeyEpoch) {
+                    chatEmit(mCallbacks.onStatus, "Stored group state is current or stale");
+                    return;
+                }
+                chatEmit(mCallbacks.onStatus, "Stored group state received");
+                if (!installGroupState(groupState, epoch, true)) return;
+                mGroupKeyEpoch = epoch;
+                chatEmit(mCallbacks.onStatus, "Room group key restored");
+                connectRemainingRelays();
+            }
+            catch (const std::exception& e) {
+                chatEmit(mCallbacks.onError, std::string("Stored group state rejected: ") + e.what());
+            }
+        }
         else if (type == chat::secure_relay::GroupKeyType) {
             const auto verified = mIdentity.verifyGroupKeyEnvelope(j);
             std::string hostName = "Host";
@@ -2015,7 +2096,7 @@ void ClientSessionCore::handleSignalingMessage(const SignalingFrame& frame) {
                     chat::protocol::HostActorId + " / " + verified.fingerprint);
             const auto epoch = j.value("epoch", 0ULL);
             if (epoch <= mGroupKeyEpoch) {
-                chatEmit(mCallbacks.onError, "Dropped replayed or stale room group key");
+                chatEmit(mCallbacks.onStatus, "Dropped replayed or stale room group key");
                 return;
             }
             // 安装密钥前会检查 epoch，因此重放旧 group_key 无法让 Client 回滚到旧 K_G。
@@ -2025,7 +2106,7 @@ void ClientSessionCore::handleSignalingMessage(const SignalingFrame& frame) {
                 mRoomToken,
                 mClientId,
                 mMemberKeys.privateKey);
-            if (!installGroupState(groupState, epoch)) return;
+            if (!installGroupState(groupState, epoch, false)) return;
             mGroupKeyEpoch = epoch;
             chatEmit(mCallbacks.onStatus, "Room group key ready");
             connectRemainingRelays();
@@ -2073,6 +2154,9 @@ void ClientSessionCore::handleSignalingMessage(const SignalingFrame& frame) {
                 }
             }
             handleRelayMessage(msg);
+        }
+        else if (type == chat::forum_board::RecordsType) {
+            handleForumRecords(j.value("records", json::array()));
         }
         else if (type == "moderation") {
             // Server 转发的管理通知。它不是终止性错误；
@@ -2198,4 +2282,185 @@ void ClientSessionCore::handleSignalingMessage(const SignalingFrame& frame) {
     catch (const std::exception& e) {
         chatEmit(mCallbacks.onError, std::string("Bad signaling message: ") + e.what());
     }
+}
+
+void ClientSessionCore::sendForumPost(const std::string& text) {
+    if (!mIdentity.enabled()) {
+        chatEmit(mCallbacks.onError, "Forum post requires room member certificate");
+        return;
+    }
+    if (mClientId.empty()) {
+        chatEmit(mCallbacks.onStatus, "Client identity is not ready yet");
+        return;
+    }
+
+    std::vector<chat::forum_board::Recipient> recipients;
+    recipients.push_back({
+        mClientId,
+        mDisplayName.empty() ? mUsername : mDisplayName,
+        mIdentity.fingerprint(),
+        mIdentity.signJoinRoom(mRoomId, mUsername, mMemberKeys.publicKey)
+    });
+    {
+        std::lock_guard<std::mutex> lock(mMembersMutex);
+        for (const auto& [memberId, fingerprint] : mMemberFingerprintsById) {
+            const auto identity = mMemberIdentityObjectsById.find(memberId);
+            if (identity == mMemberIdentityObjectsById.end()) continue;
+            const auto displayName = mMemberNamesById.find(memberId);
+            recipients.push_back({
+                memberId,
+                displayName == mMemberNamesById.end() ? memberId : displayName->second,
+                fingerprint,
+                identity->second
+            });
+        }
+    }
+
+    try {
+        const auto record = chat::forum_board::makeRecord(
+            mRoomId,
+            mRoomToken,
+            mGroupKeyEpoch,
+            mClientId,
+            mDisplayName.empty() ? mUsername : mDisplayName,
+            mIdentity,
+            recipients,
+            text);
+        json msg = {
+            {"type", chat::forum_board::RecordType},
+            {"roomId", mRoomToken},
+            {"boardMessageId", record.value("boardMessageId", "")},
+            {"recordHash", chat::forum_board::payloadDigest(record)},
+            {"record", record}
+        };
+
+        std::vector<std::shared_ptr<rtc::WebSocket>> relays;
+        std::vector<std::string> urls;
+        std::vector<bool> open;
+        {
+            std::lock_guard<std::mutex> lock(mRelayMutex);
+            relays = mRelays;
+            urls = mRelayUrls;
+            open = mRelayOpen;
+        }
+        const auto payload = msg.dump();
+        std::size_t sent = 0;
+        for (std::size_t i = 0; i < relays.size(); ++i) {
+            const auto& relay = relays[i];
+            const bool usable = i < open.size() && open[i] && relay && !relay->isClosed();
+            if (!usable) continue;
+            const auto ok = relay->send(payload);
+            if (i < urls.size()) {
+                try {
+                    chat::relay_pool::recordRelaySend(mRoomDir, urls[i], false, ok);
+                }
+                catch (...) {
+                }
+            }
+            if (ok) ++sent;
+        }
+        rememberForumRecord(record);
+        emitRelayStatus();
+        chatEmit(mCallbacks.onStatus, "Forum post sent to relays: " + std::to_string(sent));
+    }
+    catch (const std::exception& e) {
+        chatEmit(mCallbacks.onError, std::string("Forum post failed: ") + e.what());
+    }
+}
+
+void ClientSessionCore::requestForumSync() {
+    if (mRoomToken.empty()) return;
+    json msg = {
+        {"type", chat::forum_board::SyncType},
+        {"roomId", mRoomToken}
+    };
+    std::vector<std::shared_ptr<rtc::WebSocket>> relays;
+    std::vector<std::string> urls;
+    std::vector<bool> open;
+    {
+        std::lock_guard<std::mutex> lock(mRelayMutex);
+        relays = mRelays;
+        urls = mRelayUrls;
+        open = mRelayOpen;
+    }
+    const auto payload = msg.dump();
+    std::size_t sent = 0;
+    for (std::size_t i = 0; i < relays.size(); ++i) {
+        const auto& relay = relays[i];
+        const bool usable = i < open.size() && open[i] && relay && !relay->isClosed();
+        if (!usable) continue;
+        const auto ok = relay->send(payload);
+        if (i < urls.size()) {
+            try {
+                chat::relay_pool::recordRelaySend(mRoomDir, urls[i], false, ok);
+            }
+            catch (...) {
+            }
+        }
+        if (ok) ++sent;
+    }
+    emitRelayStatus();
+    chatEmit(mCallbacks.onStatus, "Forum sync requested on relays: " + std::to_string(sent));
+}
+
+void ClientSessionCore::handleForumRecords(const json& records) {
+    if (!records.is_array()) return;
+    std::size_t opened = 0;
+    for (const auto& record : records) {
+        const auto before = mForumRecords.size();
+        rememberForumRecord(record);
+        if (mForumRecords.size() > before) ++opened;
+    }
+    if (opened > 0) {
+        chatEmit(mCallbacks.onStatus, "Forum records synced: " + std::to_string(opened));
+    }
+}
+
+void ClientSessionCore::rememberForumRecord(const json& record) {
+    try {
+        const auto messageId = record.value("boardMessageId", "");
+        const auto digest = chat::forum_board::payloadDigest(record);
+        if (messageId.empty() || digest.empty()) return;
+        {
+            std::lock_guard<std::mutex> lock(mForumMutex);
+            const auto existing = mForumRecordHashes.find(messageId);
+            if (existing != mForumRecordHashes.end()) {
+                if (existing->second != digest) {
+                    chatEmit(mCallbacks.onError, "Rejected conflicting forum record: " + messageId);
+                }
+                return;
+            }
+        }
+
+        auto opened = chat::forum_board::openRecord(mRoomId, mRoomToken, mIdentity, record);
+        {
+            std::lock_guard<std::mutex> lock(mForumMutex);
+            mForumRecordHashes[messageId] = digest;
+            mForumRecords.push_back(std::move(opened));
+            std::sort(mForumRecords.begin(), mForumRecords.end(), [](const auto& left, const auto& right) {
+                return left.createdAtUnixMs < right.createdAtUnixMs;
+            });
+        }
+    }
+    catch (const std::exception& e) {
+        chatEmit(mCallbacks.onStatus, std::string("Forum record skipped: ") + e.what());
+    }
+}
+
+std::string ClientSessionCore::forumHistoryJson(std::size_t limit) const {
+    json out = json::array();
+    std::lock_guard<std::mutex> lock(mForumMutex);
+    const auto start = mForumRecords.size() > limit ? mForumRecords.size() - limit : 0;
+    for (std::size_t i = start; i < mForumRecords.size(); ++i) {
+        const auto& record = mForumRecords[i];
+        out.push_back({
+            {"boardMessageId", record.boardMessageId},
+            {"authorDisplayName", record.authorName},
+            {"authorFingerprint", record.authorFingerprint},
+            {"text", record.text},
+            {"createdAtUnixMs", record.createdAtUnixMs},
+            {"own", record.own}
+        });
+    }
+    return out.dump();
 }

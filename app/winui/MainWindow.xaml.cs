@@ -129,6 +129,15 @@ public sealed partial class MainWindow : Window
         public string body { get; set; } = "";
         public string messageJson { get; set; } = "";
     }
+    private sealed class ForumHistoryRecord
+    {
+        public string boardMessageId { get; set; } = "";
+        public string authorDisplayName { get; set; } = "";
+        public string authorFingerprint { get; set; } = "";
+        public string text { get; set; } = "";
+        public long createdAtUnixMs { get; set; }
+        public bool own { get; set; }
+    }
     private const int InitialWindowWidth = 1180;
     private const int InitialWindowHeight = 760;
     // These caps only protect local WinUI preview/decoder paths. The protocol
@@ -449,6 +458,41 @@ public sealed partial class MainWindow : Window
     private void Exit_Click(object sender, RoutedEventArgs e)
     {
         ExitRoom();
+    }
+
+    private void Forum_Click(object sender, RoutedEventArgs e)
+    {
+        ForumOverlay.Opacity = 1;
+        ForumOverlay.Visibility = Visibility.Visible;
+        NativeMethods.chat_forum_sync();
+        RefreshForumPanel();
+    }
+
+    private void ForumSync_Click(object sender, RoutedEventArgs e)
+    {
+        NativeMethods.chat_forum_sync();
+        RefreshForumPanel();
+    }
+
+    private void ForumSend_Click(object sender, RoutedEventArgs e)
+    {
+        var text = ForumPostBox.Text.Trim();
+        if (text.Length == 0) return;
+        if (NativeMethods.chat_forum_post(text) != 0)
+        {
+            ForumPostBox.Text = "";
+            RefreshForumPanel();
+        }
+    }
+
+    private void ForumOverlay_PointerPressed(object sender, PointerRoutedEventArgs e)
+    {
+        ForumOverlay.Visibility = Visibility.Collapsed;
+    }
+
+    private void ForumPanel_PointerPressed(object sender, PointerRoutedEventArgs e)
+    {
+        e.Handled = true;
     }
 
     private void Send_Click(object sender, RoutedEventArgs e)
@@ -790,6 +834,10 @@ public sealed partial class MainWindow : Window
         // attachment callbacks render media; encrypted chat JSON becomes bubbles.
         UpdateSessionStatus(kind, message);
         UpdateParticipants(kind, message);
+        if (kind == "status" && message.StartsWith("Forum", StringComparison.OrdinalIgnoreCase))
+        {
+            RefreshForumPanel();
+        }
 
         if (ShouldSuppressChatLine(kind, message)) return;
         if (TryRenderAttachment(kind, message)) return;
@@ -818,6 +866,9 @@ public sealed partial class MainWindow : Window
         return message.StartsWith("client wss://", StringComparison.OrdinalIgnoreCase) ||
             message.StartsWith("Clients can join with:", StringComparison.OrdinalIgnoreCase) ||
             message.StartsWith("Attachment trust:", StringComparison.OrdinalIgnoreCase) ||
+            message.StartsWith("Forum sync", StringComparison.OrdinalIgnoreCase) ||
+            message.StartsWith("Forum records", StringComparison.OrdinalIgnoreCase) ||
+            message.StartsWith("Forum post", StringComparison.OrdinalIgnoreCase) ||
             message.StartsWith("PKI identity ready:", StringComparison.OrdinalIgnoreCase) ||
             message.StartsWith("PKI member verified:", StringComparison.OrdinalIgnoreCase) ||
             message.StartsWith("GKA contribution verified:", StringComparison.OrdinalIgnoreCase) ||
@@ -1773,6 +1824,97 @@ public sealed partial class MainWindow : Window
         }
     }
 
+    private void RefreshForumPanel()
+    {
+        if (ForumListPanel is null) return;
+        var rows = LoadForumHistory();
+        ForumListPanel.Children.Clear();
+        if (rows.Count == 0)
+        {
+            ForumListPanel.Children.Add(new TextBlock
+            {
+                Text = UiText("No forum posts", "暂无留言"),
+                TextWrapping = TextWrapping.Wrap,
+                Foreground = new SolidColorBrush(metaTextColor)
+            });
+            return;
+        }
+
+        foreach (var row in rows)
+        {
+            var card = new Border
+            {
+                Padding = new Thickness(10),
+                CornerRadius = new CornerRadius(8),
+                Background = new SolidColorBrush(row.own
+                    ? Color.FromArgb(255, 224, 239, 255)
+                    : Color.FromArgb(255, 246, 246, 246))
+            };
+            var stack = new StackPanel { Spacing = 5 };
+            stack.Children.Add(new TextBlock
+            {
+                Text = string.IsNullOrWhiteSpace(row.authorDisplayName) ? UiText("Unknown", "未知") : row.authorDisplayName,
+                FontWeight = FontWeights.SemiBold,
+                TextWrapping = TextWrapping.Wrap
+            });
+            stack.Children.Add(new TextBlock
+            {
+                Text = row.text,
+                TextWrapping = TextWrapping.Wrap,
+                IsTextSelectionEnabled = true
+            });
+            stack.Children.Add(new TextBlock
+            {
+                Text = FormatForumTime(row.createdAtUnixMs),
+                FontSize = 11,
+                Foreground = new SolidColorBrush(metaTextColor)
+            });
+            card.Child = stack;
+            ForumListPanel.Children.Add(card);
+        }
+    }
+
+    private List<ForumHistoryRecord> LoadForumHistory()
+    {
+        var required = NativeMethods.chat_get_forum_history(IntPtr.Zero, 0);
+        if (required <= 0) return new List<ForumHistoryRecord>();
+
+        var buffer = Marshal.AllocHGlobal(required);
+        try
+        {
+            var written = NativeMethods.chat_get_forum_history(buffer, required);
+            if (written < 0)
+            {
+                Marshal.FreeHGlobal(buffer);
+                buffer = IntPtr.Zero;
+                required = -written;
+                buffer = Marshal.AllocHGlobal(required);
+                written = NativeMethods.chat_get_forum_history(buffer, required);
+            }
+            if (written <= 1 || written > required) return new List<ForumHistoryRecord>();
+
+            var bytes = new byte[written - 1];
+            Marshal.Copy(buffer, bytes, 0, bytes.Length);
+            var json = Encoding.UTF8.GetString(bytes);
+            return JsonSerializer.Deserialize<List<ForumHistoryRecord>>(json) ?? new List<ForumHistoryRecord>();
+        }
+        catch (Exception ex)
+        {
+            AddLine("error", UiText("Failed to load forum: ", "加载留言板失败：") + ex.Message);
+            return new List<ForumHistoryRecord>();
+        }
+        finally
+        {
+            if (buffer != IntPtr.Zero) Marshal.FreeHGlobal(buffer);
+        }
+    }
+
+    private static string FormatForumTime(long unixMs)
+    {
+        if (unixMs <= 0) return "";
+        return DateTimeOffset.FromUnixTimeMilliseconds(unixMs).LocalDateTime.ToString("yyyy-MM-dd HH:mm", CultureInfo.CurrentCulture);
+    }
+
     private string SelectedSendMode()
     {
         return SendModeBox.SelectedItem is ComboBoxItem item
@@ -1995,11 +2137,14 @@ public sealed partial class MainWindow : Window
             return;
         }
 
-        if (message.StartsWith("Joined room", StringComparison.OrdinalIgnoreCase))
+        if (message.StartsWith("Joined room", StringComparison.OrdinalIgnoreCase) ||
+            message.StartsWith("Rejoined room", StringComparison.OrdinalIgnoreCase))
         {
             SetSessionMode(SessionMode.Join);
             MarkLocalIdentityIfPossible();
             ReloadMessageHistory();
+            NativeMethods.chat_forum_sync();
+            RefreshForumPanel();
             ShowInfo(message, InfoBarSeverity.Success);
             return;
         }
@@ -2692,6 +2837,11 @@ public sealed partial class MainWindow : Window
         InputFrame.BorderBrush = new SolidColorBrush(border);
         SettingsPanel.Background = new SolidColorBrush(panel);
         SettingsPanel.BorderBrush = new SolidColorBrush(border);
+        if (ForumPanel is not null)
+        {
+            ForumPanel.Background = new SolidColorBrush(panel);
+            ForumPanel.BorderBrush = new SolidColorBrush(border);
+        }
         // XAML 初始化时 ThemeComboBox 会先触发 SelectionChanged，
         // 此时后面声明的房间实例面板可能尚未创建。
         if (RoomInstancePanel is not null)
@@ -2705,6 +2855,8 @@ public sealed partial class MainWindow : Window
             "Assets",
             isDark ? "sidebar_toggle_inverted.png" : "sidebar_toggle.png")));
         ExitIcon.Stroke = new SolidColorBrush(foreground);
+        ForumIconOuter.Stroke = new SolidColorBrush(foreground);
+        ForumIconInner.Stroke = new SolidColorBrush(foreground);
         SettingsIcon.Foreground = new SolidColorBrush(foreground);
         UpdateBubbleStyleState();
         UpdateMessageTextStyleState();
@@ -2953,6 +3105,11 @@ public sealed partial class MainWindow : Window
             JoinExistingButton.Content = UiText("Join Room", "加入房间");
             JoinImportButton.Content = UiText("Import Room", "导入房间");
             ToolTipService.SetToolTip(ExitButton, UiText("Exit room", "离开房间"));
+            ToolTipService.SetToolTip(ForumButton, UiText("Forum", "留言板"));
+            ForumTitleText.Text = UiText("Forum", "留言板");
+            ForumSyncButton.Content = UiText("Sync", "同步");
+            ForumPostBox.PlaceholderText = UiText("Forum message", "输入留言");
+            ForumSendButton.Content = UiText("Send", "发送");
             RoomStatusHeaderText.Text = UiText("Room Status", "房间状态");
             RelayStatusHeaderText.Text = UiText("Relay status", "中继器状态");
             RoomParticipantsHeaderText.Text = UiText("Participants", "参与者");

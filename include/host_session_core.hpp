@@ -5,6 +5,7 @@
 #include "attachment_transfer.hpp"
 #include "common.hpp"
 #include "events.hpp"
+#include "forum_board.hpp"
 #include "local_message_store.hpp"
 #include "pki_application.hpp"
 #include "secure_relay.hpp"
@@ -71,15 +72,25 @@ public:
     bool sendVoiceTo(const std::string& target, const std::string& filePath);
     // 返回当前 room instance 的本机文本历史 JSON。WinUI 重进房间时用它重放气泡。
     std::string messageHistoryJson(std::size_t limit = 500) const;
+    // 返回当前会话已解密的留言板文本 JSON，供 WinUI 渲染。
+    std::string forumHistoryJson(std::size_t limit = 500) const;
 private:
     // 处理普通输入框中输入的 Host 专用房间管理命令。
     bool handleHostCommand(const std::string& line);
+    bool handleForumCommand(const std::string& line);
     // 处理本机附件预览信任命令。该状态只影响当前 UI/CLI，不进入网络协议。
     bool handleAttachmentTrustCommand(const std::string& line);
     // 批准一个已验证的 pending join，使对应 relay 将其提升为 active Client。
     void approvePendingJoin(const std::string& token);
     // 拒绝一个 pending join，并把签名原因返回给申请者。
     void rejectPendingJoin(const std::string& token, const std::string& reason);
+    json makeMembershipEvent(
+        const std::string& eventType,
+        const std::string& clientId,
+        const std::string& username,
+        const std::string& displayName,
+        const std::string& fingerprint,
+        const json& identity);
     struct SignalingFrame {
         std::string payload;
         std::string relayUrl;
@@ -160,6 +171,13 @@ private:
         const std::string& clientPublicKey,
         const json& groupState,
         std::uint64_t epoch);
+    void storeGroupStateForClient(
+        const std::string& clientId,
+        const std::string& fingerprint,
+        const json& identity,
+        const json& groupState,
+        std::uint64_t epoch);
+    bool resendCurrentGroupStateToClient(const std::string& clientId);
     // 成员关系变化后启动新的贡献式 GKA epoch。
     void rotateGroupKey(const std::string& reason);
     // 请求 Client 为当前待处理 epoch 提交 contribution。
@@ -182,6 +200,10 @@ private:
     bool sendAttachmentRelay(const std::string& filePath, chat::attachment::Kind kind, const std::string& metaType, const std::string& binaryType, const std::string& mime, const std::string& targetId);
     // 处理一条已解密的 encrypted_relay 应用消息。
     void handleRelayMessage(const Message& msg);
+    void sendForumPost(const std::string& text);
+    void requestForumSync();
+    void handleForumRecords(const json& records);
+    void rememberForumRecord(const json& record);
     // 将一个加密附件分片重组成本地缓存文件。
     void handleRelayBinaryChunk(const std::string& senderKey, const Message& msg);
     // 将已显示的文本消息写入本机历史；失败只报告状态，不影响收发。
@@ -199,7 +221,7 @@ private:
     // 将精确 requestId 解析为 pending join requestId。
     std::string resolvePendingJoinId(const std::string& token);
     // 请求 Server 移除未通过 Host 侧身份检查的 Client。
-    void rejectClient(const std::string& clientId, const std::string& reason);
+    void rejectClient(const std::string& clientId, const std::string& reason, const json& membershipEvent = json::object());
     // 通过加密中继广播 Host 已验证的成员证书指纹。
     void announceVerifiedMember(
         const std::string& memberId,
@@ -235,6 +257,7 @@ private:
     std::unordered_map<std::string, std::string> mClientIdentityFingerprints;
     std::unordered_map<std::string, std::string> mClientIdentitySubjects;
     std::unordered_map<std::string, json> mClientIdentityObjects;
+    std::unordered_map<std::string, json> mClientSealIdentityObjects;
     // 记录每个 Client 当前出现在哪些 relay 上。
     // 同一个成员可能在不同 relay 上有相同 clientId，消息随机选 relay 时需要这些绑定。
     std::unordered_map<std::string, std::unordered_set<std::string>> mClientRelayUrls;
@@ -268,6 +291,7 @@ private:
     chat::secure_relay::MemberKeyPair mMemberKeys;
     chat::pki_application::IdentityContext mIdentity;
     std::vector<unsigned char> mGroupKey;
+    json mCurrentGroupState = json::object();
     // 待处理 GKA 状态会被 WebSocket 回调和 watchdog 线程共同访问。
     // 该 mutex 保证 epoch 变更、contribution 存储和超时决策一致。
     std::mutex mGkaMutex;
@@ -282,4 +306,7 @@ private:
     // 核心附件接收状态，以加密中继发送者 actor id 为键。
     chat::attachment::ReceiveStore mPendingTransfers;
     std::unique_ptr<chat::local_message::Store> mMessageHistory;
+    mutable std::mutex mForumMutex;
+    std::vector<chat::forum_board::DisplayRecord> mForumRecords;
+    std::unordered_map<std::string, std::string> mForumRecordHashes;
 };

@@ -37,6 +37,9 @@ internal static class NativeMethods
     internal static extern int chat_get_message_history(IntPtr outputJson, int outputJsonSize);
 
     [DllImport("native.dll", CallingConvention = CallingConvention.StdCall)]
+    internal static extern int chat_get_forum_history(IntPtr outputJson, int outputJsonSize);
+
+    [DllImport("native.dll", CallingConvention = CallingConvention.StdCall)]
     internal static extern int chat_host_start(
         [MarshalAs(UnmanagedType.LPUTF8Str)] string roomDir,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string username,
@@ -74,6 +77,12 @@ internal static class NativeMethods
     internal static extern int chat_send_line_to(
         [MarshalAs(UnmanagedType.LPUTF8Str)] string target,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string line);
+
+    [DllImport("native.dll", CallingConvention = CallingConvention.StdCall)]
+    internal static extern int chat_forum_sync();
+
+    [DllImport("native.dll", CallingConvention = CallingConvention.StdCall)]
+    internal static extern int chat_forum_post([MarshalAs(UnmanagedType.LPUTF8Str)] string text);
 
     [DllImport("native.dll", CallingConvention = CallingConvention.StdCall)]
     internal static extern int chat_send_image([MarshalAs(UnmanagedType.LPUTF8Str)] string filePath);

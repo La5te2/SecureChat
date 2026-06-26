@@ -1149,41 +1149,42 @@ PKI 身份认证现在强制绑定成员证书、临时 public key、GKA contrib
   - `relay_missing_requests` 记录每次缺失请求、缺失 bitmap 和重传次数。
 
 - [x] 增加 relay 状态可视化。
-  - WinUI 在 Room 区域下方显示 `Relay status / 中继器状态`，展示当前 relay pool 健康摘要，例如可用 relay 数、当前发送 relay 和最近失败情况。
-
+  
+- WinUI 在 Room 区域下方显示 `Relay status / 中继器状态`，展示当前 relay pool 健康摘要，例如可用 relay 数、当前发送 relay 和最近失败情况。
+  
 - [x] 增加 relay 状态和可靠投递测试。
   - 已完成 Windows `build_win.bat` 构建验证。
   - 已完成两个本地回环 WSS relay（25566/25567）的 CLI 烟测，覆盖 Host 创建房间、Client pending join、Host approve、GKA ready、双向文本收发和 relay 状态输出。
   - 已通过烟测修复两个多 relay 边界问题：selector 只选择本机已打开 relay；Host 只向已确认 `room_created` 的 relay 发送房间控制帧和应用中继。
   - 可靠投递代码路径覆盖 messageId/payloadHash 判重、notice/missing 加密控制消息、重传 attempt 更新、payloadHash 异常拒绝和附件 missing bitmap 批量重传路径。
-  - 增加安全测试：攻击者监控一个 relay 时，可见内容限于该 relay 子集上的 ciphertext、chunk 和 notice；监控所有 relay 时，可见内容限于应用层密文和元数据。
+  - relay 会根据URL和实际 relay 数量/relayinstanceId 去重。
 
 ## 阶段 18：旧成员任意重连与房间留言板
 
 目标：在最小修改原则下完成两件事。第一，已被批准入房且未被驱逐的成员可以在任何时候断线重连，包括 Host 不在线或房间内没有其他在线成员时。第二，增加只支持文本的房间留言板，使离线成员重新上线后可以读取留言板内容。
 
-- [ ] 明确成员资格和连接状态的边界。
+- [x] 明确成员资格和连接状态的边界。
   - 成员资格由房间级成员证书和 Host 签名的成员资格事件决定。
   - 在线连接只是成员当前是否连接 relay，不改变成员资格。
   - Host 断线、Client 断线、旧成员重连都不产生新 epoch。
   - 新 epoch 只发生在 Host 在线创建房间、approve 新成员或 evict 成员时。
   - 新成员继续走 pending join，等待 Host 手动 approve。
 
-- [ ] 持久化 Host 签名的成员资格事件。
+- [x] 持久化 Host 签名的成员资格事件。
   - Host approve 新成员时生成 signed approve event。
   - Host `/evict` 成员时生成 signed eviction event。
   - approve/evict event 绑定 room instance token、成员证书指纹、事件类型、事件序号、时间、nonce 和 Host 签名。
   - relay pool 保存这些签名事件，使离线成员重连后可以同步到 missed approve/evict。
   - Server/Relay 只保存和转发签名事件，不决定成员资格是否有效。
 
-- [ ] 实现旧成员重连路径。
+- [x] 实现旧成员重连路径。
   - 增加 `member_rejoin`，用于已经持有房间级成员证书的旧成员。
   - `member_rejoin` 携带成员证书链、成员签名、会话 public key、nonce 和本地已知成员资格事件摘要。
   - Host 在线时，Host 验证该成员仍被批准且未被驱逐后恢复其连接。
   - Host 不在线但存在其他在线成员时，其他在线成员验证该成员仍被批准且未被驱逐后接受其连接状态。
   - Host 不在线且该成员是唯一在线成员时，该成员可以恢复连接状态；此时没有实时聊天对象，不推进 GKA。
 
-- [ ] 保持当前贡献式 GKA 框架。
+- [x] 保持当前贡献式 GKA 框架。
   - 阶段 18 不重写 GKA，不引入 member-initiated epoch。
   - 旧成员重连只恢复连接状态，不改变成员集合，不产生新 epoch。
   - Host 每次推进新 epoch 时，为所有仍具备成员资格且未被驱逐的成员生成当前 group state envelope。
@@ -1192,34 +1193,34 @@ PKI 身份认证现在强制绑定成员证书、临时 public key、GKA contrib
   - 如果 relay pool 中缺少该成员的最新 envelope，且房间内存在其他 active 成员，active 成员可以补发当前已有 epoch 的 group state envelope。
   - group state envelope 只能发给已经批准且未被驱逐的旧成员，不能授予新成员资格，也不能绕过 Host approve。
 
-- [ ] 实现留言板文本记录格式。
+- [x] 实现留言板文本记录格式。
   - 留言板只支持文本，不支持附件、图片、语音和文件。
   - 每条留言包含 boardMessageId、作者成员证书指纹、创建时间、密文正文、签名和 record hash。
   - 留言正文使用独立随机 post key 加密。
   - post key 按当前已批准且未被驱逐的成员证书公钥分别封装，保证离线成员重新上线后可以解密其有资格读取的留言。
   - relay 只保存密文记录、key envelopes、hash、大小和时间。
 
-- [ ] 实现留言板在 relay pool 上的存储和同步。
+- [x] 实现留言板在 relay pool 上的存储和同步。
   - 发送留言时，把同一条加密 BoardRecord 写入房间实际 relay set 中的多个 relay。
   - 读取留言板时，从 relay pool 拉取 BoardRecord 列表，按 boardMessageId 和 record hash 去重。
   - 同一 boardMessageId 出现不同 record hash 时拒绝自动合并，并上报状态异常。
   - 离线成员重新上线后自动拉取缺失 BoardRecord，组合成本地留言板视图。
   - 留言板设置单条文本大小、单房间记录数和 relay 缓存上限。
 
-- [ ] 增加 WinUI 留言板界面。
+- [x] 增加 WinUI 留言板界面。
   - 右侧边栏增加菱形图标按钮，点击打开留言板面板。
   - 留言列表区域可以滚动。
   - 留言发送栏固定在面板底部，不随列表滚动。
   - 留言板面板中不提供附件、图片、语音和文件发送入口。
   - 重新上线时自动刷新留言板并显示同步状态。
 
-- [ ] 增加 CLI 留言板命令。
+- [x] 增加 CLI 留言板命令。
   - `/forum` 输出当前本地已同步的留言板内容。
   - `/forum sync` 主动从 relay pool 拉取缺失留言。
   - `/forum post <text>` 发布文本留言。
   - `/forum` 系列命令不接受附件路径。
 
-- [ ] 测试阶段 18 目标。
+- [x] 测试阶段 18 目标。
   - 测试 Host 离线时，已批准且未被驱逐的旧成员可以重连。
   - 测试 Host 离线且无其他在线成员时，旧成员可以恢复连接状态。
   - 测试新成员在 Host 离线时仍保持 pending。

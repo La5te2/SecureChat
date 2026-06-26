@@ -5,6 +5,7 @@
 #include "attachment_transfer.hpp"
 #include "common.hpp"
 #include "events.hpp"
+#include "forum_board.hpp"
 #include "local_message_store.hpp"
 #include "pki_application.hpp"
 #include "secure_relay.hpp"
@@ -71,6 +72,8 @@ public:
     bool sendVoiceTo(const std::string& target, const std::string& filePath);
     // 返回当前 room instance 的本机文本历史 JSON。WinUI 重进房间时用它重放气泡。
     std::string messageHistoryJson(std::size_t limit = 500) const;
+    // 返回当前会话已解密的留言板文本 JSON，供 WinUI 渲染。
+    std::string forumHistoryJson(std::size_t limit = 500) const;
 
 private:
     // 排队一次本地关闭，并携带用户可见原因。
@@ -152,7 +155,7 @@ private:
     // 发送本 Client 针对一个 GKA epoch 的签名随机 contribution。
     void sendGkaContribution(std::uint64_t epoch);
     // 验证已解密的 GKA 状态，并安装派生出的房间群密钥。
-    bool installGroupState(const json& groupState, std::uint64_t epoch);
+    bool installGroupState(const json& groupState, std::uint64_t epoch, bool allowStoredSelfSessionKey);
     // 以加密元数据加后续加密分片的形式发送一个本地附件。
     bool sendAttachmentRelay(const std::string& filePath, chat::attachment::Kind kind, const std::string& metaType, const std::string& binaryType, const std::string& mime, const std::string& targetId);
     // 处理一条已解密的 encrypted_relay 应用消息。
@@ -163,8 +166,13 @@ private:
     void rememberTextHistory(const Message& msg, bool isOwn);
     // 处理本机附件预览信任命令。该状态只影响当前 UI/CLI，不进入网络协议。
     bool handleAttachmentTrustCommand(const std::string& line);
+    bool handleForumCommand(const std::string& line);
     // 将原始控制台/UI 输入转换为协议消息。
     Message parseInput(const std::string& line);
+    void sendForumPost(const std::string& text);
+    void requestForumSync();
+    void handleForumRecords(const json& records);
+    void rememberForumRecord(const json& record);
     // 根据至少 8 位证书指纹前缀解析成员 id。
     std::string resolveMemberId(const std::string& token);
 
@@ -186,6 +194,7 @@ private:
     std::unordered_map<std::string, std::string> mMemberUsernamesById;
     std::unordered_map<std::string, std::string> mMemberPublicKeysById;
     std::unordered_map<std::string, std::string> mMemberFingerprintsById;
+    std::unordered_map<std::string, json> mMemberIdentityObjectsById;
     std::unordered_set<std::string> mRecentRelayIds;
     std::deque<std::string> mRecentRelayOrder;
     std::mutex mReliableMutex;
@@ -225,4 +234,7 @@ private:
     // 核心附件接收状态，以发送者 actor id 为键。
     chat::attachment::ReceiveStore mPendingTransfers;
     std::unique_ptr<chat::local_message::Store> mMessageHistory;
+    mutable std::mutex mForumMutex;
+    std::vector<chat::forum_board::DisplayRecord> mForumRecords;
+    std::unordered_map<std::string, std::string> mForumRecordHashes;
 };

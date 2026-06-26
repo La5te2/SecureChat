@@ -48,6 +48,10 @@ private:
         // Host 离线期间收到的新成员申请。Server 只保存和转发原始 JSON，
         // 不解释 CSR 或成员证书语义。
         std::unordered_map<std::string, json> pendingJoins;
+        // Host 签名成员事件在 Server 侧的投影。Server 用它恢复连接路由，
+        // Host/Client 仍需验证事件签名和证书链。
+        std::unordered_map<std::string, json> approvedMembersByFingerprint;
+        std::unordered_set<std::string> evictedFingerprints;
         // Host 请求的房间内发送限制。被禁言 Client 仍保持连接并可接收重密钥流量，
         // 但 Server 会拒绝它们发送中继消息。
         std::unordered_set<std::string> silencedClients;
@@ -107,6 +111,14 @@ private:
     void relayGkaContribution(rtc::WebSocket* key, const json& data);
     // 将 Host 的加密 group-key envelope 精确转发给一个 Client。
     void relayGroupKey(rtc::WebSocket* key, const json& data);
+    // 保存 Host 签名的成员资格事件，使同一房间的各 relay 具备一致的准入状态。
+    void handleMembershipEvent(rtc::WebSocket* key, const json& data);
+    // 保存 Host 为成员证书封装的最新 group state opaque envelope。
+    void handleGroupStateStore(rtc::WebSocket* key, const json& data);
+    // 保存并广播一条密文留言板记录。
+    void handleForumRecord(rtc::WebSocket* key, const json& data);
+    // 把 relay 上保存的留言板记录发给请求成员。
+    void handleForumSync(rtc::WebSocket* key, const json& data);
     // 将已认证聊天密文中继给房间或某个目标成员。
     void relayEncrypted(rtc::WebSocket* key, const json& data);
     // 从成员和房间索引中移除已断连 socket。
@@ -133,6 +145,8 @@ private:
     void safeSend(const std::shared_ptr<rtc::WebSocket>& ws, const json& data);
     // Host 上线或重连后，把积压的 pending join 转交给 Host。
     void flushPendingJoinsToHost(const std::string& roomId);
+    void loadMembershipEventsLocked(const std::string& roomId, Room& room);
+    void applyMembershipEventLocked(Room& room, const json& event);
 
     std::unique_ptr<rtc::WebSocketServer> mServer;
     std::string mUrlScheme = "wss";

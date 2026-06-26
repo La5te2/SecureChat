@@ -11,6 +11,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -131,6 +132,31 @@ void ServerStateStore::migrate() {
         "created_at INTEGER NOT NULL DEFAULT (unixepoch()),"
         "PRIMARY KEY(room_id, request_id)"
         ");");
+    execSql(db,
+        "CREATE TABLE IF NOT EXISTS membership_events ("
+        "room_id TEXT NOT NULL,"
+        "event_id TEXT NOT NULL,"
+        "payload TEXT NOT NULL,"
+        "created_at INTEGER NOT NULL DEFAULT (unixepoch()),"
+        "PRIMARY KEY(room_id, event_id)"
+        ");");
+    execSql(db,
+        "CREATE TABLE IF NOT EXISTS group_state_envelopes ("
+        "room_id TEXT NOT NULL,"
+        "member_fingerprint TEXT NOT NULL,"
+        "payload TEXT NOT NULL,"
+        "updated_at INTEGER NOT NULL DEFAULT (unixepoch()),"
+        "PRIMARY KEY(room_id, member_fingerprint)"
+        ");");
+    execSql(db,
+        "CREATE TABLE IF NOT EXISTS forum_records ("
+        "room_id TEXT NOT NULL,"
+        "board_message_id TEXT NOT NULL,"
+        "record_hash TEXT NOT NULL,"
+        "payload TEXT NOT NULL,"
+        "created_at INTEGER NOT NULL DEFAULT (unixepoch()),"
+        "PRIMARY KEY(room_id, board_message_id, record_hash)"
+        ");");
 }
 
 std::vector<std::string> ServerStateStore::loadOpenRooms() {
@@ -153,6 +179,43 @@ std::vector<ServerStateStore::PendingJoin> ServerStateStore::loadPendingJoins(co
         if (id && payload) pending.push_back({id, nlohmann::json::parse(payload)});
     }
     return pending;
+}
+
+std::vector<ServerStateStore::MembershipEvent> ServerStateStore::loadMembershipEvents(const std::string& roomId) {
+    Statement stmt(dbPtr(mDb), "SELECT event_id, payload FROM membership_events WHERE room_id=? ORDER BY created_at, event_id;");
+    bindText(stmt.get(), 1, roomId);
+    std::vector<MembershipEvent> events;
+    while (sqlite3_step(stmt.get()) == SQLITE_ROW) {
+        const auto* id = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 0));
+        const auto* payload = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 1));
+        if (id && payload) events.push_back({id, nlohmann::json::parse(payload)});
+    }
+    return events;
+}
+
+std::vector<ServerStateStore::ForumRecord> ServerStateStore::loadForumRecords(const std::string& roomId, std::size_t limit) {
+    Statement stmt(dbPtr(mDb),
+        "SELECT board_message_id, record_hash, payload "
+        "FROM forum_records WHERE room_id=? ORDER BY created_at, board_message_id LIMIT ?;");
+    bindText(stmt.get(), 1, roomId);
+    sqlite3_bind_int64(stmt.get(), 2, static_cast<sqlite3_int64>(limit));
+    std::vector<ForumRecord> records;
+    while (sqlite3_step(stmt.get()) == SQLITE_ROW) {
+        const auto* id = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 0));
+        const auto* hash = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 1));
+        const auto* payload = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 2));
+        if (id && hash && payload) records.push_back({id, hash, nlohmann::json::parse(payload)});
+    }
+    return records;
+}
+
+nlohmann::json ServerStateStore::loadGroupStateEnvelope(const std::string& roomId, const std::string& memberFingerprint) {
+    Statement stmt(dbPtr(mDb), "SELECT payload FROM group_state_envelopes WHERE room_id=? AND member_fingerprint=?;");
+    bindText(stmt.get(), 1, roomId);
+    bindText(stmt.get(), 2, memberFingerprint);
+    if (sqlite3_step(stmt.get()) != SQLITE_ROW) return nlohmann::json::object();
+    const auto* payload = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 0));
+    return payload ? nlohmann::json::parse(payload) : nlohmann::json::object();
 }
 
 std::string ServerStateStore::roomState(const std::string& roomId) {
@@ -209,5 +272,53 @@ void ServerStateStore::clearPendingJoins(const std::string& roomId) {
     bindText(stmt.get(), 1, roomId);
     if (sqlite3_step(stmt.get()) != SQLITE_DONE) {
         throw std::runtime_error("failed to clear pending joins");
+    }
+}
+
+void ServerStateStore::addMembershipEvent(
+    const std::string& roomId,
+    const std::string& eventId,
+    const nlohmann::json& payload) {
+    Statement stmt(dbPtr(mDb),
+        "INSERT OR IGNORE INTO membership_events(room_id, event_id, payload, created_at) "
+        "VALUES(?, ?, ?, unixepoch());");
+    bindText(stmt.get(), 1, roomId);
+    bindText(stmt.get(), 2, eventId);
+    bindText(stmt.get(), 3, payload.dump());
+    if (sqlite3_step(stmt.get()) != SQLITE_DONE) {
+        throw std::runtime_error("failed to add membership event");
+    }
+}
+
+void ServerStateStore::upsertGroupStateEnvelope(
+    const std::string& roomId,
+    const std::string& memberFingerprint,
+    const nlohmann::json& payload) {
+    Statement stmt(dbPtr(mDb),
+        "INSERT INTO group_state_envelopes(room_id, member_fingerprint, payload, updated_at) "
+        "VALUES(?, ?, ?, unixepoch()) "
+        "ON CONFLICT(room_id, member_fingerprint) DO UPDATE SET payload=excluded.payload, updated_at=unixepoch();");
+    bindText(stmt.get(), 1, roomId);
+    bindText(stmt.get(), 2, memberFingerprint);
+    bindText(stmt.get(), 3, payload.dump());
+    if (sqlite3_step(stmt.get()) != SQLITE_DONE) {
+        throw std::runtime_error("failed to store group state envelope");
+    }
+}
+
+void ServerStateStore::addForumRecord(
+    const std::string& roomId,
+    const std::string& boardMessageId,
+    const std::string& recordHash,
+    const nlohmann::json& payload) {
+    Statement stmt(dbPtr(mDb),
+        "INSERT OR IGNORE INTO forum_records(room_id, board_message_id, record_hash, payload, created_at) "
+        "VALUES(?, ?, ?, ?, unixepoch());");
+    bindText(stmt.get(), 1, roomId);
+    bindText(stmt.get(), 2, boardMessageId);
+    bindText(stmt.get(), 3, recordHash);
+    bindText(stmt.get(), 4, payload.dump());
+    if (sqlite3_step(stmt.get()) != SQLITE_DONE) {
+        throw std::runtime_error("failed to add forum record");
     }
 }

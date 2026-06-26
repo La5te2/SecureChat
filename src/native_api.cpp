@@ -388,6 +388,33 @@ int CHAT_CALL chat_get_message_history(char* output_json, int output_json_size) 
     }
 }
 
+int CHAT_CALL chat_get_forum_history(char* output_json, int output_json_size) {
+    installNativeCrashHandlersOnce();
+    try {
+        std::shared_ptr<HostSessionCore> hostSession;
+        std::shared_ptr<ClientSessionCore> plSession;
+        {
+            std::lock_guard<std::recursive_mutex> lock(gMutex);
+            hostSession = gHostSession;
+            plSession = gPlSession;
+        }
+
+        const auto text = hostSession
+            ? hostSession->forumHistoryJson()
+            : (plSession ? plSession->forumHistoryJson() : std::string("[]"));
+        const auto required = static_cast<int>(text.size() + 1);
+        if (!output_json || output_json_size <= 0) return required;
+        if (output_json_size < required) return -required;
+        std::memcpy(output_json, text.c_str(), static_cast<std::size_t>(required));
+        return required;
+    }
+    catch (const std::exception& e) {
+        emitEvent("error", e.what());
+        if (output_json && output_json_size > 0) output_json[0] = '\0';
+        return 0;
+    }
+}
+
 // 从 room-dir 读取 room token 和房间级 Host PKI，然后创建 Host 会话。
 int CHAT_CALL chat_host_start(
     const char* room_dir,
@@ -660,6 +687,15 @@ int CHAT_CALL chat_send_line_to(const char* target, const char* line) {
         emitEvent("error", e.what());
         return 0;
     }
+}
+
+int CHAT_CALL chat_forum_sync() {
+    return chat_send_line("/forum sync");
+}
+
+int CHAT_CALL chat_forum_post(const char* text) {
+    const auto body = safeString(text);
+    return chat_send_line(("/forum post " + body).c_str());
 }
 
 // 通过活动 Host/Client 会话发送一个图片文件。

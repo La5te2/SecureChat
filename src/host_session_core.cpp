@@ -5,6 +5,7 @@
 #include "attachment_transfer.hpp"
 #include "cert_generation.hpp"
 #include "cert_utils.hpp"
+#include "forum_board.hpp"
 #include "relay_pool.hpp"
 #include "secure_relay.hpp"
 
@@ -30,6 +31,12 @@ constexpr std::size_t ReliableCacheLimit = 4096;
 constexpr int ReliableRetryLimit = 3;
 constexpr int RelayRetryBaseSeconds = 5;
 constexpr int RelayRetryMaxSeconds = 60;
+
+std::uint64_t unixMillis() {
+    const auto now = std::chrono::system_clock::now().time_since_epoch();
+    return static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(now).count());
+}
 
 bool startsWithIgnoreCase(const std::string& value, const std::string& prefix) {
     if (value.size() < prefix.size()) return false;
@@ -722,6 +729,7 @@ void HostSessionCore::stopSignalingWorker() {
 // 解析一行 Host 输入，并发送聊天、命令或附件。
 void HostSessionCore::sendLine(const std::string& line) {
     if (handleAttachmentTrustCommand(line)) return;
+    if (handleForumCommand(line)) return;
     if (handleHostCommand(line)) return;
 
     std::string directTarget;
@@ -919,6 +927,80 @@ bool HostSessionCore::handleAttachmentTrustCommand(const std::string& line) {
     return true;
 }
 
+bool HostSessionCore::handleForumCommand(const std::string& line) {
+    const auto trimmed = trimCopy(line);
+    if (trimmed != "/forum" &&
+        trimmed != "/forum sync" &&
+        trimmed.rfind("/forum post ", 0) != 0) {
+        return false;
+    }
+
+    if (trimmed == "/forum") {
+        std::vector<chat::forum_board::DisplayRecord> records;
+        {
+            std::lock_guard<std::mutex> lock(mForumMutex);
+            records = mForumRecords;
+        }
+        if (records.empty()) {
+            chatEmit(mCallbacks.onStatus, "Forum is empty");
+            return true;
+        }
+        for (const auto& record : records) {
+            chatEmit(mCallbacks.onStatus, "Forum: " + record.authorName + ": " + record.text);
+        }
+        return true;
+    }
+
+    if (trimmed == "/forum sync") {
+        requestForumSync();
+        return true;
+    }
+
+    const auto text = trimCopy(trimmed.substr(std::string("/forum post ").size()));
+    if (text.empty()) {
+        chatEmit(mCallbacks.onError, "Usage: /forum post <text>");
+        return true;
+    }
+    sendForumPost(text);
+    return true;
+}
+
+json HostSessionCore::makeMembershipEvent(
+    const std::string& eventType,
+    const std::string& clientId,
+    const std::string& username,
+    const std::string& displayName,
+    const std::string& fingerprint,
+    const json& identity) {
+    if (eventType.empty()) throw std::runtime_error("membership event type is missing");
+    if (fingerprint.empty()) throw std::runtime_error("membership event fingerprint is missing");
+    const auto eventSeed = chat::cert_utils::randomBytes(32);
+    json event = {
+        {"version", 1},
+        {"eventId", chat::cert_utils::sha256Hex(eventSeed.data(), eventSeed.size())},
+        {"eventType", eventType},
+        {"roomId", mRoomToken},
+        {"epoch", mGroupKeyEpoch},
+        {"clientId", clientId},
+        {"username", username},
+        {"displayName", displayName.empty() ? username : displayName},
+        {"memberFingerprint", fingerprint},
+        {"createdAtUnixMs", unixMillis()}
+    };
+    if (identity.is_object() && !identity.empty()) {
+        event["identity"] = identity;
+    }
+    const auto digest = chat::cert_utils::sha256Hex(event.dump());
+    event["payloadDigest"] = digest;
+    event["control"] = mIdentity.signRoomControl(
+        mRoomId,
+        mRoomToken,
+        "membership_" + eventType,
+        mGroupKeyEpoch,
+        digest);
+    return event;
+}
+
 void HostSessionCore::approvePendingJoin(const std::string& token) {
     if (!hasOpenRelay()) {
         chatEmit(mCallbacks.onStatus, "Signaling channel is not open yet");
@@ -943,6 +1025,7 @@ void HostSessionCore::approvePendingJoin(const std::string& token) {
     }
 
     const auto username = pending.value("username", requestId);
+    const auto displayName = pending.value("displayName", username);
     const auto publicKey = pending.value("publicKey", "");
     const auto relayUrl = pending.value("relayUrl", "");
     if (!pending.contains("fingerprint") || publicKey.empty()) {
@@ -966,6 +1049,9 @@ void HostSessionCore::approvePendingJoin(const std::string& token) {
             return;
         }
     }
+    const auto approvedFingerprint = signResponse.is_object()
+        ? signResponse.value("memberFingerprint", pending.value("fingerprint", ""))
+        : pending.value("fingerprint", "");
     const auto payloadDigest = pendingJoinDigest(requestId, username, publicKey);
     json msg = {
         {"type", "approve_join"},
@@ -986,6 +1072,24 @@ void HostSessionCore::approvePendingJoin(const std::string& token) {
             "sign_response",
             {{"signResponse", signResponse}});
     }
+    try {
+        msg["membershipEvent"] = makeMembershipEvent(
+            "approve",
+            "",
+            username,
+            displayName,
+            approvedFingerprint,
+            pending.value("identity", json::object()));
+    }
+    catch (const std::exception& e) {
+        chatEmit(mCallbacks.onError, std::string("Membership event signing failed: ") + e.what());
+        return;
+    }
+    sendToAllRelays({
+        {"type", "membership_event"},
+        {"roomId", mRoomToken},
+        {"event", msg["membershipEvent"]}
+    });
     sendToRelayUrl(relayUrl, msg);
     chatEmit(mCallbacks.onStatus, "Pending join approved: " + username + " / " + requestId);
 }
@@ -1489,6 +1593,52 @@ bool HostSessionCore::sendGroupStateToClient(
     return true;
 }
 
+void HostSessionCore::storeGroupStateForClient(
+    const std::string& clientId,
+    const std::string& fingerprint,
+    const json& identity,
+    const json& groupState,
+    std::uint64_t epoch) {
+    if (fingerprint.empty() || !identity.is_object() || identity.empty()) return;
+    try {
+        const auto envelope = mIdentity.sealTextForIdentity(
+            "group_state",
+            fingerprint,
+            groupState.dump(),
+            identity);
+        json msg = {
+            {"type", "group_state_store"},
+            {"roomId", mRoomToken},
+            {"memberFingerprint", fingerprint},
+            {"epoch", epoch},
+            {"envelope", envelope}
+        };
+        sendToAllRelays(msg);
+    }
+    catch (const std::exception& e) {
+        chatEmit(mCallbacks.onStatus, "Group state store warning for " + clientId + ": " + e.what());
+    }
+}
+
+bool HostSessionCore::resendCurrentGroupStateToClient(const std::string& clientId) {
+    std::string publicKey;
+    json groupState;
+    std::uint64_t epoch = 0;
+    {
+        std::lock_guard<std::mutex> lock(mClientsMutex);
+        const auto publicKeyIt = mClientPublicKeys.find(clientId);
+        if (publicKeyIt == mClientPublicKeys.end() || publicKeyIt->second.empty()) return false;
+        publicKey = publicKeyIt->second;
+    }
+    {
+        std::lock_guard<std::mutex> lock(mGkaMutex);
+        if (mCurrentGroupState.empty() || !chat::secure_relay::hasUsableGroupKey(mGroupKey)) return false;
+        groupState = mCurrentGroupState;
+        epoch = mGroupKeyEpoch;
+    }
+    return sendGroupStateToClient(clientId, publicKey, groupState, epoch);
+}
+
 void HostSessionCore::rotateGroupKey(const std::string& reason) {
     // 轮换现在会启动贡献式 GKA epoch。
     // Host 像其他成员一样贡献随机性，不再单独选择 K_G。
@@ -1641,6 +1791,7 @@ void HostSessionCore::evictGkaTimeoutMembers(std::uint64_t epoch) {
             mClientIdentityFingerprints.erase(clientId);
             mClientIdentitySubjects.erase(clientId);
             mClientIdentityObjects.erase(clientId);
+            mClientSealIdentityObjects.erase(clientId);
             mClientUsernames.erase(clientId);
             mConnectedClientIds.erase(clientId);
             mSilencedClientIds.erase(clientId);
@@ -1742,6 +1893,7 @@ bool HostSessionCore::rememberGkaContribution(const json& contribution, const st
             // GKA contribution 的 identity 签名绑定 epoch 和 contribution，
             // 不能复用为 member_identity 中的 join_room 公钥公告签名。
             // 其他成员会在 group state 中重新验证该 GKA identity。
+            mClientSealIdentityObjects[memberId] = *identity;
         }
         json stored = contribution;
         stored["fingerprint"] = verified.fingerprint;
@@ -1793,14 +1945,36 @@ void HostSessionCore::tryCommitGkaEpoch() {
         epoch,
         contributions);
 
-    std::vector<std::pair<std::string, std::string>> clients;
+    struct ClientStateForGroup {
+        std::string clientId;
+        std::string publicKey;
+        std::string fingerprint;
+        json identity;
+        bool connected = false;
+    };
+    std::vector<ClientStateForGroup> clients;
     {
         std::lock_guard<std::mutex> lock(mClientsMutex);
         clients.reserve(mConnectedClientIds.size());
-        for (const auto& clientId : mConnectedClientIds) {
-            auto publicKey = mClientPublicKeys.find(clientId);
-            if (publicKey != mClientPublicKeys.end() && !publicKey->second.empty()) {
-                clients.push_back({clientId, publicKey->second});
+        for (const auto& [clientId, publicKeyValue] : mClientPublicKeys) {
+            if (!publicKeyValue.empty()) {
+                const auto fingerprint = mClientIdentityFingerprints.find(clientId);
+                json identityObject = json::object();
+                if (const auto identity = mClientIdentityObjects.find(clientId);
+                    identity != mClientIdentityObjects.end()) {
+                    identityObject = identity->second;
+                }
+                else if (const auto identity = mClientSealIdentityObjects.find(clientId);
+                         identity != mClientSealIdentityObjects.end()) {
+                    identityObject = identity->second;
+                }
+                clients.push_back({
+                    clientId,
+                    publicKeyValue,
+                    fingerprint == mClientIdentityFingerprints.end() ? std::string() : fingerprint->second,
+                    identityObject,
+                    mConnectedClientIds.find(clientId) != mConnectedClientIds.end()
+                });
             }
         }
     }
@@ -1809,14 +1983,18 @@ void HostSessionCore::tryCommitGkaEpoch() {
         std::lock_guard<std::mutex> lock(mGkaMutex);
         if (mPendingGkaEpoch != epoch) return;
         mGroupKey = std::move(groupKey);
+        mCurrentGroupState = groupState;
         mPendingGkaEpoch = 0;
         mPendingGkaMembers.clear();
         mPendingGkaContributions.clear();
     }
     mGkaCv.notify_all();
 
-    for (const auto& [clientId, publicKey] : clients) {
-        sendGroupStateToClient(clientId, publicKey, groupState, epoch);
+    for (const auto& client : clients) {
+        storeGroupStateForClient(client.clientId, client.fingerprint, client.identity, groupState, epoch);
+        if (client.connected) {
+            sendGroupStateToClient(client.clientId, client.publicKey, groupState, epoch);
+        }
     }
     chatEmit(mCallbacks.onStatus, "Room group key ready");
     announceVerifiedMembers();
@@ -1958,6 +2136,7 @@ void HostSessionCore::handleSignalingMessage(const SignalingFrame& frame) {
             chatEmit(mCallbacks.onStatus, "Room members: " + members.str());
             bool addedClient = false;
             bool onlineChanged = false;
+            std::vector<std::string> stateResendIds;
             for (const auto& member : clientIdentityCandidates) {
                 const auto id = member.value("id", "");
                 const auto username = member.value("username", id);
@@ -1975,6 +2154,7 @@ void HostSessionCore::handleSignalingMessage(const SignalingFrame& frame) {
                     }
                     if (alreadyKnown && mConnectedClientIds.insert(id).second) {
                         onlineChanged = true;
+                        stateResendIds.push_back(id);
                     }
                 }
                 if (alreadyKnown) continue;
@@ -1992,19 +2172,27 @@ void HostSessionCore::handleSignalingMessage(const SignalingFrame& frame) {
                         mClientIdentityFingerprints[id] = verified.fingerprint;
                         mClientIdentitySubjects[id] = verified.subject;
                         mClientIdentityObjects[id] = *identity;
+                        mClientSealIdentityObjects[id] = *identity;
                         mConnectedClientIds.insert(id);
                         mClientRelayUrls[id].insert(relayUrl);
                     }
                     chatEmit(mCallbacks.onStatus, "PKI member verified: " + (displayName.empty() ? username : displayName) + " / " + id + " / " + verified.fingerprint);
                     addedClient = true;
+                    stateResendIds.push_back(id);
                 }
                 catch (const std::exception& e) {
                     chatEmit(mCallbacks.onError, "Existing client identity rejected: " + username + ": " + e.what());
                     rejectClient(id, "client identity verification failed");
                 }
             }
-            if (addedClient || onlineChanged) {
-                rotateGroupKey(addedClient ? "room members synchronized" : "member reconnected");
+            if (addedClient) {
+                chatEmit(mCallbacks.onStatus, "Room member state synchronized");
+            }
+            if (onlineChanged) {
+                chatEmit(mCallbacks.onStatus, "Member reconnected");
+            }
+            for (const auto& id : stateResendIds) {
+                resendCurrentGroupStateToClient(id);
             }
         }
         else if (type == "pending_join") {
@@ -2178,6 +2366,7 @@ void HostSessionCore::handleSignalingMessage(const SignalingFrame& frame) {
                     mClientIdentitySubjects[clientId] = identitySubject;
                     if (identityObject.is_object()) {
                         mClientIdentityObjects[clientId] = identityObject;
+                        mClientSealIdentityObjects[clientId] = identityObject;
                     }
                 }
                 for (auto it = mPendingJoinRequests.begin(); it != mPendingJoinRequests.end();) {
@@ -2233,6 +2422,9 @@ void HostSessionCore::handleSignalingMessage(const SignalingFrame& frame) {
             if (rememberGkaContribution(contribution, senderId)) {
                 tryCommitGkaEpoch();
             }
+        }
+        else if (type == chat::forum_board::RecordsType) {
+            handleForumRecords(j.value("records", json::array()));
         }
         else if (type == chat::secure_relay::EnvelopeType) {
             // Host 像普通成员一样解密应用中继。
@@ -2346,6 +2538,7 @@ void HostSessionCore::removeClient(const std::string& id) {
         knownClient = mClientIdentityFingerprints.erase(id) > 0 || knownClient;
         knownClient = mClientIdentitySubjects.erase(id) > 0 || knownClient;
         knownClient = mClientIdentityObjects.erase(id) > 0 || knownClient;
+        knownClient = mClientSealIdentityObjects.erase(id) > 0 || knownClient;
         mClientRelayUrls.erase(id);
         mConnectedClientIds.erase(id);
         mSilencedClientIds.erase(id);
@@ -2413,7 +2606,9 @@ void HostSessionCore::evictClient(const std::string& target) {
     }
 
     std::string displayName;
+    std::string username;
     std::string fingerprint;
+    json identityObject;
     bool foundClient = false;
     {
         std::lock_guard<std::mutex> lock(mClientsMutex);
@@ -2421,6 +2616,15 @@ void HostSessionCore::evictClient(const std::string& target) {
         if (name != mClientNames.end()) {
             foundClient = true;
             displayName = name->second;
+        }
+        if (auto it = mClientUsernames.find(clientId); it != mClientUsernames.end()) {
+            username = it->second;
+        }
+        if (auto it = mClientIdentityObjects.find(clientId); it != mClientIdentityObjects.end()) {
+            identityObject = it->second;
+        }
+        else if (auto it = mClientSealIdentityObjects.find(clientId); it != mClientSealIdentityObjects.end()) {
+            identityObject = it->second;
         }
         if (foundClient) {
             auto identity = mClientIdentityFingerprints.find(clientId);
@@ -2435,7 +2639,27 @@ void HostSessionCore::evictClient(const std::string& target) {
         return;
     }
 
-    rejectClient(clientId, "member evicted by host");
+    json membershipEvent;
+    try {
+        membershipEvent = makeMembershipEvent(
+            "evict",
+            clientId,
+            username.empty() ? clientId : username,
+            displayName,
+            fingerprint,
+            identityObject);
+    }
+    catch (const std::exception& e) {
+        chatEmit(mCallbacks.onError, std::string("Eviction event signing failed: ") + e.what());
+        return;
+    }
+
+    sendToAllRelays({
+        {"type", "membership_event"},
+        {"roomId", mRoomToken},
+        {"event", membershipEvent}
+    });
+    rejectClient(clientId, "member evicted by host", membershipEvent);
     chatEmit(mCallbacks.onStatus, "Client evicted: " + displayName);
     if (!fingerprint.empty()) {
         chatEmit(mCallbacks.onStatus, "Banned member certificate for this room: " + fingerprint);
@@ -2628,7 +2852,7 @@ std::string HostSessionCore::resolvePendingJoinId(const std::string& token) {
     return "";
 }
 
-void HostSessionCore::rejectClient(const std::string& clientId, const std::string& reason) {
+void HostSessionCore::rejectClient(const std::string& clientId, const std::string& reason, const json& membershipEvent) {
     if (clientId.empty() || !hasOpenRelay()) return;
     json msg = {
         {"type", "reject_client"},
@@ -2636,7 +2860,23 @@ void HostSessionCore::rejectClient(const std::string& clientId, const std::strin
         {"targetId", clientId},
         {"reason", reason}
     };
-    sendToAllRelays(msg);
+    if (membershipEvent.is_object() && !membershipEvent.empty()) {
+        msg["membershipEvent"] = membershipEvent;
+    }
+    std::unordered_set<std::string> relayUrls;
+    {
+        std::lock_guard<std::mutex> lock(mClientsMutex);
+        if (auto it = mClientRelayUrls.find(clientId); it != mClientRelayUrls.end()) {
+            relayUrls = it->second;
+        }
+    }
+    if (relayUrls.empty()) {
+        chatEmit(mCallbacks.onStatus, "No active relay for client: " + clientId);
+        return;
+    }
+    for (const auto& relayUrl : relayUrls) {
+        sendToRelayUrl(relayUrl, msg);
+    }
 }
 
 void HostSessionCore::announceVerifiedMember(
@@ -2702,4 +2942,132 @@ void HostSessionCore::announceVerifiedMembers() {
     for (const auto& [memberId, username, displayName, fingerprint, subject, publicKey, identity] : members) {
         announceVerifiedMember(memberId, username, displayName, fingerprint, subject, publicKey, identity);
     }
+}
+
+void HostSessionCore::sendForumPost(const std::string& text) {
+    std::vector<chat::forum_board::Recipient> recipients;
+    recipients.push_back({
+        chat::protocol::HostActorId,
+        mDisplayName.empty() ? mUsername : mDisplayName,
+        mIdentity.fingerprint(),
+        mIdentity.signJoinRoom(mRoomId, mUsername, mMemberKeys.publicKey)
+    });
+    {
+        std::lock_guard<std::mutex> lock(mClientsMutex);
+        for (const auto& [memberId, fingerprint] : mClientIdentityFingerprints) {
+            json identityObject = json::object();
+            if (const auto identity = mClientIdentityObjects.find(memberId);
+                identity != mClientIdentityObjects.end()) {
+                identityObject = identity->second;
+            }
+            else if (const auto identity = mClientSealIdentityObjects.find(memberId);
+                     identity != mClientSealIdentityObjects.end()) {
+                identityObject = identity->second;
+            }
+            if (!identityObject.is_object() || identityObject.empty()) continue;
+            const auto displayName = mClientNames.find(memberId);
+            recipients.push_back({
+                memberId,
+                displayName == mClientNames.end() ? memberId : displayName->second,
+                fingerprint,
+                identityObject
+            });
+        }
+    }
+
+    try {
+        const auto record = chat::forum_board::makeRecord(
+            mRoomId,
+            mRoomToken,
+            mGroupKeyEpoch,
+            chat::protocol::HostActorId,
+            mDisplayName.empty() ? mUsername : mDisplayName,
+            mIdentity,
+            recipients,
+            text);
+        json msg = {
+            {"type", chat::forum_board::RecordType},
+            {"roomId", mRoomToken},
+            {"boardMessageId", record.value("boardMessageId", "")},
+            {"recordHash", chat::forum_board::payloadDigest(record)},
+            {"record", record}
+        };
+        const auto sent = sendToAllRelays(msg);
+        rememberForumRecord(record);
+        chatEmit(mCallbacks.onStatus, "Forum post sent to relays: " + std::to_string(sent));
+    }
+    catch (const std::exception& e) {
+        chatEmit(mCallbacks.onError, std::string("Forum post failed: ") + e.what());
+    }
+}
+
+void HostSessionCore::requestForumSync() {
+    json msg = {
+        {"type", chat::forum_board::SyncType},
+        {"roomId", mRoomToken}
+    };
+    const auto sent = sendToAllRelays(msg);
+    chatEmit(mCallbacks.onStatus, "Forum sync requested on relays: " + std::to_string(sent));
+}
+
+void HostSessionCore::handleForumRecords(const json& records) {
+    if (!records.is_array()) return;
+    std::size_t opened = 0;
+    for (const auto& record : records) {
+        const auto before = mForumRecords.size();
+        rememberForumRecord(record);
+        if (mForumRecords.size() > before) ++opened;
+    }
+    if (opened > 0) {
+        chatEmit(mCallbacks.onStatus, "Forum records synced: " + std::to_string(opened));
+    }
+}
+
+void HostSessionCore::rememberForumRecord(const json& record) {
+    try {
+        const auto messageId = record.value("boardMessageId", "");
+        const auto digest = chat::forum_board::payloadDigest(record);
+        if (messageId.empty() || digest.empty()) return;
+        {
+            std::lock_guard<std::mutex> lock(mForumMutex);
+            const auto existing = mForumRecordHashes.find(messageId);
+            if (existing != mForumRecordHashes.end()) {
+                if (existing->second != digest) {
+                    chatEmit(mCallbacks.onError, "Rejected conflicting forum record: " + messageId);
+                }
+                return;
+            }
+        }
+
+        auto opened = chat::forum_board::openRecord(mRoomId, mRoomToken, mIdentity, record);
+        {
+            std::lock_guard<std::mutex> lock(mForumMutex);
+            mForumRecordHashes[messageId] = digest;
+            mForumRecords.push_back(std::move(opened));
+            std::sort(mForumRecords.begin(), mForumRecords.end(), [](const auto& left, const auto& right) {
+                return left.createdAtUnixMs < right.createdAtUnixMs;
+            });
+        }
+    }
+    catch (const std::exception& e) {
+        chatEmit(mCallbacks.onStatus, std::string("Forum record skipped: ") + e.what());
+    }
+}
+
+std::string HostSessionCore::forumHistoryJson(std::size_t limit) const {
+    json out = json::array();
+    std::lock_guard<std::mutex> lock(mForumMutex);
+    const auto start = mForumRecords.size() > limit ? mForumRecords.size() - limit : 0;
+    for (std::size_t i = start; i < mForumRecords.size(); ++i) {
+        const auto& record = mForumRecords[i];
+        out.push_back({
+            {"boardMessageId", record.boardMessageId},
+            {"authorDisplayName", record.authorName},
+            {"authorFingerprint", record.authorFingerprint},
+            {"text", record.text},
+            {"createdAtUnixMs", record.createdAtUnixMs},
+            {"own", record.own}
+        });
+    }
+    return out.dump();
 }

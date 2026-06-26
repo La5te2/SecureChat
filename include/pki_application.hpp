@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace chat::pki_application {
 
@@ -84,6 +85,31 @@ public:
         std::uint64_t epoch,
         const std::string& payloadDigest,
         const json& control) const;
+
+    // 使用目标成员证书公钥封装一段短二进制材料，例如 forum post key 或
+    // 给离线成员保存的 group state key。该封装依赖房间级 PKI 证书链。
+    json sealBytesForIdentity(
+        const std::string& purpose,
+        const std::string& recipientFingerprint,
+        const std::vector<unsigned char>& plaintext,
+        const json& identity) const;
+
+    // 使用本地成员私钥打开 sealBytesForIdentity 产生的封装。
+    std::vector<unsigned char> openSealedBytes(
+        const std::string& purpose,
+        const json& envelope) const;
+
+    // 用“随机内容密钥 + 成员证书公钥封装内容密钥”的混合结构加密较大的文本。
+    json sealTextForIdentity(
+        const std::string& purpose,
+        const std::string& recipientFingerprint,
+        const std::string& plaintext,
+        const json& identity) const;
+
+    // 打开 sealTextForIdentity 产生的混合封装文本。
+    std::string openSealedText(
+        const std::string& purpose,
+        const json& envelope) const;
 
 private:
     struct Data;

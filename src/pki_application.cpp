@@ -7,6 +7,7 @@
 #include <openssl/bio.h>
 #include <openssl/evp.h>
 #include <openssl/pem.h>
+#include <openssl/rsa.h>
 #include <openssl/sha.h>
 #include <openssl/x509.h>
 #include <openssl/x509_vfy.h>
@@ -23,6 +24,9 @@
 namespace chat::pki_application {
 namespace {
 constexpr int identityNonceBytes = 16;
+constexpr std::size_t sealedTextKeyBytes = 32;
+constexpr std::size_t sealedTextNonceBytes = 12;
+constexpr std::size_t sealedTextTagBytes = 16;
 using chat::cert_utils::appendCanonicalField;
 using chat::cert_utils::base64Decode;
 using chat::cert_utils::base64Encode;
@@ -285,6 +289,195 @@ std::vector<X509Ptr> verifiedIdentityCerts(
     return certs;
 }
 
+json sealWithCertificatePublicKey(
+    X509* cert,
+    const std::string& purpose,
+    const std::string& recipientFingerprint,
+    const std::vector<unsigned char>& plaintext) {
+    EvpPkeyPtr publicKey(X509_get_pubkey(cert), EVP_PKEY_free);
+    if (!publicKey) throw std::runtime_error("recipient certificate public key missing");
+    const int keyType = EVP_PKEY_base_id(publicKey.get());
+    if (keyType != EVP_PKEY_RSA && keyType != EVP_PKEY_RSA_PSS) {
+        throw std::runtime_error("recipient certificate key is not RSA");
+    }
+
+    std::unique_ptr<EVP_PKEY_CTX, decltype(&EVP_PKEY_CTX_free)> ctx(
+        EVP_PKEY_CTX_new(publicKey.get(), nullptr),
+        EVP_PKEY_CTX_free);
+    if (!ctx ||
+        EVP_PKEY_encrypt_init(ctx.get()) != 1 ||
+        EVP_PKEY_CTX_set_rsa_padding(ctx.get(), RSA_PKCS1_OAEP_PADDING) != 1 ||
+        EVP_PKEY_CTX_set_rsa_oaep_md(ctx.get(), EVP_sha256()) != 1 ||
+        EVP_PKEY_CTX_set_rsa_mgf1_md(ctx.get(), EVP_sha256()) != 1) {
+        throw std::runtime_error("RSA-OAEP seal setup failed");
+    }
+
+    std::size_t outSize = 0;
+    if (EVP_PKEY_encrypt(ctx.get(), nullptr, &outSize, plaintext.data(), plaintext.size()) != 1) {
+        throw std::runtime_error("RSA-OAEP seal size failed");
+    }
+    std::vector<unsigned char> ciphertext(outSize);
+    if (EVP_PKEY_encrypt(ctx.get(), ciphertext.data(), &outSize, plaintext.data(), plaintext.size()) != 1) {
+        throw std::runtime_error("RSA-OAEP seal failed");
+    }
+    ciphertext.resize(outSize);
+
+    return {
+        {"version", 1},
+        {"purpose", purpose},
+        {"recipientFingerprint", recipientFingerprint},
+        {"alg", "RSA-OAEP-SHA256"},
+        {"ciphertext", base64Encode(ciphertext.data(), ciphertext.size())}
+    };
+}
+
+std::vector<unsigned char> openWithPrivateKey(EVP_PKEY* privateKey, const json& envelope) {
+    if (!envelope.is_object() ||
+        envelope.value("version", 0) != 1 ||
+        envelope.value("alg", "") != "RSA-OAEP-SHA256") {
+        throw std::runtime_error("unsupported sealed key envelope");
+    }
+    const int keyType = EVP_PKEY_base_id(privateKey);
+    if (keyType != EVP_PKEY_RSA && keyType != EVP_PKEY_RSA_PSS) {
+        throw std::runtime_error("local identity key is not RSA");
+    }
+    const auto ciphertext = base64Decode(envelope.value("ciphertext", ""));
+
+    std::unique_ptr<EVP_PKEY_CTX, decltype(&EVP_PKEY_CTX_free)> ctx(
+        EVP_PKEY_CTX_new(privateKey, nullptr),
+        EVP_PKEY_CTX_free);
+    if (!ctx ||
+        EVP_PKEY_decrypt_init(ctx.get()) != 1 ||
+        EVP_PKEY_CTX_set_rsa_padding(ctx.get(), RSA_PKCS1_OAEP_PADDING) != 1 ||
+        EVP_PKEY_CTX_set_rsa_oaep_md(ctx.get(), EVP_sha256()) != 1 ||
+        EVP_PKEY_CTX_set_rsa_mgf1_md(ctx.get(), EVP_sha256()) != 1) {
+        throw std::runtime_error("RSA-OAEP open setup failed");
+    }
+
+    std::size_t outSize = 0;
+    if (EVP_PKEY_decrypt(ctx.get(), nullptr, &outSize, ciphertext.data(), ciphertext.size()) != 1) {
+        throw std::runtime_error("RSA-OAEP open size failed");
+    }
+    std::vector<unsigned char> plaintext(outSize);
+    if (EVP_PKEY_decrypt(ctx.get(), plaintext.data(), &outSize, ciphertext.data(), ciphertext.size()) != 1) {
+        throw std::runtime_error("RSA-OAEP open failed");
+    }
+    plaintext.resize(outSize);
+    return plaintext;
+}
+
+json encryptSealedTextBody(
+    const std::string& purpose,
+    const std::string& recipientFingerprint,
+    const std::string& plaintext,
+    const std::vector<unsigned char>& key) {
+    if (key.size() != sealedTextKeyBytes) throw std::runtime_error("sealed text key size is invalid");
+    const auto nonce = randomBytes(sealedTextNonceBytes);
+    const auto aad = std::string("securechat-sealed-text-v1|") + purpose + "|" + recipientFingerprint;
+
+    std::unique_ptr<EVP_CIPHER_CTX, decltype(&EVP_CIPHER_CTX_free)> ctx(
+        EVP_CIPHER_CTX_new(),
+        EVP_CIPHER_CTX_free);
+    if (!ctx ||
+        EVP_EncryptInit_ex(ctx.get(), EVP_aes_256_gcm(), nullptr, nullptr, nullptr) != 1 ||
+        EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_GCM_SET_IVLEN, static_cast<int>(nonce.size()), nullptr) != 1 ||
+        EVP_EncryptInit_ex(ctx.get(), nullptr, nullptr, key.data(), nonce.data()) != 1) {
+        throw std::runtime_error("sealed text encryption setup failed");
+    }
+
+    int outLength = 0;
+    if (EVP_EncryptUpdate(
+            ctx.get(),
+            nullptr,
+            &outLength,
+            reinterpret_cast<const unsigned char*>(aad.data()),
+            static_cast<int>(aad.size())) != 1) {
+        throw std::runtime_error("sealed text AAD failed");
+    }
+
+    std::vector<unsigned char> ciphertext(plaintext.size() + sealedTextTagBytes);
+    if (EVP_EncryptUpdate(
+            ctx.get(),
+            ciphertext.data(),
+            &outLength,
+            reinterpret_cast<const unsigned char*>(plaintext.data()),
+            static_cast<int>(plaintext.size())) != 1) {
+        throw std::runtime_error("sealed text encryption failed");
+    }
+    int total = outLength;
+    if (EVP_EncryptFinal_ex(ctx.get(), ciphertext.data() + total, &outLength) != 1) {
+        throw std::runtime_error("sealed text encryption final failed");
+    }
+    total += outLength;
+    ciphertext.resize(static_cast<std::size_t>(total));
+
+    std::vector<unsigned char> tag(sealedTextTagBytes);
+    if (EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_GCM_GET_TAG, static_cast<int>(tag.size()), tag.data()) != 1) {
+        throw std::runtime_error("sealed text tag failed");
+    }
+
+    return {
+        {"nonce", base64Encode(nonce)},
+        {"ciphertext", base64Encode(ciphertext)},
+        {"tag", base64Encode(tag)}
+    };
+}
+
+std::string decryptSealedTextBody(
+    const std::string& purpose,
+    const std::string& recipientFingerprint,
+    const json& envelope,
+    const std::vector<unsigned char>& key) {
+    if (key.size() != sealedTextKeyBytes) throw std::runtime_error("sealed text key size is invalid");
+    const auto body = envelope.find("body");
+    if (body == envelope.end() || !body->is_object()) throw std::runtime_error("sealed text body is missing");
+    const auto nonce = base64Decode(body->value("nonce", ""));
+    const auto ciphertext = base64Decode(body->value("ciphertext", ""));
+    const auto tag = base64Decode(body->value("tag", ""));
+    if (nonce.size() != sealedTextNonceBytes || tag.size() != sealedTextTagBytes) {
+        throw std::runtime_error("sealed text nonce or tag is invalid");
+    }
+    const auto aad = std::string("securechat-sealed-text-v1|") + purpose + "|" + recipientFingerprint;
+
+    std::unique_ptr<EVP_CIPHER_CTX, decltype(&EVP_CIPHER_CTX_free)> ctx(
+        EVP_CIPHER_CTX_new(),
+        EVP_CIPHER_CTX_free);
+    if (!ctx ||
+        EVP_DecryptInit_ex(ctx.get(), EVP_aes_256_gcm(), nullptr, nullptr, nullptr) != 1 ||
+        EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_GCM_SET_IVLEN, static_cast<int>(nonce.size()), nullptr) != 1 ||
+        EVP_DecryptInit_ex(ctx.get(), nullptr, nullptr, key.data(), nonce.data()) != 1) {
+        throw std::runtime_error("sealed text decryption setup failed");
+    }
+
+    int outLength = 0;
+    if (EVP_DecryptUpdate(
+            ctx.get(),
+            nullptr,
+            &outLength,
+            reinterpret_cast<const unsigned char*>(aad.data()),
+            static_cast<int>(aad.size())) != 1) {
+        throw std::runtime_error("sealed text AAD failed");
+    }
+
+    std::vector<unsigned char> plaintext(ciphertext.size());
+    if (EVP_DecryptUpdate(
+            ctx.get(),
+            plaintext.data(),
+            &outLength,
+            ciphertext.data(),
+            static_cast<int>(ciphertext.size())) != 1) {
+        throw std::runtime_error("sealed text decryption failed");
+    }
+    int total = outLength;
+    if (EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_GCM_SET_TAG, static_cast<int>(tag.size()), const_cast<unsigned char*>(tag.data())) != 1 ||
+        EVP_DecryptFinal_ex(ctx.get(), plaintext.data() + total, &outLength) != 1) {
+        throw std::runtime_error("sealed text authentication failed");
+    }
+    total += outLength;
+    plaintext.resize(static_cast<std::size_t>(total));
+    return std::string(reinterpret_cast<const char*>(plaintext.data()), plaintext.size());
+}
+
 std::string requiredIdentityString(const json& identity, const char* key) {
     const auto it = identity.find(key);
     if (it == identity.end() || !it->is_string() || it->get<std::string>().empty()) {
@@ -479,6 +672,78 @@ VerifiedIdentity IdentityContext::verifyRoomControl(
         certificateSubject(certs.front().get()),
         certificateFingerprint(certs.front().get())
     };
+}
+
+json IdentityContext::sealBytesForIdentity(
+    const std::string& purpose,
+    const std::string& recipientFingerprint,
+    const std::vector<unsigned char>& plaintext,
+    const json& identity) const {
+    if (!mData) throw std::runtime_error("PKI identity is not configured");
+    if (purpose.empty()) throw std::runtime_error("sealed key purpose is missing");
+    if (recipientFingerprint.empty()) throw std::runtime_error("recipient fingerprint is missing");
+    if (plaintext.empty()) throw std::runtime_error("sealed plaintext is empty");
+
+    const auto certs = verifiedIdentityCerts(mData->trustStore.get(), identity);
+    const auto actualFingerprint = certificateFingerprint(certs.front().get());
+    if (actualFingerprint != recipientFingerprint) {
+        throw std::runtime_error("recipient fingerprint does not match certificate");
+    }
+    return sealWithCertificatePublicKey(certs.front().get(), purpose, recipientFingerprint, plaintext);
+}
+
+std::vector<unsigned char> IdentityContext::openSealedBytes(
+    const std::string& purpose,
+    const json& envelope) const {
+    if (!mData) throw std::runtime_error("PKI identity is not configured");
+    if (!envelope.is_object()) throw std::runtime_error("sealed key envelope must be an object");
+    if (envelope.value("purpose", "") != purpose) {
+        throw std::runtime_error("sealed key purpose mismatch");
+    }
+    if (envelope.value("recipientFingerprint", "") != mData->localFingerprint) {
+        throw std::runtime_error("sealed key is not for this member");
+    }
+    return openWithPrivateKey(mData->privateKey.get(), envelope);
+}
+
+json IdentityContext::sealTextForIdentity(
+    const std::string& purpose,
+    const std::string& recipientFingerprint,
+    const std::string& plaintext,
+    const json& identity) const {
+    if (!mData) throw std::runtime_error("PKI identity is not configured");
+    if (purpose.empty()) throw std::runtime_error("sealed text purpose is missing");
+    if (recipientFingerprint.empty()) throw std::runtime_error("recipient fingerprint is missing");
+    if (plaintext.empty()) throw std::runtime_error("sealed text plaintext is empty");
+
+    const auto contentKey = randomBytes(sealedTextKeyBytes);
+    return {
+        {"version", 1},
+        {"purpose", purpose},
+        {"recipientFingerprint", recipientFingerprint},
+        {"alg", "AES-256-GCM+RSA-OAEP-SHA256"},
+        {"sealedKey", sealBytesForIdentity(purpose + ":content_key", recipientFingerprint, contentKey, identity)},
+        {"body", encryptSealedTextBody(purpose, recipientFingerprint, plaintext, contentKey)}
+    };
+}
+
+std::string IdentityContext::openSealedText(
+    const std::string& purpose,
+    const json& envelope) const {
+    if (!mData) throw std::runtime_error("PKI identity is not configured");
+    if (!envelope.is_object()) throw std::runtime_error("sealed text envelope must be an object");
+    if (envelope.value("version", 0) != 1 ||
+        envelope.value("purpose", "") != purpose ||
+        envelope.value("alg", "") != "AES-256-GCM+RSA-OAEP-SHA256" ||
+        envelope.value("recipientFingerprint", "") != mData->localFingerprint) {
+        throw std::runtime_error("unsupported sealed text envelope");
+    }
+    const auto sealedKey = envelope.find("sealedKey");
+    if (sealedKey == envelope.end() || !sealedKey->is_object()) {
+        throw std::runtime_error("sealed text content key is missing");
+    }
+    const auto contentKey = openSealedBytes(purpose + ":content_key", *sealedKey);
+    return decryptSealedTextBody(purpose, mData->localFingerprint, envelope, contentKey);
 }
 
 IdentityContext loadFromFiles(
