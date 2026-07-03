@@ -48,7 +48,7 @@ CHAT_API int CHAT_CALL chat_host_start(
     const char* username,
     const char* nickname,
     const char* key_pass);
-// WinUI 自动生成 logs/<room>_<digest>/certs/entrance.scp，并隐藏 room-dir 细节。
+// WinUI 自动生成 logs/hosts/<systemUser>/<room>_<digest>/certs/entrance.scp，并隐藏 room-dir 细节。
 CHAT_API int CHAT_CALL chat_host_start_auto(
     const char* room_name,
     const char* username,

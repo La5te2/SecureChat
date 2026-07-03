@@ -169,10 +169,6 @@
                         Grid.Column="3"
                         Content="Send"
                         Click="Send_Click"
-                        PointerPressed="SendButton_PointerPressed"
-                        PointerReleased="SendButton_PointerReleased"
-                        PointerCanceled="SendButton_PointerCanceled"
-                        PointerCaptureLost="SendButton_PointerCanceled"
                         HorizontalAlignment="Stretch"
                         VerticalAlignment="Center" />
                 </Grid>

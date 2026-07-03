@@ -8,6 +8,7 @@
 #include <ctime>
 #include <filesystem>
 #include <iomanip>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -43,9 +44,65 @@ std::string timestampForFile() {
     return out.str();
 }
 
+bool envFlagEnabled(const char* name) {
+    const auto value = envValue(name);
+    return value == "1" || value == "true" || value == "TRUE" ||
+        value == "yes" || value == "YES" || value == "on" || value == "ON";
+}
+
+bool isTimestampStateDb(const std::filesystem::directory_entry& entry) {
+    if (!entry.is_regular_file()) return false;
+    const auto path = entry.path();
+    if (path.extension() != ".sqlite3") return false;
+
+    const auto name = path.stem().string();
+    if (name.size() != 19) return false;
+    for (std::size_t i = 0; i < name.size(); ++i) {
+        const char ch = name[i];
+        if (i == 8 || i == 15) {
+            if (ch != '-') return false;
+            continue;
+        }
+        if (ch < '0' || ch > '9') return false;
+    }
+    return true;
+}
+
+std::optional<std::string> latestTimestampDbPath(const std::filesystem::path& directory) {
+    std::error_code ec;
+    if (!std::filesystem::exists(directory, ec)) return std::nullopt;
+
+    std::string latestName;
+    std::filesystem::path latestPath;
+    for (const auto& entry : std::filesystem::directory_iterator(directory, ec)) {
+        if (ec) break;
+        if (!isTimestampStateDb(entry)) continue;
+        if (entry.file_size(ec) == 0 || ec) {
+            ec.clear();
+            continue;
+        }
+
+        const auto name = entry.path().stem().string();
+        if (latestName.empty() || name > latestName) {
+            latestName = name;
+            latestPath = entry.path();
+        }
+    }
+    if (latestPath.empty()) return std::nullopt;
+    return latestPath.generic_string();
+}
+
 std::string defaultDbPath() {
     const auto configured = envValue("SECURECHAT_SERVER_STATE_DB");
-    return configured.empty() ? ("server/state/" + timestampForFile() + ".sqlite3") : configured;
+    if (!configured.empty()) return configured;
+
+    const std::filesystem::path stateDir = "server/state";
+    if (!envFlagEnabled("SECURECHAT_SERVER_STATE_FRESH")) {
+        if (const auto latest = latestTimestampDbPath(stateDir)) {
+            return *latest;
+        }
+    }
+    return (stateDir / (timestampForFile() + ".sqlite3")).generic_string();
 }
 
 void execSql(sqlite3* db, const char* sql) {
@@ -96,6 +153,10 @@ ServerStateStore::~ServerStateStore() {
         sqlite3_close(dbPtr(mDb));
         mDb = nullptr;
     }
+}
+
+const std::string& ServerStateStore::path() const {
+    return mPath;
 }
 
 void ServerStateStore::open() {

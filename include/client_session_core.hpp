@@ -162,6 +162,9 @@ private:
     void handleRelayMessage(const Message& msg);
     // 将一个加密附件分片重组成本地缓存文件。
     void handleRelayBinaryChunk(const std::string& senderKey, const Message& msg);
+    // 多 relay 传输可能让分片先于元数据到达；这里先缓存，等元数据建立接收槽后再处理。
+    bool bufferEarlyAttachmentChunk(const std::string& senderKey, const std::string& transferId, const Message& msg);
+    void drainEarlyAttachmentChunks(const std::string& senderKey, const std::string& transferId);
     // 将已显示的文本消息写入本机历史；失败只报告状态，不影响收发。
     void rememberTextHistory(const Message& msg, bool isOwn);
     // 处理本机附件预览信任命令。该状态只影响当前 UI/CLI，不进入网络协议。
@@ -171,7 +174,9 @@ private:
     Message parseInput(const std::string& line);
     void sendForumPost(const std::string& text);
     void requestForumSync();
-    void handleForumRecords(const json& records);
+    void handleForumRecords(const json& records, const json& membershipEvents = json::array());
+    // 保存 Host 签名的成员资格事件，供留言板给离线成员封装 post key。
+    bool rememberForumMembershipEvent(const json& event);
     void rememberForumRecord(const json& record);
     // 根据至少 8 位证书指纹前缀解析成员 id。
     std::string resolveMemberId(const std::string& token);
@@ -233,8 +238,10 @@ private:
     std::atomic_bool mStopped = false;
     // 核心附件接收状态，以发送者 actor id 为键。
     chat::attachment::ReceiveStore mPendingTransfers;
+    std::unordered_map<std::string, std::vector<Message>> mEarlyAttachmentChunks;
     std::unique_ptr<chat::local_message::Store> mMessageHistory;
     mutable std::mutex mForumMutex;
     std::vector<chat::forum_board::DisplayRecord> mForumRecords;
     std::unordered_map<std::string, std::string> mForumRecordHashes;
+    std::unordered_map<std::string, chat::forum_board::Recipient> mForumRecipientsByFingerprint;
 };

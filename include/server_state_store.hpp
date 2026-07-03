@@ -31,6 +31,8 @@ public:
     ServerStateStore();
     ~ServerStateStore();
 
+    const std::string& path() const;
+
     std::vector<std::string> loadOpenRooms();
     std::vector<PendingJoin> loadPendingJoins(const std::string& roomId);
     std::vector<MembershipEvent> loadMembershipEvents(const std::string& roomId);

@@ -7,7 +7,7 @@
 同一个房间的 Host 和 Client 需要使用相同的：
 
 - relay pool，也就是一组 `wss://host:port` relay 入口；
-- room instance，也就是同一套 `logs/<原始房间名>_<digest前8位>` 房间目录；
+- room instance，也就是同一个 `logs/<hosts|clients>/<systemUsername>/<原始房间名>_<digest前8位>` 房间目录；
 - 本地/局域网自动 TLS 证书场景下，还需要同一个 `local-root-ca.pem`。
 
 Server 只需要 TLS 证书和监听参数，不需要成员 PKI。Host 和 Client 使用 `--room-dir` 时会从房间目录自动读取 trust store、成员证书链、成员私钥、room instance token 和 relay pool。
@@ -85,7 +85,7 @@ Server 会自动生成 `certs/server-chain.pem`、`certs/server-key.pem` 和 `ce
 ```powershell
 Set-Content -Encoding UTF8 relay-pool.txt "wss://127.0.0.1:25566"
 .\out\build\x64-release\cert.exe create-entrance --room secure-room --phrase "use-a-long-random-room-phrase" --host alice --pool relay-pool.txt --out logs
-.\out\build\x64-release\cert.exe import-entrance --entrance logs\<room-dir>\certs\entrance.scp --phrase "use-a-long-random-room-phrase" --user bob --out logs
+.\out\build\x64-release\cert.exe import-entrance --entrance <host-room-dir>\certs\entrance.scp --phrase "use-a-long-random-room-phrase" --user bob --out logs
 ```
 
 ## Windows：启动 Host
@@ -99,7 +99,7 @@ $env:SECURECHAT_LOCAL_TLS_CA="certs\local-root-ca.pem"
 创建房间：
 
 ```powershell
-.\out\build\x64-release\host.exe --room-dir logs\<room-dir> alice
+.\out\build\x64-release\host.exe --room-dir <host-room-dir> alice
 ```
 
 ## Windows：启动 Client
@@ -113,7 +113,7 @@ $env:SECURECHAT_LOCAL_TLS_CA="certs\local-root-ca.pem"
 加入房间：
 
 ```powershell
-.\out\build\x64-release\client.exe --room-dir logs\<room-dir> bob
+.\out\build\x64-release\client.exe --room-dir <client-room-dir> bob
 ```
 
 Client 会进入 pending join。回到 Host 窗口先查看 pending requestId，再审批：
@@ -135,7 +135,7 @@ app\winui\bin\x64\Release\net10.0-windows10.0.19041.0\win-x64\SecureChat.exe
 
 WinUI 的 Host/Join 主界面显示 Room、User 和房间操作按钮。Host 创建房间时从 `config.yml` 的 `[pool]` 段读取 relay pool，每行一个 `wss://host:port`。如果 Server 使用 Certbot 等系统信任 CA 签发的证书，WinUI 可以直接使用系统信任链。如果 Server 使用自动生成的开发证书，在设置面板的 `Local Server TLS CA / 本地服务器 TLS 信任根` 中选择 `certs/local-root-ca.pem`。
 
-Host 页填写 Room 和 User 后点击启动房间，WinUI 会自动生成 `logs/<原始房间名>_<digest前8位>/certs/entrance.scp`。同一个 Host 可以创建多个同名房间，每次创建都会生成新的 room instance 和新的本地 room-dir。Host 页或 Join 页点击“加入房间”时，WinUI 总会弹出房间实例选择面板；用户确认具体实例后才会连接。Join 页首次加入时填写同一个 Room 和当前 User，点击“导入房间”，并在弹出的文件选择器中选择 Host 分发的 `entrance.scp`。Client 导入后会在本机 room-dir 的 `certs/entrance.scp` 保存准入副本。Client 进入 pending join 后，Host 可以左键灰色 pending 成员卡片允许加入，右键灰色 pending 成员卡片会拒绝该申请。WinUI 不显示 pending requestId。
+Host 页填写 Room 和 User 后点击创建房间，WinUI 会自动生成 `logs/hosts/<systemUsername>/<原始房间名>_<digest前8位>/certs/entrance.scp`。同一个 Host 可以创建多个同名房间，每次创建都会生成新的 room instance 和新的本地 room-dir。Host 页或 Join 页点击“加入房间”时只需要填写 User，WinUI 会弹出该身份下所有本地房间实例；用户确认具体实例后才会连接。Join 页首次加入时填写同一个 Room 和当前 User，点击“导入房间”，并在弹出的文件选择器中选择 Host 分发的 `entrance.scp`。Client 导入后会在 `logs/clients/<systemUsername>/<原始房间名>_<digest前8位>/certs/entrance.scp` 保存准入副本。Client 进入 pending join 后，Host 可以左键灰色 pending 成员卡片允许加入，右键灰色 pending 成员卡片会拒绝该申请。WinUI 不显示 pending requestId。
 
 ## Linux：构建
 
@@ -198,7 +198,7 @@ chmod +x start_server.sh stop_server.sh
 cd ~/SecureChat
 printf '%s\n' 'wss://127.0.0.1:25566' > relay-pool.txt
 ./out/build/x64-linux-release/cert create-entrance --room secure-room --phrase "use-a-long-random-room-phrase" --host alice --pool relay-pool.txt --out logs
-./out/build/x64-linux-release/cert import-entrance --entrance logs/<room-dir>/certs/entrance.scp --phrase "use-a-long-random-room-phrase" --user bob --out logs
+./out/build/x64-linux-release/cert import-entrance --entrance <host-room-dir>/certs/entrance.scp --phrase "use-a-long-random-room-phrase" --user bob --out logs
 ```
 
 ## Linux：启动 Host
@@ -213,7 +213,7 @@ export SECURECHAT_LOCAL_TLS_CA=certs/local-root-ca.pem
 创建房间：
 
 ```bash
-./out/build/x64-linux-release/host --room-dir logs/<room-dir> alice
+./out/build/x64-linux-release/host --room-dir <host-room-dir> alice
 ```
 
 ## Linux：启动 Client
@@ -228,7 +228,7 @@ export SECURECHAT_LOCAL_TLS_CA=certs/local-root-ca.pem
 加入房间：
 
 ```bash
-./out/build/x64-linux-release/client --room-dir logs/<room-dir> bob
+./out/build/x64-linux-release/client --room-dir <client-room-dir> bob
 ```
 
 Client 会进入 pending join。回到 Host 终端先查看 pending requestId，再审批：
@@ -320,8 +320,8 @@ Host/Client 连接 Nginx 入口：
 ```bash
 printf '%s\n' 'wss://chat.example.com:25566' > relay-pool.txt
 ./out/build/x64-linux-release/cert create-entrance --room secure-room --phrase "use-a-long-random-room-phrase" --host alice --pool relay-pool.txt --out logs
-./out/build/x64-linux-release/host --room-dir logs/<room-dir> alice
-./out/build/x64-linux-release/client --room-dir logs/<room-dir> bob
+./out/build/x64-linux-release/host --room-dir <host-room-dir> alice
+./out/build/x64-linux-release/client --room-dir <client-room-dir> bob
 ```
 
 ## 常用聊天命令

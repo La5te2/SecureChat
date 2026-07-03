@@ -25,6 +25,9 @@ class RoomRegistry {
 public:
     // 使用给定 Host 创建房间。roomId 对 Server 来说是不透明 room instance token。
     void createRoom(const std::string& roomId, const UserAccount& host);
+    // Server 重启恢复 open room 时先建立无 Host 的占位房间。
+    // Host 可稍后重接管，已批准成员也可先恢复连接。
+    void restoreOpenRoom(const std::string& roomId);
     // 持久化恢复或 Host 重接管时恢复 room registry 状态。
     void restoreRoom(const std::string& roomId, const UserAccount& host);
     // 在已有房间中添加或刷新 Client 成员关系。

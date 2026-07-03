@@ -22,7 +22,7 @@ struct TextRecord {
 
 class Store {
 public:
-    Store(std::string roomName, std::string roomToken, std::string systemUsername);
+    Store(std::string role, std::string roomName, std::string roomToken, std::string systemUsername);
     ~Store();
 
     Store(const Store&) = delete;
@@ -36,6 +36,7 @@ private:
     void open();
 
 private:
+    std::string mRole;
     std::string mRoomName;
     std::string mRoomToken;
     std::string mSystemUsername;

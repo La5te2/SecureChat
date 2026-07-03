@@ -138,7 +138,7 @@ unset SECURECHAT_TLS_CERT_FILE SECURECHAT_TLS_KEY_FILE
   --out logs
 ```
 
-该命令会在 `logs/<原始房间名>_<roomInstanceTokenDigest前8位>/` 下生成 room instance 根目录。原始房间名必须能直接作为本机文件夹名使用，包含 `\ / : * ? " < > |`、控制字符、结尾空格或结尾点号时会被拒绝。
+该命令会在 `logs/hosts/<systemUsername>/<原始房间名>_<roomInstanceTokenDigest前8位>/` 下生成 Host room instance 根目录。Client 导入后会在 `logs/clients/<systemUsername>/<原始房间名>_<roomInstanceTokenDigest前8位>/` 下生成自己的 room instance 根目录。原始房间名必须能直接作为本机文件夹名使用，包含 `\ / : * ? " < > |`、控制字符、结尾空格或结尾点号时会被拒绝。
 
 ```text
 certs/entrance.scp
@@ -171,7 +171,7 @@ Host 创建房间时先生成 Root、Intermediate 和 Host 的密钥对，再用
 
 ```powershell
 .\out\build\x64-release\cert.exe inspect-entrance `
-  --entrance logs\<room-dir>\certs\entrance.scp `
+  --entrance <host-room-dir>\certs\entrance.scp `
   --phrase "long random room phrase"
 ```
 
@@ -179,7 +179,7 @@ Client 导入 entrance 并在本机生成成员私钥和 CSR：
 
 ```powershell
 .\out\build\x64-release\cert.exe import-entrance `
-  --entrance logs\<room-dir>\certs\entrance.scp `
+  --entrance <host-room-dir>\certs\entrance.scp `
   --phrase "long random room phrase" `
   --user bob `
   --out logs
@@ -189,7 +189,7 @@ Host 手工签发 Client CSR。这个命令主要用于开发调试和离线检�
 
 ```powershell
 .\out\build\x64-release\cert.exe sign-csr `
-  --room-dir logs\<room-dir> `
+  --room-dir <host-room-dir> `
   --csr <csr-file> `
   --user bob
 ```
@@ -200,7 +200,7 @@ Client 安装 Host 返回的签发响应由联机流程自动完成。Host appro
 
 ```powershell
 .\out\build\x64-release\cert.exe room-runtime `
-  --room-dir logs\<room-dir> `
+  --room-dir <client-room-dir> `
   --user bob `
   --role client
 ```
@@ -208,11 +208,11 @@ Client 安装 Host 返回的签发响应由联机流程自动完成。Host appro
 Host/Client CLI 已支持 `--room-dir` 直接加载房间级 PKI 和 room instance token：
 
 ```powershell
-.\out\build\x64-release\host.exe --room-dir logs\<room-dir> alice
-.\out\build\x64-release\client.exe --room-dir logs\<room-dir> bob
+.\out\build\x64-release\host.exe --room-dir <host-room-dir> alice
+.\out\build\x64-release\client.exe --room-dir <client-room-dir> bob
 ```
 
-WinUI 不显示 `room-dir` 路径。Host 面板只需要 Room 和 User，点击创建房间后会自动读取本机 `config.yml` 的 `[pool]` 段，对候选 relay 去重并探测当前可连接入口，再按 `relayInstanceId` 合并同一 Server backend 的多条访问路径，生成 `logs/<原始房间名>_<digest前8位>/certs/entrance.scp`、Host 房间级证书材料和房间实际 relay set 的 SQLite 副本。Join 面板只需要 Room 和 User，点击导入房间后选择 Host 分发的 `entrance.scp`，WinUI 会自动导入并生成本机成员私钥、准入副本和加密运行材料。Client 会先进入 pending 状态，Host 左键 pending 成员卡片允许加入，右键拒绝并封禁该申请指纹。审批通过时，Host 签发成员证书响应，Client 安装后再参与 GKA。
+WinUI 不显示 `room-dir` 路径。Host 面板填写 Room 和 User 后点击创建房间，程序会读取本机 `config.yml` 的 `[pool]` 段，对候选 relay 去重并探测当前可连接入口，再按 `relayInstanceId` 合并同一 Server backend 的多条访问路径，生成 Host 身份下的 `certs/entrance.scp`、房间级证书材料和房间实际 relay set 的 SQLite 副本。Host 或 Join 面板点击加入房间时只需要填写 User，程序会列出该用户身份下的所有本地 room instance。Join 面板首次导入房间时仍需填写 Room 和 User，并选择 Host 分发的 `entrance.scp`，程序会在 Client 身份下生成成员私钥、准入副本和加密运行材料。Client 会先进入 pending 状态，Host 左键 pending 成员卡片允许加入，右键拒绝并封禁该申请指纹。审批通过时，Host 签发成员证书响应，Client 安装后再参与 GKA。
 
 ## 成员 PKI 在协议中的作用
 

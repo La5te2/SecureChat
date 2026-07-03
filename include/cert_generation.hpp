@@ -120,15 +120,16 @@ RoomEntranceCreateResult createRoomEntrance(const RoomEntranceCreateOptions& opt
 // 解密 entrance.scp 并返回规范化 JSON 文本，供 CLI 或 UI 展示核验。
 std::string inspectRoomEntrance(const std::string& entranceFile, const std::string& roomPhrase);
 
-// 只解密 entrance.scp 并计算该 room instance 的本地 room-dir。
-// WinUI 使用它隐藏真实路径，同时避免重复导入覆盖已有成员私钥。
+// 只解密 entrance.scp 并计算指定本机身份的 room-dir。
 std::string roomDirForEntrance(
     const std::string& entranceFile,
     const std::string& roomPhrase,
+    const std::string& role,
+    const std::string& systemUsername,
     const std::string& outputRoot = "logs");
 
-// 列出所有匹配房间名、用户名和角色的本机 room-dir。WinUI 总是让用户
-// 显式选择 room instance，即使只有一个候选项，也避免同名房间自动选错。
+// 列出匹配用户名和角色的本机 room-dir。roomName 为空时列出该身份的所有房间。
+// WinUI 总是让用户显式选择 room instance，避免同名房间自动选错。
 std::vector<LocalRoomDirInfo> listLocalRoomDirs(
     const std::string& roomName,
     const std::string& username,

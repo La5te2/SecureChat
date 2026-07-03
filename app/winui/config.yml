@@ -2,4 +2,4 @@
 [chat]
 
 [pool]
-wss://chat.example.online:25566
+wss://127.0.0.1:25566

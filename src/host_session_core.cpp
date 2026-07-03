@@ -28,6 +28,7 @@ constexpr auto GkaContributionTimeout = std::chrono::seconds(10);
 constexpr std::size_t RelayRouteNonceBytes = 16;
 constexpr std::size_t ReliableMessageIdBytes = 16;
 constexpr std::size_t ReliableCacheLimit = 4096;
+constexpr std::size_t EarlyAttachmentChunkLimit = 512;
 constexpr int ReliableRetryLimit = 3;
 constexpr int RelayRetryBaseSeconds = 5;
 constexpr int RelayRetryMaxSeconds = 60;
@@ -54,6 +55,16 @@ std::string trimCopy(std::string value) {
     if (first == std::string::npos) return "";
     const auto last = value.find_last_not_of(" \t\r\n");
     return value.substr(first, last - first + 1);
+}
+
+std::string earlyAttachmentKey(const std::string& senderKey, const std::string& transferId) {
+    return senderKey + "\n" + transferId;
+}
+
+std::string membershipEventDigest(json event) {
+    event.erase("payloadDigest");
+    event.erase("control");
+    return chat::cert_utils::sha256Hex(event.dump());
 }
 
 bool parseDirectPrefix(const std::string& line, std::string& target, std::string& body) {
@@ -297,8 +308,9 @@ HostSessionCore::HostSessionCore(
     // Host 同样拥有成员 X25519 密钥对，使 Client 能向 Host 发送真正的 pairwise 私信，
     // 而不把房间群密钥作为唯一密钥。
     mMemberKeys = chat::secure_relay::generateMemberKeyPair();
-    mPendingTransfers.setRoomContext(mRoomId, mRoomToken);
+    mPendingTransfers.setRoomContext("host", mUsername, mRoomId, mRoomToken);
     mMessageHistory = std::make_unique<chat::local_message::Store>(
+        "host",
         mRoomId,
         mRoomToken,
         mUsername);
@@ -2088,6 +2100,7 @@ void HostSessionCore::handleSignalingMessage(const SignalingFrame& frame) {
         std::string type = j.value("type", "");
 
         if (type == "room_created") {
+            const bool reattached = j.value("reattached", false);
             {
                 std::lock_guard<std::mutex> lock(mRelayMutex);
                 if (mRelayRoomReady.size() < mRelayUrls.size()) mRelayRoomReady.resize(mRelayUrls.size(), false);
@@ -2099,8 +2112,8 @@ void HostSessionCore::handleSignalingMessage(const SignalingFrame& frame) {
                 }
             }
             if (!mRoomCreated.exchange(true)) {
-                chatEmit(mCallbacks.onStatus, "Room created: " + mRoomId);
-                rotateGroupKey("room created");
+                chatEmit(mCallbacks.onStatus, std::string(reattached ? "Room reattached: " : "Room created: ") + mRoomId);
+                rotateGroupKey(reattached ? "host reattached" : "room created");
             }
             else {
                 chatEmit(mCallbacks.onStatus, "Relay room ready: " + relayLabel(relayUrl));
@@ -2424,7 +2437,9 @@ void HostSessionCore::handleSignalingMessage(const SignalingFrame& frame) {
             }
         }
         else if (type == chat::forum_board::RecordsType) {
-            handleForumRecords(j.value("records", json::array()));
+            handleForumRecords(
+                j.value("records", json::array()),
+                j.value("membershipEvents", json::array()));
         }
         else if (type == chat::secure_relay::EnvelopeType) {
             // Host 像普通成员一样解密应用中继。
@@ -2724,6 +2739,7 @@ void HostSessionCore::handleRelayMessage(const Message& msg) {
         out.payload["name"] = pending.name;
         chatEmit(mCallbacks.onMessage, out.toJson());
         chatEmit(mCallbacks.onStatus, "Encrypted attachment meta received: " + pending.name);
+        drainEarlyAttachmentChunks(senderKey, pending.transferId);
         return;
     }
 
@@ -2747,7 +2763,12 @@ void HostSessionCore::handleRelayBinaryChunk(const std::string& senderKey, const
     std::string transferId;
     try {
         transferId = attachment::transferIdFromMessage(msg);
-        if (transferId != mPendingTransfers.activeTransferId(senderKey)) {
+        const auto activeTransferId = mPendingTransfers.activeTransferId(senderKey);
+        if (activeTransferId.empty()) {
+            if (bufferEarlyAttachmentChunk(senderKey, transferId, msg)) return;
+            throw std::runtime_error("attachment chunk arrived before meta and early buffer is full");
+        }
+        if (transferId != activeTransferId) {
             throw std::runtime_error("attachment chunk transfer id does not match pending meta");
         }
         const auto result = mPendingTransfers.appendChunk(
@@ -2776,6 +2797,29 @@ void HostSessionCore::handleRelayBinaryChunk(const std::string& senderKey, const
     catch (const std::exception& e) {
         mPendingTransfers.clear(senderKey);
         chatEmit(mCallbacks.onError, std::string("Encrypted attachment receive failed from ") + senderKey + ": " + e.what());
+    }
+}
+
+bool HostSessionCore::bufferEarlyAttachmentChunk(
+    const std::string& senderKey,
+    const std::string& transferId,
+    const Message& msg) {
+    if (transferId.empty()) return false;
+    auto& chunks = mEarlyAttachmentChunks[earlyAttachmentKey(senderKey, transferId)];
+    if (chunks.size() >= EarlyAttachmentChunkLimit) return false;
+    chunks.push_back(msg);
+    return true;
+}
+
+void HostSessionCore::drainEarlyAttachmentChunks(const std::string& senderKey, const std::string& transferId) {
+    const auto key = earlyAttachmentKey(senderKey, transferId);
+    auto found = mEarlyAttachmentChunks.find(key);
+    if (found == mEarlyAttachmentChunks.end()) return;
+
+    auto chunks = std::move(found->second);
+    mEarlyAttachmentChunks.erase(found);
+    for (const auto& chunk : chunks) {
+        handleRelayBinaryChunk(senderKey, chunk);
     }
 }
 
@@ -2946,15 +2990,18 @@ void HostSessionCore::announceVerifiedMembers() {
 
 void HostSessionCore::sendForumPost(const std::string& text) {
     std::vector<chat::forum_board::Recipient> recipients;
+    std::unordered_set<std::string> recipientFingerprints;
     recipients.push_back({
         chat::protocol::HostActorId,
         mDisplayName.empty() ? mUsername : mDisplayName,
         mIdentity.fingerprint(),
         mIdentity.signJoinRoom(mRoomId, mUsername, mMemberKeys.publicKey)
     });
+    recipientFingerprints.insert(mIdentity.fingerprint());
     {
         std::lock_guard<std::mutex> lock(mClientsMutex);
         for (const auto& [memberId, fingerprint] : mClientIdentityFingerprints) {
+            if (fingerprint.empty() || recipientFingerprints.find(fingerprint) != recipientFingerprints.end()) continue;
             json identityObject = json::object();
             if (const auto identity = mClientIdentityObjects.find(memberId);
                 identity != mClientIdentityObjects.end()) {
@@ -2972,6 +3019,12 @@ void HostSessionCore::sendForumPost(const std::string& text) {
                 fingerprint,
                 identityObject
             });
+            recipientFingerprints.insert(fingerprint);
+        }
+        for (const auto& [fingerprint, recipient] : mForumRecipientsByFingerprint) {
+            if (fingerprint.empty() || recipientFingerprints.find(fingerprint) != recipientFingerprints.end()) continue;
+            recipients.push_back(recipient);
+            recipientFingerprints.insert(fingerprint);
         }
     }
 
@@ -3010,7 +3063,13 @@ void HostSessionCore::requestForumSync() {
     chatEmit(mCallbacks.onStatus, "Forum sync requested on relays: " + std::to_string(sent));
 }
 
-void HostSessionCore::handleForumRecords(const json& records) {
+void HostSessionCore::handleForumRecords(const json& records, const json& membershipEvents) {
+    if (membershipEvents.is_array()) {
+        for (const auto& event : membershipEvents) {
+            rememberForumMembershipEvent(event);
+        }
+    }
+
     if (!records.is_array()) return;
     std::size_t opened = 0;
     for (const auto& record : records) {
@@ -3020,6 +3079,57 @@ void HostSessionCore::handleForumRecords(const json& records) {
     }
     if (opened > 0) {
         chatEmit(mCallbacks.onStatus, "Forum records synced: " + std::to_string(opened));
+    }
+}
+
+bool HostSessionCore::rememberForumMembershipEvent(const json& event) {
+    if (!event.is_object()) return false;
+    const auto eventType = event.value("eventType", "");
+    const auto fingerprint = event.value("memberFingerprint", "");
+    const auto digest = event.value("payloadDigest", "");
+    const auto control = event.find("control");
+    if ((eventType != "approve" && eventType != "evict") ||
+        fingerprint.empty() ||
+        digest.empty() ||
+        control == event.end() ||
+        !control->is_object() ||
+        event.value("roomId", "") != mRoomToken) {
+        return false;
+    }
+    if (digest != membershipEventDigest(event)) {
+        chatEmit(mCallbacks.onStatus, "Forum membership event skipped: digest mismatch");
+        return false;
+    }
+
+    try {
+        const auto signer = mIdentity.verifyRoomControl(
+            mRoomId,
+            mRoomToken,
+            "membership_" + eventType,
+            event.value("epoch", 0ULL),
+            digest,
+            *control);
+        if (signer.fingerprint != mIdentity.fingerprint()) return false;
+
+        std::lock_guard<std::mutex> lock(mClientsMutex);
+        if (eventType == "evict") {
+            mForumRecipientsByFingerprint.erase(fingerprint);
+            return true;
+        }
+
+        const auto identity = event.find("identity");
+        if (identity == event.end() || !identity->is_object()) return false;
+        mForumRecipientsByFingerprint[fingerprint] = {
+            event.value("clientId", fingerprint),
+            event.value("displayName", event.value("username", fingerprint)),
+            fingerprint,
+            *identity
+        };
+        return true;
+    }
+    catch (const std::exception& e) {
+        chatEmit(mCallbacks.onStatus, std::string("Forum membership event skipped: ") + e.what());
+        return false;
     }
 }
 

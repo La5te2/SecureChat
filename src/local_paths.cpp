@@ -54,6 +54,16 @@ std::string roomInstanceLabel(const std::string& roomName, const std::string& ro
     return sanitizePathComponent(roomName, "room") + "_" + roomTokenDigestPrefix(roomToken);
 }
 
+std::string roleDirectoryName(const std::string& role) {
+    if (role == "host" || role == "hosts") return "hosts";
+    if (role == "client" || role == "clients") return "clients";
+    return sanitizePathComponent(role, "clients");
+}
+
+std::string userDirectoryName(const std::string& systemUsername) {
+    return sanitizePathComponent(systemUsername, "user");
+}
+
 std::string userFileStem(const std::string& systemUsername) {
     return sanitizePathComponent(systemUsername, "user");
 }
@@ -62,22 +72,33 @@ std::filesystem::path logsRoot() {
     return std::filesystem::current_path() / "logs";
 }
 
-std::filesystem::path roomRoot(const std::string& roomName, const std::string& roomToken) {
-    return logsRoot() / roomInstanceLabel(roomName, roomToken);
+std::filesystem::path identityRoot(const std::string& role, const std::string& systemUsername) {
+    return logsRoot() / roleDirectoryName(role) / userDirectoryName(systemUsername);
+}
+
+std::filesystem::path roomRoot(
+    const std::string& role,
+    const std::string& systemUsername,
+    const std::string& roomName,
+    const std::string& roomToken) {
+    return identityRoot(role, systemUsername) / roomInstanceLabel(roomName, roomToken);
 }
 
 std::filesystem::path attachmentDirectory(
     const std::string& kind,
+    const std::string& role,
+    const std::string& systemUsername,
     const std::string& roomName,
     const std::string& roomToken) {
-    return roomRoot(roomName, roomToken) / kind;
+    return roomRoot(role, systemUsername, roomName, roomToken) / kind;
 }
 
 std::filesystem::path textHistoryDatabase(
+    const std::string& role,
     const std::string& roomName,
     const std::string& roomToken,
     const std::string& systemUsername) {
-    return roomRoot(roomName, roomToken) / "texts" / (userFileStem(systemUsername) + ".sqlite3");
+    return roomRoot(role, systemUsername, roomName, roomToken) / "texts" / (userFileStem(systemUsername) + ".sqlite3");
 }
 
 } // namespace chat::local_paths

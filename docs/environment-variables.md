@@ -17,6 +17,7 @@ SECURECHAT_SERVER_BIN
 SECURECHAT_SERVER_LOG_ENABLED
 SECURECHAT_SERVER_PID_FILE
 SECURECHAT_SERVER_STATE_DB
+SECURECHAT_SERVER_STATE_FRESH
 SECURECHAT_SIGNALING_TLS
 SECURECHAT_TLS_AUTO_DIR
 SECURECHAT_LOCAL_TLS_CA
@@ -34,7 +35,8 @@ SECURECHAT_TLS_KEY_PASS
 | `SECURECHAT_BIND_ADDRESS` | `0.0.0.0` | Server 绑定地址；Nginx TLS 反向代理 backend 建议设为 `127.0.0.1`。 |
 | `SECURECHAT_SERVER_PID_FILE` | `server.pid` | Server daemon pid 文件路径。 |
 | `SECURECHAT_SERVER_LOG_ENABLED` | `1` | `start_server.sh` 的 Server 日志输出开关；默认写入 `server/logs/server.log`，设为 `0` 时写入 `/dev/null`。 |
-| `SECURECHAT_SERVER_STATE_DB` | `server/state/<timestamp>.sqlite3` | Server 房间状态 SQLite 路径；未设置时每次启动生成新的 timestamp 状态库，设置后使用指定固定路径。SQLite 字段边界限定为 open/closed room instance 和 pending join 队列。 |
+| `SECURECHAT_SERVER_STATE_DB` | 空 | Server 房间状态 SQLite 固定路径；设置后使用该路径。 |
+| `SECURECHAT_SERVER_STATE_FRESH` | 空 | 设为 `1`、`true`、`yes` 或 `on` 时显式创建新的 `server/state/<timestamp>.sqlite3`。未设置时，Server 会优先接续 `server/state/` 中时间最新的 timestamp 状态库；没有可接续状态库时创建新的 timestamp 状态库。 |
 | `SECURECHAT_SIGNALING_TLS` | `1` | Server 是否启用 TLS；设为 `0` 时要求 loopback 绑定，用于本机回环 WS backend。 |
 | `SECURECHAT_ALLOW_ROOT` | 空 | `start_server.sh` 默认拒绝 root 运行；临时诊断时设为 `1` 才允许 root。 |
 

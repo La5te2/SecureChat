@@ -65,11 +65,12 @@ bool payloadBool(const Message& msg, const char* key) {
 
 } // namespace
 
-Store::Store(std::string roomName, std::string roomToken, std::string systemUsername)
-    : mRoomName(std::move(roomName)),
+Store::Store(std::string role, std::string roomName, std::string roomToken, std::string systemUsername)
+    : mRole(std::move(role)),
+      mRoomName(std::move(roomName)),
       mRoomToken(std::move(roomToken)),
       mSystemUsername(std::move(systemUsername)) {
-    const auto path = chat::local_paths::textHistoryDatabase(mRoomName, mRoomToken, mSystemUsername);
+    const auto path = chat::local_paths::textHistoryDatabase(mRole, mRoomName, mRoomToken, mSystemUsername);
     mPath = path.u8string();
     open();
 }

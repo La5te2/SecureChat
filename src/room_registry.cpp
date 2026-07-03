@@ -15,6 +15,12 @@ void RoomRegistry::createRoom(const std::string& roomId, const UserAccount& host
     mRooms[roomId] = std::move(room);
 }
 
+void RoomRegistry::restoreOpenRoom(const std::string& roomId) {
+    if (roomId.empty()) throw std::runtime_error("missing roomId");
+    auto& room = mRooms[roomId];
+    room.roomId = roomId;
+}
+
 void RoomRegistry::restoreRoom(const std::string& roomId, const UserAccount& host) {
     if (roomId.empty()) throw std::runtime_error("missing roomId");
     auto& room = mRooms[roomId];
@@ -37,6 +43,6 @@ void RoomRegistry::closeRoom(const std::string& roomId) {
 
 RoomRegistry::RoomState& RoomRegistry::requireRoom(const std::string& roomId) {
     auto it = mRooms.find(roomId);
-    if (it == mRooms.end() || !it->second.host) throw std::runtime_error("room not found");
+    if (it == mRooms.end()) throw std::runtime_error("room not found");
     return it->second;
 }

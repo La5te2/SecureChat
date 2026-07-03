@@ -19,6 +19,8 @@ using System.Text;
 using System.Text.Json;
 using System.Threading;
 using Windows.ApplicationModel.DataTransfer;
+using Windows.Media.Capture;
+using Windows.Media.MediaProperties;
 using Windows.Storage;
 using Windows.Storage.Pickers;
 using Windows.UI;
@@ -68,6 +70,9 @@ public sealed partial class MainWindow : Window
     private bool refreshingLanguage;
     private bool infoBarFading;
     private string pendingLocalIdentityFingerprint = "";
+    // native core 会通过 log 回调报告本机会话的稳定 actorId。
+    // UI 用它判断消息左右侧，避免 nickname/base username 相同导致误判。
+    private string ownActorId = "";
     private string currentTheme = "Light";
     private string uiLanguage = "Chinese";
     private string roomName = "-";
@@ -85,6 +90,7 @@ public sealed partial class MainWindow : Window
     private int closeExitStarted;
     private LocalRoomInstanceInfo? selectedRoomInstance;
     private System.Threading.Tasks.TaskCompletionSource<LocalRoomInstanceInfo?>? roomInstanceSelectionSource;
+    private string activeRoomDir = "";
     private string activeVoiceRecordingPath = "";
     private string relayStatusText = "-";
     private System.Threading.Tasks.Task? voiceStartTask;
@@ -93,7 +99,11 @@ public sealed partial class MainWindow : Window
     private bool suppressVoiceClick;
     private bool stopVoiceAfterStart;
     private bool sendVoiceAfterStart;
+    private bool ignoreNextVoiceCaptureLost;
     private string voiceTargetAtRecordStart = "";
+    private MediaCapture? voiceMediaCapture;
+    private StorageFile? voiceStorageFile;
+    private bool voiceRecordingUsesMci;
 
     private static readonly NativeMethods.ChatEventCallback NoOpCallback = (_, _, _) => { };
     // 附件预览状态只影响 WinUI 是否自动预览，不影响加解密和传输。
@@ -147,6 +157,7 @@ public sealed partial class MainWindow : Window
     private const int MaxPreviewImageDimension = 8192;
     private const long MaxPreviewImagePixels = 24_000_000;
     private const double MaxPreviewAudioSeconds = 600;
+    private const double MinVoiceRecordingSeconds = 0.35;
     private sealed record AttachmentPreviewInfo(
         string Kind,
         string Path,
@@ -164,6 +175,7 @@ public sealed partial class MainWindow : Window
         SetWindowIcon();
         SetInitialWindowSize();
         Closed += MainWindow_Closed;
+        RegisterVoiceHoldHandlers();
         infoBarTimer.Tick += async (_, _) =>
         {
             infoBarTimer.Stop();
@@ -186,6 +198,28 @@ public sealed partial class MainWindow : Window
         SetSessionMode(SessionMode.None);
         RefreshRoomPanel();
         AddLine("status", "Ready");
+    }
+
+    private void RegisterVoiceHoldHandlers()
+    {
+        // Button 会先处理鼠标左键的 Pointer 事件。使用 handledEventsToo
+        // 才能让“按住说话”收到左键按下和松开；右键/中键不会启动录音。
+        SendButton.AddHandler(
+            UIElement.PointerPressedEvent,
+            new PointerEventHandler(SendButton_PointerPressed),
+            true);
+        SendButton.AddHandler(
+            UIElement.PointerReleasedEvent,
+            new PointerEventHandler(SendButton_PointerReleased),
+            true);
+        SendButton.AddHandler(
+            UIElement.PointerCanceledEvent,
+            new PointerEventHandler(SendButton_PointerCanceled),
+            true);
+        SendButton.AddHandler(
+            UIElement.PointerCaptureLostEvent,
+            new PointerEventHandler(SendButton_PointerCanceled),
+            true);
     }
 
     private void OnNativeEvent(IntPtr kindPtr, IntPtr messagePtr, IntPtr userData)
@@ -244,11 +278,16 @@ public sealed partial class MainWindow : Window
 
     private void DisposeVoiceCaptureForExit()
     {
-        // 关闭窗口时直接关闭 WinMM 录音别名，避免麦克风句柄拖住退出。
+        // 关闭窗口时释放 WinRT/WinMM 录音资源，避免麦克风句柄拖住退出。
         activeVoiceRecordingPath = "";
         voiceRecording = false;
         voiceRecordingStopping = false;
         voiceStartTask = null;
+        ignoreNextVoiceCaptureLost = false;
+        voiceStorageFile = null;
+        voiceRecordingUsesMci = false;
+        voiceMediaCapture?.Dispose();
+        voiceMediaCapture = null;
         try
         {
             CloseVoiceRecorder();
@@ -308,6 +347,17 @@ public sealed partial class MainWindow : Window
         return true;
     }
 
+    private bool TryReadUserInput(TextBox userBox, out string user)
+    {
+        user = userBox.Text.Trim();
+        if (user.Length == 0)
+        {
+            AddLine("error", "User is required.");
+            return false;
+        }
+        return true;
+    }
+
     private bool ApplyRelayPoolEnvironment()
     {
         var configPath = AppConfigPath();
@@ -328,7 +378,7 @@ public sealed partial class MainWindow : Window
 
     private async void HostJoin_Click(object sender, RoutedEventArgs e)
     {
-        if (!TryReadSessionInputs(HostRoomBox, HostUserBox, out var room, out var user))
+        if (!TryReadUserInput(HostUserBox, out var user))
         {
             return;
         }
@@ -338,7 +388,7 @@ public sealed partial class MainWindow : Window
         }
 
         var nickname = MemberDefaultNicknameBox.Text.Trim();
-        var selected = await ShowRoomInstancePickerAsync(room, user, "host");
+        var selected = await ShowRoomInstancePickerAsync("", user, "host");
         if (selected is null) return;
 
         ClearAttachmentMemberStates();
@@ -351,7 +401,8 @@ public sealed partial class MainWindow : Window
             MemberKeyPassBox.Password);
         if (ok != 0)
         {
-            roomName = room;
+            activeRoomDir = selected.roomDir;
+            roomName = selected.roomName;
             ResetParticipants();
             SetSessionMode(SessionMode.ConnectingHost);
         }
@@ -383,6 +434,7 @@ public sealed partial class MainWindow : Window
             MemberKeyPassBox.Password);
         if (ok != 0)
         {
+            activeRoomDir = LatestRoomDir(room, user, "host");
             roomName = room;
             ResetParticipants();
             SetSessionMode(SessionMode.ConnectingHost);
@@ -391,7 +443,7 @@ public sealed partial class MainWindow : Window
 
     private async void JoinExisting_Click(object sender, RoutedEventArgs e)
     {
-        if (!TryReadSessionInputs(JoinRoomBox, JoinUserBox, out var room, out var user))
+        if (!TryReadUserInput(JoinUserBox, out var user))
         {
             return;
         }
@@ -401,7 +453,7 @@ public sealed partial class MainWindow : Window
         }
 
         var nickname = MemberDefaultNicknameBox.Text.Trim();
-        var selected = await ShowRoomInstancePickerAsync(room, user, "client");
+        var selected = await ShowRoomInstancePickerAsync("", user, "client");
         if (selected is null) return;
 
         ClearAttachmentMemberStates();
@@ -414,7 +466,8 @@ public sealed partial class MainWindow : Window
             MemberKeyPassBox.Password);
         if (ok != 0)
         {
-            roomName = room;
+            activeRoomDir = selected.roomDir;
+            roomName = selected.roomName;
             ResetParticipants();
             AddPendingParticipant(user);
             SetSessionMode(SessionMode.ConnectingJoin);
@@ -448,6 +501,7 @@ public sealed partial class MainWindow : Window
             MemberKeyPassBox.Password);
         if (ok != 0)
         {
+            activeRoomDir = LatestRoomDir(room, user, "client");
             roomName = room;
             ResetParticipants();
             AddPendingParticipant(user);
@@ -514,6 +568,7 @@ public sealed partial class MainWindow : Window
     private async void SendButton_PointerPressed(object sender, PointerRoutedEventArgs e)
     {
         if (SelectedSendMode() != "Voice" || !SendButton.IsEnabled) return;
+        if (IsSecondaryPointer(e)) return;
 
         e.Handled = true;
         SendButton.CapturePointer(e.Pointer);
@@ -533,15 +588,18 @@ public sealed partial class MainWindow : Window
         if (SelectedSendMode() != "Voice") return;
 
         e.Handled = true;
-        SendButton.ReleasePointerCapture(e.Pointer);
         suppressVoiceClick = true;
         if (voiceStartTask is not null && !voiceStartTask.IsCompleted)
         {
             stopVoiceAfterStart = true;
             sendVoiceAfterStart = true;
+            ignoreNextVoiceCaptureLost = true;
+            SendButton.ReleasePointerCapture(e.Pointer);
             return;
         }
         await StopVoiceRecordingAsync(send: true);
+        ignoreNextVoiceCaptureLost = true;
+        SendButton.ReleasePointerCapture(e.Pointer);
     }
 
     private async void SendButton_PointerCanceled(object sender, PointerRoutedEventArgs e)
@@ -549,15 +607,30 @@ public sealed partial class MainWindow : Window
         if (SelectedSendMode() != "Voice") return;
 
         e.Handled = true;
-        SendButton.ReleasePointerCapture(e.Pointer);
+        if (ignoreNextVoiceCaptureLost)
+        {
+            ignoreNextVoiceCaptureLost = false;
+            return;
+        }
         suppressVoiceClick = true;
         if (voiceStartTask is not null && !voiceStartTask.IsCompleted)
         {
             stopVoiceAfterStart = true;
             sendVoiceAfterStart = false;
+            ignoreNextVoiceCaptureLost = true;
+            SendButton.ReleasePointerCapture(e.Pointer);
             return;
         }
         await StopVoiceRecordingAsync(send: false);
+        ignoreNextVoiceCaptureLost = true;
+        SendButton.ReleasePointerCapture(e.Pointer);
+    }
+
+    private static bool IsSecondaryPointer(PointerRoutedEventArgs e)
+    {
+        var point = e.GetCurrentPoint(null);
+        var properties = point.Properties;
+        return properties.IsRightButtonPressed || properties.IsMiddleButtonPressed;
     }
 
     private void SendModeBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -676,29 +749,64 @@ public sealed partial class MainWindow : Window
         return await picker.PickSingleFileAsync();
     }
 
-    private System.Threading.Tasks.Task StartVoiceRecordingAsync()
+    private async System.Threading.Tasks.Task StartVoiceRecordingAsync()
     {
         if (voiceRecording || voiceRecordingStopping || voiceStartTask is { IsCompleted: false })
         {
-            return System.Threading.Tasks.Task.CompletedTask;
+            return;
         }
 
         try
         {
             Directory.CreateDirectory(VoiceRecordingDirectory());
             var file = UniqueVoiceRecordingPath();
-
-            CloseVoiceRecorder();
-            SendMciCommand($"open new type waveaudio alias {VoiceRecorderAlias}");
-            SendMciCommand($"record {VoiceRecorderAlias}");
             activeVoiceRecordingPath = file;
             voiceTargetAtRecordStart = PrivateTargetBox.Text.Trim();
+
+            try
+            {
+                voiceMediaCapture?.Dispose();
+                voiceMediaCapture = new MediaCapture();
+                await voiceMediaCapture.InitializeAsync(new MediaCaptureInitializationSettings
+                {
+                    StreamingCaptureMode = StreamingCaptureMode.Audio
+                });
+
+                var folder = await StorageFolder.GetFolderFromPathAsync(VoiceRecordingDirectory());
+                voiceStorageFile = await folder.CreateFileAsync(
+                    Path.GetFileName(file),
+                    CreationCollisionOption.ReplaceExisting);
+                await voiceMediaCapture.StartRecordToStorageFileAsync(
+                    MediaEncodingProfile.CreateWav(AudioEncodingQuality.Medium),
+                    voiceStorageFile);
+                voiceRecordingUsesMci = false;
+            }
+            catch (Exception mediaEx) when (mediaEx is UnauthorizedAccessException or InvalidOperationException or IOException or COMException)
+            {
+                voiceMediaCapture?.Dispose();
+                voiceMediaCapture = null;
+                voiceStorageFile = null;
+
+                CloseVoiceRecorder();
+                SendMciCommand($"open new type waveaudio alias {VoiceRecorderAlias}");
+                TryMciCommand($"set {VoiceRecorderAlias} time format ms");
+                TryMciCommand($"set {VoiceRecorderAlias} bitspersample 16");
+                TryMciCommand($"set {VoiceRecorderAlias} samplespersec 16000");
+                TryMciCommand($"set {VoiceRecorderAlias} channels 1");
+                SendMciCommand($"record {VoiceRecorderAlias}");
+                voiceRecordingUsesMci = true;
+            }
+
             voiceRecording = true;
             SendButton.Content = UiText("Release", "松开");
         }
         catch (Exception ex) when (ex is UnauthorizedAccessException or InvalidOperationException or IOException or COMException)
         {
             CloseVoiceRecorder();
+            voiceMediaCapture?.Dispose();
+            voiceMediaCapture = null;
+            voiceStorageFile = null;
+            voiceRecordingUsesMci = false;
             activeVoiceRecordingPath = "";
             voiceRecording = false;
             if (!isClosing)
@@ -707,14 +815,13 @@ public sealed partial class MainWindow : Window
                 AddLine("error", UiText("Voice recording failed: ", "语音录制失败：") + ex.Message);
             }
         }
-        return System.Threading.Tasks.Task.CompletedTask;
     }
 
-    private System.Threading.Tasks.Task StopVoiceRecordingAsync(bool send)
+    private async System.Threading.Tasks.Task StopVoiceRecordingAsync(bool send)
     {
         if ((!voiceRecording && string.IsNullOrWhiteSpace(activeVoiceRecordingPath)) || voiceRecordingStopping)
         {
-            return System.Threading.Tasks.Task.CompletedTask;
+            return;
         }
 
         voiceRecordingStopping = true;
@@ -724,31 +831,53 @@ public sealed partial class MainWindow : Window
 
         try
         {
-            try
+            if (voiceRecordingUsesMci)
             {
-                SendMciCommand($"stop {VoiceRecorderAlias}");
+                try
+                {
+                    SendMciCommand($"stop {VoiceRecorderAlias}");
+                }
+                catch
+                {
+                    // 录音设备在极短点击或权限变化时可能已经停止；继续尝试关闭别名。
+                }
+                if (send)
+                {
+                    SendMciCommand($"save {VoiceRecorderAlias} \"{path}\"");
+                }
+                CloseVoiceRecorder();
             }
-            catch
+            else if (voiceMediaCapture is not null)
             {
-                // 录音设备在极短点击或权限变化时可能已经停止；继续尝试关闭别名。
+                await voiceMediaCapture.StopRecordAsync();
+                voiceMediaCapture.Dispose();
+                voiceMediaCapture = null;
+                voiceStorageFile = null;
             }
-            if (send)
+            else
             {
-                SendMciCommand($"save {VoiceRecorderAlias} \"{path}\"");
+                throw new InvalidOperationException("voice recorder is not active");
             }
-            CloseVoiceRecorder();
 
             if (!send)
             {
                 DeleteFileIfExists(path);
-                return System.Threading.Tasks.Task.CompletedTask;
+                return;
             }
 
             if (!File.Exists(path) || new FileInfo(path).Length <= 0)
             {
                 DeleteFileIfExists(path);
                 AddLine("error", UiText("Voice recording is empty.", "语音录制为空。"));
-                return System.Threading.Tasks.Task.CompletedTask;
+                return;
+            }
+
+            var wav = ReadWavPreviewInfo(path);
+            if (wav.DurationSeconds < MinVoiceRecordingSeconds)
+            {
+                DeleteFileIfExists(path);
+                AddLine("error", UiText("Voice recording is too short.", "语音录制时间太短。"));
+                return;
             }
 
             var target = voiceTargetAtRecordStart;
@@ -760,9 +889,12 @@ public sealed partial class MainWindow : Window
                 AddLine("error", UiText("Voice send failed.", "语音发送失败。"));
             }
         }
-        catch (Exception ex) when (ex is InvalidOperationException or IOException or COMException or UnauthorizedAccessException)
+        catch (Exception ex) when (ex is InvalidOperationException or IOException or InvalidDataException or COMException or UnauthorizedAccessException)
         {
             CloseVoiceRecorder();
+            voiceMediaCapture?.Dispose();
+            voiceMediaCapture = null;
+            voiceStorageFile = null;
             DeleteFileIfExists(path);
             if (!isClosing)
             {
@@ -775,21 +907,27 @@ public sealed partial class MainWindow : Window
             voiceTargetAtRecordStart = "";
             stopVoiceAfterStart = false;
             sendVoiceAfterStart = false;
+            ignoreNextVoiceCaptureLost = false;
             voiceStartTask = null;
+            voiceStorageFile = null;
+            voiceRecordingUsesMci = false;
             if (!isClosing)
             {
                 UpdateSendButtonContent();
             }
         }
-        return System.Threading.Tasks.Task.CompletedTask;
     }
 
-    private static string VoiceRecordingDirectory()
+    private string VoiceRecordingDirectory()
     {
-        return Path.Combine(AppContext.BaseDirectory, "logs", "voice-recordings");
+        if (string.IsNullOrWhiteSpace(activeRoomDir))
+        {
+            throw new InvalidOperationException("room directory is not ready");
+        }
+        return Path.Combine(activeRoomDir, "voice");
     }
 
-    private static string UniqueVoiceRecordingPath()
+    private string UniqueVoiceRecordingPath()
     {
         return Path.Combine(
             VoiceRecordingDirectory(),
@@ -808,6 +946,11 @@ public sealed partial class MainWindow : Window
             ? text.ToString()
             : "unknown multimedia error";
         throw new InvalidOperationException(message);
+    }
+
+    private static bool TryMciCommand(string command)
+    {
+        return mciSendString(command, null, 0, IntPtr.Zero) == 0;
     }
 
     private static void CloseVoiceRecorder()
@@ -902,6 +1045,14 @@ public sealed partial class MainWindow : Window
             sizeBytes,
             isOwnLocalAttachment,
             AttachmentMemberStateForSender(sender));
+
+        if (kind == "voice" &&
+            (previewInfo.IsOwnLocalAttachment || previewInfo.MemberState != AttachmentMemberState.Blocked) &&
+            TryCreateAttachmentPreview(previewInfo, out var voicePreview, out _))
+        {
+            RenderBubble(kind, SenderLabel(sender), voicePreview, isOwnLocalAttachment, true);
+            return true;
+        }
 
         if (ShouldAutoPreviewAttachment(previewInfo) &&
             TryCreateAttachmentPreview(previewInfo, out var preview, out _))
@@ -1176,6 +1327,11 @@ public sealed partial class MainWindow : Window
 
     private bool IsOwnParticipant(string participant)
     {
+        if (!string.IsNullOrWhiteSpace(ownActorId))
+        {
+            return ParticipantTrustKeys(participant)
+                .Any(key => string.Equals(key, ownActorId, StringComparison.OrdinalIgnoreCase));
+        }
         return IsOwnSender(ParticipantDisplayName(participant));
     }
 
@@ -1334,6 +1490,7 @@ public sealed partial class MainWindow : Window
         if (sessionMode == SessionMode.Host)
         {
             var displayName = HostUserBox.Text.Trim();
+            ownActorId = "host";
             MarkVerifiedMember(displayName.Length == 0 ? "host" : displayName, "host", pendingLocalIdentityFingerprint);
             return;
         }
@@ -2015,12 +2172,15 @@ public sealed partial class MainWindow : Window
 
     private bool IsOwnActor(string actorId, string sender)
     {
-        // Native messages carry both a display name and a stable actorId. Host
-        // messages use actorId="host", so display-name-only checks would render
-        // the Host's own messages on the left.
+        // native 消息携带稳定 actorId。只要 actorId 存在，UI 就按协议身份判断，
+        // 避免同名成员或 nickname 让本机消息左右侧错位。
         if (!string.IsNullOrWhiteSpace(actorId))
         {
             var normalizedActorId = actorId.Trim();
+            if (!string.IsNullOrWhiteSpace(ownActorId))
+            {
+                return string.Equals(normalizedActorId, ownActorId, StringComparison.OrdinalIgnoreCase);
+            }
             if (sessionMode == SessionMode.Host &&
                 string.Equals(normalizedActorId, "host", StringComparison.OrdinalIgnoreCase))
             {
@@ -2036,6 +2196,7 @@ public sealed partial class MainWindow : Window
                     return true;
                 }
             }
+            return false;
         }
 
         return IsOwnSender(sender);
@@ -2073,6 +2234,7 @@ public sealed partial class MainWindow : Window
         if (mode == SessionMode.None)
         {
             roomName = "-";
+            activeRoomDir = "";
         }
         RefreshRoomPanel();
     }
@@ -2086,6 +2248,13 @@ public sealed partial class MainWindow : Window
 
     private void UpdateSessionStatus(string kind, string message)
     {
+        if (kind == "log" && message.StartsWith("own_actor_id ", StringComparison.OrdinalIgnoreCase))
+        {
+            ownActorId = message["own_actor_id ".Length..].Trim();
+            MarkLocalIdentityIfPossible();
+            return;
+        }
+
         if (string.Equals(kind, "relay_status", StringComparison.OrdinalIgnoreCase))
         {
             relayStatusText = string.IsNullOrWhiteSpace(message) ? "-" : message.Trim();
@@ -2096,6 +2265,11 @@ public sealed partial class MainWindow : Window
         if (kind == "error")
         {
             ShowInfo(message, InfoBarSeverity.Error);
+            if (IsTerminalSessionMessage(message))
+            {
+                SetSessionMode(SessionMode.None);
+                ResetParticipants();
+            }
             return;
         }
 
@@ -2103,15 +2277,7 @@ public sealed partial class MainWindow : Window
 
         RefreshRoomPanel();
 
-        if (message == "Session stopped" ||
-            message == "Stopped" ||
-            message == "Room is no longer available" ||
-            message.StartsWith("Room is no longer available:", StringComparison.OrdinalIgnoreCase) ||
-            message == "Signaling closed" ||
-            message == "Signaling connection ended" ||
-            message == "Signaling failed" ||
-            message == "Host identity verification failed" ||
-            message == "Username already in room")
+        if (IsTerminalSessionMessage(message))
         {
             SetSessionMode(SessionMode.None);
             ResetParticipants();
@@ -2119,13 +2285,24 @@ public sealed partial class MainWindow : Window
             return;
         }
 
-        if (message.StartsWith("Room created: ", StringComparison.OrdinalIgnoreCase))
+        if (message.StartsWith("Room created: ", StringComparison.OrdinalIgnoreCase) ||
+            message.StartsWith("Room reattached: ", StringComparison.OrdinalIgnoreCase))
         {
+            var reattached = message.StartsWith("Room reattached: ", StringComparison.OrdinalIgnoreCase);
+            var shownRoom = message[(reattached ? "Room reattached: " : "Room created: ").Length..].Trim();
+            if (string.IsNullOrWhiteSpace(activeRoomDir))
+            {
+                activeRoomDir = LatestRoomDir(shownRoom, HostUserBox.Text.Trim(), "host");
+            }
             SetSessionMode(SessionMode.Host);
             AddParticipant(HostUserBox.Text.Trim());
             MarkLocalIdentityIfPossible();
             ReloadMessageHistory();
-            ShowInfo(message, InfoBarSeverity.Success);
+            ShowInfo(
+                reattached
+                    ? UiText($"Room reattached: {shownRoom}", $"已重新加入房间：{shownRoom}")
+                    : UiText($"Room created: {shownRoom}", $"房间已创建：{shownRoom}"),
+                InfoBarSeverity.Success);
             return;
         }
 
@@ -2140,6 +2317,10 @@ public sealed partial class MainWindow : Window
         if (message.StartsWith("Joined room", StringComparison.OrdinalIgnoreCase) ||
             message.StartsWith("Rejoined room", StringComparison.OrdinalIgnoreCase))
         {
+            if (string.IsNullOrWhiteSpace(activeRoomDir))
+            {
+                activeRoomDir = LatestRoomDir(roomName, JoinUserBox.Text.Trim(), "client");
+            }
             SetSessionMode(SessionMode.Join);
             MarkLocalIdentityIfPossible();
             ReloadMessageHistory();
@@ -2155,6 +2336,29 @@ public sealed partial class MainWindow : Window
         {
             ShowInfo(message, InfoBarSeverity.Success);
         }
+    }
+
+    private static bool IsTerminalSessionMessage(string message)
+    {
+        if (string.IsNullOrWhiteSpace(message)) return false;
+
+        return message == "Session stopped" ||
+            message == "Stopped" ||
+            message == "Room is no longer available" ||
+            message.StartsWith("Room is no longer available:", StringComparison.OrdinalIgnoreCase) ||
+            message.Equals("room not found", StringComparison.OrdinalIgnoreCase) ||
+            message.Equals("room closed", StringComparison.OrdinalIgnoreCase) ||
+            message == "Signaling closed" ||
+            message == "Signaling connection ended" ||
+            message == "Signaling failed" ||
+            message == "Host identity changed" ||
+            message == "Host identity verification failed" ||
+            message == "Host approval verification failed" ||
+            message == "Host rejected join request" ||
+            message.StartsWith("Host rejected client:", StringComparison.OrdinalIgnoreCase) ||
+            message == "Member certificate signing response missing" ||
+            message == "Member certificate install failed" ||
+            message == "Username already in room";
     }
 
     private void ShowInfo(string message, InfoBarSeverity severity)
@@ -2293,6 +2497,7 @@ public sealed partial class MainWindow : Window
         pendingParticipants.Clear();
         pendingJoinNamesByRequestId.Clear();
         pendingJoinRequestIdByParticipant.Clear();
+        ownActorId = "";
         ClearAttachmentMemberStates();
         RefreshParticipants();
     }
@@ -2501,6 +2706,13 @@ public sealed partial class MainWindow : Window
         {
             if (buffer != IntPtr.Zero) Marshal.FreeHGlobal(buffer);
         }
+    }
+
+    private string LatestRoomDir(string room, string user, string role)
+    {
+        return LoadLocalRoomInstances(room, user, role)
+            .OrderByDescending(item => item.modifiedTimeUnixMs)
+            .FirstOrDefault()?.roomDir ?? "";
     }
 
     private void RenderRoomInstanceChoices(IReadOnlyList<LocalRoomInstanceInfo> rooms)

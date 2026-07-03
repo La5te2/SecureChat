@@ -514,6 +514,7 @@ SignalingServer::SignalingServer(uint16_t port)
         std::lock_guard<std::mutex> lock(mMutex);
         for (const auto& roomId : mStateStore.loadOpenRooms()) {
             auto& room = mRooms[roomId];
+            mRegistry.restoreOpenRoom(roomId);
             loadMembershipEventsLocked(roomId, room);
             for (const auto& pending : mStateStore.loadPendingJoins(roomId)) {
                 room.pendingJoins[pending.requestId] = pending.payload;
@@ -525,6 +526,7 @@ SignalingServer::SignalingServer(uint16_t port)
 
     std::cout << "[signal] server running on " << mUrlScheme << "://"
               << *config.bindAddress << ":" << mServer->port() << std::endl;
+    std::cout << "[signal] state db: " << mStateStore.path() << std::endl;
     if (tlsEnabled && tlsMaterial.generatedLocal) {
         std::cout << "[signal] generated local WSS certificate cert=" << tlsMaterial.certFile
                   << " key=" << tlsMaterial.keyFile
@@ -807,6 +809,7 @@ void SignalingServer::handleCreateRoom(rtc::WebSocket* key, const json& data) {
     safeSend(ws, {
         {"type", "room_created"},
         {"roomId", roomId},
+        {"reattached", hostReattached},
         {"userId", account.userId},
         {"username", account.username},
         {"displayName", displayName},
@@ -1664,6 +1667,7 @@ void SignalingServer::handleForumSync(rtc::WebSocket* key, const json& data) {
     std::string roomId;
     std::string errorMessage;
     json records = json::array();
+    json membershipEvents = json::array();
     {
         std::lock_guard<std::mutex> lock(mMutex);
         auto sender = findClient(key);
@@ -1676,6 +1680,9 @@ void SignalingServer::handleForumSync(rtc::WebSocket* key, const json& data) {
         }
         else {
             roomId = sender->roomId;
+            for (const auto& event : mStateStore.loadMembershipEvents(roomId)) {
+                membershipEvents.push_back(event.payload);
+            }
             for (const auto& record : mStateStore.loadForumRecords(roomId, chat::forum_board::MaxRecordsPerSync)) {
                 records.push_back(record.payload);
             }
@@ -1686,7 +1693,12 @@ void SignalingServer::handleForumSync(rtc::WebSocket* key, const json& data) {
         safeSend(senderWs, {{"type", "error"}, {"message", errorMessage}});
         return;
     }
-    safeSend(senderWs, {{"type", chat::forum_board::RecordsType}, {"roomId", roomId}, {"records", records}});
+    safeSend(senderWs, {
+        {"type", chat::forum_board::RecordsType},
+        {"roomId", roomId},
+        {"membershipEvents", membershipEvents},
+        {"records", records}
+    });
     std::cout << "[signal] forum sync room " << roomId
               << " records=" << records.size() << std::endl;
 }

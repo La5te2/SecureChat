@@ -23,6 +23,7 @@ namespace attachment = chat::attachment;
 constexpr std::size_t RelayRouteNonceBytes = 16;
 constexpr std::size_t ReliableMessageIdBytes = 16;
 constexpr std::size_t ReliableCacheLimit = 4096;
+constexpr std::size_t EarlyAttachmentChunkLimit = 512;
 constexpr int ReliableRetryLimit = 3;
 constexpr int RelayRetryBaseSeconds = 5;
 constexpr int RelayRetryMaxSeconds = 60;
@@ -144,6 +145,16 @@ std::string relayLabel(const std::string& url) {
     const auto scheme = url.find("://");
     const auto start = scheme == std::string::npos ? 0 : scheme + 3;
     return url.substr(start);
+}
+
+std::string earlyAttachmentKey(const std::string& senderKey, const std::string& transferId) {
+    return senderKey + "\n" + transferId;
+}
+
+std::string membershipEventDigest(json event) {
+    event.erase("payloadDigest");
+    event.erase("control");
+    return chat::cert_utils::sha256Hex(event.dump());
 }
 
 std::chrono::seconds relayRetryDelay(int failureStreak) {
@@ -322,8 +333,9 @@ ClientSessionCore::ClientSessionCore(
     // Host/Client 启动必须具备 PKI 配置。
     // 环境变量缺失会在这里失败，且不会发送任何入房消息。
     mIdentity = std::move(identity);
-    mPendingTransfers.setRoomContext(mRoomId, mRoomToken);
+    mPendingTransfers.setRoomContext("client", mUsername, mRoomId, mRoomToken);
     mMessageHistory = std::make_unique<chat::local_message::Store>(
+        "client",
         mRoomId,
         mRoomToken,
         mUsername);
@@ -1155,6 +1167,7 @@ void ClientSessionCore::handleRelayMessage(const Message& msg) {
         out.payload["name"] = pending.name;
         chatEmit(mCallbacks.onMessage, out.toJson());
         chatEmit(mCallbacks.onStatus, "Encrypted attachment meta received: " + pending.name);
+        drainEarlyAttachmentChunks(senderKey, pending.transferId);
         return;
     }
 
@@ -1178,7 +1191,12 @@ void ClientSessionCore::handleRelayBinaryChunk(const std::string& senderKey, con
     std::string transferId;
     try {
         transferId = attachment::transferIdFromMessage(msg);
-        if (transferId != mPendingTransfers.activeTransferId(senderKey)) {
+        const auto activeTransferId = mPendingTransfers.activeTransferId(senderKey);
+        if (activeTransferId.empty()) {
+            if (bufferEarlyAttachmentChunk(senderKey, transferId, msg)) return;
+            throw std::runtime_error("attachment chunk arrived before meta and early buffer is full");
+        }
+        if (transferId != activeTransferId) {
             throw std::runtime_error("attachment chunk transfer id does not match pending meta");
         }
         const auto result = mPendingTransfers.appendChunk(
@@ -1207,6 +1225,29 @@ void ClientSessionCore::handleRelayBinaryChunk(const std::string& senderKey, con
     catch (const std::exception& e) {
         mPendingTransfers.clear(senderKey);
         chatEmit(mCallbacks.onError, std::string("Encrypted attachment receive failed from ") + senderKey + ": " + e.what());
+    }
+}
+
+bool ClientSessionCore::bufferEarlyAttachmentChunk(
+    const std::string& senderKey,
+    const std::string& transferId,
+    const Message& msg) {
+    if (transferId.empty()) return false;
+    auto& chunks = mEarlyAttachmentChunks[earlyAttachmentKey(senderKey, transferId)];
+    if (chunks.size() >= EarlyAttachmentChunkLimit) return false;
+    chunks.push_back(msg);
+    return true;
+}
+
+void ClientSessionCore::drainEarlyAttachmentChunks(const std::string& senderKey, const std::string& transferId) {
+    const auto key = earlyAttachmentKey(senderKey, transferId);
+    auto found = mEarlyAttachmentChunks.find(key);
+    if (found == mEarlyAttachmentChunks.end()) return;
+
+    auto chunks = std::move(found->second);
+    mEarlyAttachmentChunks.erase(found);
+    for (const auto& chunk : chunks) {
+        handleRelayBinaryChunk(senderKey, chunk);
     }
 }
 
@@ -2061,6 +2102,7 @@ void ClientSessionCore::handleSignalingMessage(const SignalingFrame& frame) {
                 mGroupKeyEpoch = epoch;
                 chatEmit(mCallbacks.onStatus, "Room group key restored");
                 connectRemainingRelays();
+                requestForumSync();
             }
             catch (const std::exception& e) {
                 chatEmit(mCallbacks.onError, std::string("Stored group state rejected: ") + e.what());
@@ -2156,7 +2198,9 @@ void ClientSessionCore::handleSignalingMessage(const SignalingFrame& frame) {
             handleRelayMessage(msg);
         }
         else if (type == chat::forum_board::RecordsType) {
-            handleForumRecords(j.value("records", json::array()));
+            handleForumRecords(
+                j.value("records", json::array()),
+                j.value("membershipEvents", json::array()));
         }
         else if (type == "moderation") {
             // Server 转发的管理通知。它不是终止性错误；
@@ -2295,15 +2339,18 @@ void ClientSessionCore::sendForumPost(const std::string& text) {
     }
 
     std::vector<chat::forum_board::Recipient> recipients;
+    std::unordered_set<std::string> recipientFingerprints;
     recipients.push_back({
         mClientId,
         mDisplayName.empty() ? mUsername : mDisplayName,
         mIdentity.fingerprint(),
         mIdentity.signJoinRoom(mRoomId, mUsername, mMemberKeys.publicKey)
     });
+    recipientFingerprints.insert(mIdentity.fingerprint());
     {
         std::lock_guard<std::mutex> lock(mMembersMutex);
         for (const auto& [memberId, fingerprint] : mMemberFingerprintsById) {
+            if (fingerprint.empty() || recipientFingerprints.find(fingerprint) != recipientFingerprints.end()) continue;
             const auto identity = mMemberIdentityObjectsById.find(memberId);
             if (identity == mMemberIdentityObjectsById.end()) continue;
             const auto displayName = mMemberNamesById.find(memberId);
@@ -2313,6 +2360,12 @@ void ClientSessionCore::sendForumPost(const std::string& text) {
                 fingerprint,
                 identity->second
             });
+            recipientFingerprints.insert(fingerprint);
+        }
+        for (const auto& [fingerprint, recipient] : mForumRecipientsByFingerprint) {
+            if (fingerprint.empty() || recipientFingerprints.find(fingerprint) != recipientFingerprints.end()) continue;
+            recipients.push_back(recipient);
+            recipientFingerprints.insert(fingerprint);
         }
     }
 
@@ -2403,7 +2456,13 @@ void ClientSessionCore::requestForumSync() {
     chatEmit(mCallbacks.onStatus, "Forum sync requested on relays: " + std::to_string(sent));
 }
 
-void ClientSessionCore::handleForumRecords(const json& records) {
+void ClientSessionCore::handleForumRecords(const json& records, const json& membershipEvents) {
+    if (membershipEvents.is_array()) {
+        for (const auto& event : membershipEvents) {
+            rememberForumMembershipEvent(event);
+        }
+    }
+
     if (!records.is_array()) return;
     std::size_t opened = 0;
     for (const auto& record : records) {
@@ -2413,6 +2472,65 @@ void ClientSessionCore::handleForumRecords(const json& records) {
     }
     if (opened > 0) {
         chatEmit(mCallbacks.onStatus, "Forum records synced: " + std::to_string(opened));
+    }
+}
+
+bool ClientSessionCore::rememberForumMembershipEvent(const json& event) {
+    if (!event.is_object() || !mIdentity.enabled()) return false;
+    const auto eventType = event.value("eventType", "");
+    const auto fingerprint = event.value("memberFingerprint", "");
+    const auto digest = event.value("payloadDigest", "");
+    const auto control = event.find("control");
+    if ((eventType != "approve" && eventType != "evict") ||
+        fingerprint.empty() ||
+        digest.empty() ||
+        control == event.end() ||
+        !control->is_object() ||
+        event.value("roomId", "") != mRoomToken) {
+        return false;
+    }
+    if (digest != membershipEventDigest(event)) {
+        chatEmit(mCallbacks.onStatus, "Forum membership event skipped: digest mismatch");
+        return false;
+    }
+
+    try {
+        const auto signer = mIdentity.verifyRoomControl(
+            mRoomId,
+            mRoomToken,
+            "membership_" + eventType,
+            event.value("epoch", 0ULL),
+            digest,
+            *control);
+        std::string hostFingerprint;
+        {
+            std::lock_guard<std::mutex> lock(mMembersMutex);
+            const auto host = mMemberFingerprintsById.find(chat::protocol::HostActorId);
+            if (host != mMemberFingerprintsById.end()) hostFingerprint = host->second;
+        }
+        if (hostFingerprint.empty() || signer.fingerprint != hostFingerprint) {
+            return false;
+        }
+
+        std::lock_guard<std::mutex> lock(mMembersMutex);
+        if (eventType == "evict") {
+            mForumRecipientsByFingerprint.erase(fingerprint);
+            return true;
+        }
+
+        const auto identity = event.find("identity");
+        if (identity == event.end() || !identity->is_object()) return false;
+        mForumRecipientsByFingerprint[fingerprint] = {
+            event.value("clientId", fingerprint),
+            event.value("displayName", event.value("username", fingerprint)),
+            fingerprint,
+            *identity
+        };
+        return true;
+    }
+    catch (const std::exception& e) {
+        chatEmit(mCallbacks.onStatus, std::string("Forum membership event skipped: ") + e.what());
+        return false;
     }
 }
 

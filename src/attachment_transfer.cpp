@@ -130,10 +130,6 @@ std::size_t attachmentMaxBytes() {
     }
 }
 
-std::filesystem::path receiveRootDirectory() {
-    return std::filesystem::current_path() / "logs";
-}
-
 void ensurePrivateDirectory(const std::filesystem::path& dir) {
     std::error_code ec;
     std::filesystem::create_directories(dir, ec);
@@ -156,41 +152,38 @@ struct CacheFile {
     std::filesystem::file_time_type modified{};
 };
 
-std::vector<std::filesystem::path> managedReceiveDirectories(const std::filesystem::path& root) {
-    return {
-        root / "images",
-        root / "voice",
-        root / "files"
-    };
-}
-
-std::uintmax_t pruneReceiveCacheFor(std::uintmax_t incomingBytes) {
+std::uintmax_t pruneReceiveCacheFor(const std::filesystem::path& dir, std::uintmax_t incomingBytes) {
     const auto limit = receiveCacheLimitBytes();
     if (incomingBytes > limit) {
         throw std::runtime_error("attachment cache limit is smaller than incoming attachment");
     }
 
-    const auto root = receiveRootDirectory();
-    ensurePrivateDirectory(root);
-    for (const auto& dir : managedReceiveDirectories(root)) {
-        ensurePrivateDirectory(dir);
-    }
+    ensurePrivateDirectory(dir);
 
     std::vector<CacheFile> files;
     std::uintmax_t total = 0;
     std::error_code ec;
-    for (const auto& dir : managedReceiveDirectories(root)) {
-        if (!std::filesystem::exists(dir, ec)) continue;
-
-        for (const auto& entry : std::filesystem::recursive_directory_iterator(dir, ec)) {
-            if (ec) break;
-            if (!entry.is_regular_file(ec)) continue;
+    if (std::filesystem::exists(dir, ec)) {
+        for (std::filesystem::recursive_directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
+            const auto& entry = *it;
+            if (!entry.is_regular_file(ec)) {
+                ec.clear();
+                continue;
+            }
             const auto size = entry.file_size(ec);
-            if (ec) continue;
+            if (ec) {
+                ec.clear();
+                continue;
+            }
+            const auto modified = entry.last_write_time(ec);
+            if (ec) {
+                ec.clear();
+                continue;
+            }
             total += size;
-            files.push_back({entry.path(), size, entry.last_write_time(ec)});
-            ec.clear();
+            files.push_back({entry.path(), size, modified});
         }
+        ec.clear();
     }
 
     if (total + incomingBytes <= limit) return total;
@@ -209,7 +202,7 @@ std::uintmax_t pruneReceiveCacheFor(std::uintmax_t incomingBytes) {
         if (total + incomingBytes <= limit) return total;
     }
 
-    throw std::runtime_error("attachment cache is full; clear logs/ or increase SECURECHAT_LOGS_MAX_BYTES");
+    throw std::runtime_error("attachment cache is full; clear this room attachment cache or increase SECURECHAT_LOGS_MAX_BYTES");
 }
 
 const char* defaultFileName(Kind kind) {
@@ -375,7 +368,8 @@ bool verifyMerkleProof(
         }
         index /= 2;
     }
-    return node == normalizeSha256Hex(root, "attachment merkle root");
+    return normalizeSha256Hex(node, "computed attachment merkle root") ==
+        normalizeSha256Hex(root, "attachment merkle root");
 }
 
 std::size_t payloadSizeField(const Message& msg, const std::string& name, const std::string& label) {
@@ -479,22 +473,19 @@ std::string safeTransferName(const std::string& name, const std::string& fallbac
     return safe;
 }
 
-std::string receiveDirectory(Kind kind) {
-    // 按类型分开放置接收文件，简化 UI 查找和清理。
-    const auto leaf = kind == Kind::Image ? "images" : (kind == Kind::Voice ? "voice" : "files");
-    const auto root = receiveRootDirectory();
-    ensurePrivateDirectory(root);
-    auto dir = root / leaf;
-    ensurePrivateDirectory(dir);
-    return pathToUtf8(dir);
-}
+std::string receiveDirectory(
+    Kind kind,
+    const std::string& role,
+    const std::string& systemUsername,
+    const std::string& roomName,
+    const std::string& roomToken) {
+    if (role.empty() || systemUsername.empty() || roomName.empty() || roomToken.empty()) {
+        throw std::runtime_error("attachment receive context is missing");
+    }
 
-std::string receiveDirectory(Kind kind, const std::string& roomName, const std::string& roomToken) {
-    if (roomName.empty() || roomToken.empty()) return receiveDirectory(kind);
-
-    // 接收附件按 room instance 二次分层，避免同名文件和同名房间实例互相混淆。
+    // 接收附件按身份和 room instance 分层，避免本机多账号测试时互相混淆。
     const auto leaf = kind == Kind::Image ? "images" : (kind == Kind::Voice ? "voice" : "files");
-    auto dir = chat::local_paths::attachmentDirectory(leaf, roomName, roomToken);
+    auto dir = chat::local_paths::attachmentDirectory(leaf, role, systemUsername, roomName, roomToken);
     ensurePrivateDirectory(dir);
     return pathToUtf8(dir);
 }
@@ -672,8 +663,14 @@ std::vector<std::string> merkleProofForChunk(const std::vector<std::string>& chu
     return proof;
 }
 
-void ReceiveStore::setRoomContext(const std::string& roomName, const std::string& roomToken) {
+void ReceiveStore::setRoomContext(
+    const std::string& role,
+    const std::string& systemUsername,
+    const std::string& roomName,
+    const std::string& roomToken) {
     std::lock_guard<std::mutex> lock(mMutex);
+    mRole = role;
+    mSystemUsername = systemUsername;
     mRoomName = roomName;
     mRoomToken = roomToken;
 }
@@ -711,18 +708,19 @@ ReceiveSlot ReceiveStore::stage(
     for (auto& hash : chunkHashes) {
         hash = normalizeSha256Hex(std::move(hash), "attachment chunk hash");
     }
-    if (merkleRootForChunkHashes(chunkHashes) != merkleRoot) {
+    if (normalizeSha256Hex(merkleRootForChunkHashes(chunkHashes), "computed attachment merkle root") != merkleRoot) {
         throw std::runtime_error("attachment merkle root does not match chunk hashes");
     }
     validateExtensionOrThrow(name, kind);
-    pruneReceiveCacheFor(expectedSize);
+    const auto receiveDir = receiveDirectory(kind, mRole, mSystemUsername, mRoomName, mRoomToken);
+    pruneReceiveCacheFor(pathFromUtf8(receiveDir), expectedSize);
 
     const auto fallback = defaultFileName(kind);
     ReceiveSlot slot;
     slot.kind = kind;
     slot.transferId = transferId;
     slot.name = safeTransferName(name, fallback);
-    slot.path = transferPath(receiveDirectory(kind, mRoomName, mRoomToken), slot.name, fallback);
+    slot.path = transferPath(receiveDir, slot.name, fallback);
     slot.expectedSize = expectedSize;
     slot.receivedSize = 0;
     slot.chunkSize = chunkSize;
@@ -817,7 +815,8 @@ ReceiveChunkResult ReceiveStore::appendChunk(
     for (auto& item : merkleProof) {
         item = normalizeSha256Hex(std::move(item), "attachment merkle proof item");
     }
-    if (sha256Hex(bytes) != chunkHash || chunkHash != slot.chunkHashes[chunkIndex]) {
+    const auto actualChunkHash = normalizeSha256Hex(sha256Hex(bytes), "computed attachment chunk hash");
+    if (actualChunkHash != chunkHash || chunkHash != slot.chunkHashes[chunkIndex]) {
         const auto cachePath = slot.path;
         mSlots.erase(pending);
         std::filesystem::remove(pathFromUtf8(cachePath));
@@ -884,7 +883,8 @@ ReceiveChunkResult ReceiveStore::appendChunk(
     }
     if (result.complete) {
         const auto finalBytes = readBytesFromPath(slot.path);
-        if (finalBytes.size() != slot.expectedSize || sha256Hex(finalBytes) != slot.fileHash) {
+        const auto actualFileHash = normalizeSha256Hex(sha256Hex(finalBytes), "computed attachment file hash");
+        if (finalBytes.size() != slot.expectedSize || actualFileHash != slot.fileHash) {
             const auto cachePath = slot.path;
             mSlots.erase(pending);
             std::filesystem::remove(pathFromUtf8(cachePath));

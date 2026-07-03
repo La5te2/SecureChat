@@ -252,14 +252,14 @@ out/build/x64-linux-release/libnative.so
 
 ### 本机 WSS
 
-CLI 运行时仍需要 `--room-dir` 指向本机房间材料目录。下面示例中 `<room-dir>` 是 `cert.exe create-entrance` 或 `cert import-entrance` 输出的 `roomDir`，目录名形如 `<原始房间名>_<roomInstanceTokenDigest前8位>`。普通用户更推荐使用 WinUI，WinUI 会隐藏该路径。
+CLI 运行时仍需要 `--room-dir` 指向本机房间材料目录。下面示例中 `<host-room-dir>` 是 `cert.exe create-entrance` 输出的 Host 目录，`<client-room-dir>` 是 `cert import-entrance` 输出的 Client 目录。目录结构为 `logs/hosts/<systemUsername>/<原始房间名>_<digest前8位>/` 或 `logs/clients/<systemUsername>/<原始房间名>_<digest前8位>/`。普通用户更推荐使用 WinUI，WinUI 会隐藏该路径。
 
 Windows：
 
 ```powershell
 Set-Content -Encoding UTF8 relay-pool.txt "wss://127.0.0.1:25566"
 .\out\build\x64-release\cert.exe create-entrance --room secure-room --phrase "use-a-long-random-room-phrase" --host alice --pool relay-pool.txt --out logs
-.\out\build\x64-release\cert.exe import-entrance --entrance logs\<room-dir>\certs\entrance.scp --phrase "use-a-long-random-room-phrase" --user bob --out logs
+.\out\build\x64-release\cert.exe import-entrance --entrance <host-room-dir>\certs\entrance.scp --phrase "use-a-long-random-room-phrase" --user bob --out logs
 ```
 
 Linux：
@@ -267,7 +267,7 @@ Linux：
 ```bash
 printf '%s\n' 'wss://127.0.0.1:25566' > relay-pool.txt
 ./out/build/x64-linux-release/cert create-entrance --room secure-room --phrase "use-a-long-random-room-phrase" --host alice --pool relay-pool.txt --out logs
-./out/build/x64-linux-release/cert import-entrance --entrance logs/<room-dir>/certs/entrance.scp --phrase "use-a-long-random-room-phrase" --user bob --out logs
+./out/build/x64-linux-release/cert import-entrance --entrance <host-room-dir>/certs/entrance.scp --phrase "use-a-long-random-room-phrase" --user bob --out logs
 ```
 
 然后打开三个终端，先启动 Server，再启动 Host，最后启动 Client。Client 连接后会停留在 pending join。Host 在 CLI 标准输入中执行 `/list` 查看 pending requestId，再执行 `/approve <requestId>`；WinUI Host 可直接左键 pending 成员卡片允许加入。Host 会自动解密准入信令 envelope，校验 Client 的 CSR、room instance 绑定、设备/身份声明和 pending join proof，并在线签发成员证书响应；签发响应同样经 admission-encrypted envelope 返回。Client 安装响应后才会成为 active 成员并收到当前 group key。
@@ -279,8 +279,8 @@ Remove-Item Env:SECURECHAT_TLS_CERT_FILE -ErrorAction SilentlyContinue
 Remove-Item Env:SECURECHAT_TLS_KEY_FILE -ErrorAction SilentlyContinue
 .\out\build\x64-release\server.exe 25566
 $env:SECURECHAT_LOCAL_TLS_CA="certs\local-root-ca.pem"
-.\out\build\x64-release\host.exe --room-dir logs\<room-dir> alice
-.\out\build\x64-release\client.exe --room-dir logs\<room-dir> bob
+.\out\build\x64-release\host.exe --room-dir <host-room-dir> alice
+.\out\build\x64-release\client.exe --room-dir <client-room-dir> bob
 ```
 
 Linux：
@@ -289,8 +289,8 @@ Linux：
 unset SECURECHAT_TLS_CERT_FILE SECURECHAT_TLS_KEY_FILE
 ./out/build/x64-linux-release/server 25566
 export SECURECHAT_LOCAL_TLS_CA=certs/local-root-ca.pem
-./out/build/x64-linux-release/host --room-dir logs/<room-dir> alice
-./out/build/x64-linux-release/client --room-dir logs/<room-dir> bob
+./out/build/x64-linux-release/host --room-dir <host-room-dir> alice
+./out/build/x64-linux-release/client --room-dir <client-room-dir> bob
 ```
 
 使用 `--room-dir` 时，Host/Client 不需要额外配置成员 PKI 环境变量。
@@ -312,8 +312,8 @@ Host/Client 连接地址来自 room-dir 内的 `relay/relay-pool.sqlite3`。使�
 ```bash
 printf '%s\n' 'wss://chat.example.com:25566' > relay-pool.txt
 ./out/build/x64-linux-release/cert create-entrance --room secure-room --phrase "use-a-long-random-room-phrase" --host alice --pool relay-pool.txt --out logs
-./out/build/x64-linux-release/host --room-dir logs/<room-dir> alice
-./out/build/x64-linux-release/client --room-dir logs/<room-dir> bob
+./out/build/x64-linux-release/host --room-dir <host-room-dir> alice
+./out/build/x64-linux-release/client --room-dir <client-room-dir> bob
 ```
 
 如果服务器证书由系统信任 CA 签发，Host/Client/WinUI 不需要额外配置服务器 CA。本地或局域网自签 CA 场景下，CLI 可通过 `SECURECHAT_LOCAL_TLS_CA` 指定 `certs/local-root-ca.pem`；WinUI 可在设置面板的 `Local Server TLS CA / 本地服务器 TLS 信任根` 中选择同一个文件。
@@ -381,9 +381,9 @@ WinUI 面向日常使用场景。
 1. 打开 WinUI。
 2. 如果连接本地/局域网自动生成的 WSS 证书，在设置面板选择 `Local Server TLS CA / 本地服务器 TLS 信任根`。
 3. Host 本机 `config.yml` 的 `[pool]` 段保存 relay 入口，每行一个 `wss://host:port`。Host 可在本地编辑该文件，WinUI 设置面板不显示该段。
-4. Host 区域输入 Room 和 User，点击 `Create Room / 创建房间`。WinUI 会自动生成 `logs/<原始房间名>_<digest前8位>/certs/entrance.scp`、房间级 Host 证书材料和 `relay/relay-pool.sqlite3`。
-5. Host 或 Join 区域点击 `Join Room / 加入房间` 时，WinUI 会弹出房间实例选择面板；确认后才会连接。即使只有一个同名候选房间，也会要求确认。
-6. Client 首次加入时在 Join 区域点击 `Import Room / 导入房间`，选择 Host 分发的 `entrance.scp` 文件。导入后本机会在 `logs/<原始房间名>_<digest前8位>/certs/entrance.scp` 保存准入副本。
+4. Host 区域输入 Room 和 User，点击 `Create Room / 创建房间`。WinUI 会自动生成 `logs/hosts/<systemUsername>/<原始房间名>_<digest前8位>/certs/entrance.scp`、房间级 Host 证书材料和 `relay/relay-pool.sqlite3`。
+5. Host 或 Join 区域点击 `Join Room / 加入房间` 时只需要填写 User。WinUI 会弹出该用户身份下所有本地 room instance；确认后才会连接。
+6. Client 首次加入时在 Join 区域填写 Room 和 User，点击 `Import Room / 导入房间`，选择 Host 分发的 `entrance.scp` 文件。导入后本机会在 `logs/clients/<systemUsername>/<原始房间名>_<digest前8位>/certs/entrance.scp` 保存准入副本。
 7. Client 正确解析 `entrance.scp` 后进入 pending 状态。此时发送框禁用，成员列表只显示自己的灰色卡片。
 8. Host 界面会显示该 pending 成员的灰色卡片。左键允许加入，右键拒绝加入并封禁该申请指纹。
 9. 审批通过后，Host 签发成员证书响应，Client 安装证书并参与 GKA。发送栏留空 `To: Member / 私信对象` 表示群发；填写成员证书指纹前缀表示私发，前缀至少 8 位十六进制字符。
@@ -433,7 +433,7 @@ Host 管理命令在 Host 输入框或 CLI 标准输入中发送：
 
 当前已拆分 Host 断线和显式关闭。Host 关闭 WinUI、结束 Host 进程、按 Ctrl+C、点击 WinUI 的 `Exit / 离开房间`、输入 `/exit` 或发生网络瞬断时，只表示 Host disconnected，Server 保留房间 open 状态和 pending join 队列，Client 只看到 Host 暂离状态。Host 手动输入 `/stop_session` 时才发送带 Host 签名的 `close_room`，Server 广播 `room_closed` 并关闭该 room instance。
 
-Server 使用 SQLite 只保存 room instance 的 open/closed 状态和 pending join 原始请求，默认路径为 `server/state/<timestamp>.sqlite3`，每次启动生成一个新的状态库，避免重启覆盖旧状态；也可通过 `SECURECHAT_SERVER_STATE_DB` 显式指定固定路径。Server SQLite 的字段边界限定为房间可用性状态和待审批入房请求。
+Server 使用 SQLite 只保存 room instance 的 open/closed 状态和 pending join 原始请求。默认会在 `server/state/` 中选择时间最新的 `<timestamp>.sqlite3` 接续运行；没有可接续状态库时创建新的 timestamp 状态库。设置 `SECURECHAT_SERVER_STATE_FRESH=1` 会显式创建新的 timestamp 状态库；设置 `SECURECHAT_SERVER_STATE_DB` 会使用指定固定路径。Server SQLite 的字段边界限定为房间可用性状态和待审批入房请求。
 
 Server 进程停止或重启只表示中继暂时不可用，不会把 open 房间标记为 closed。房间进入 closed 状态只能来自 Host 在线发送的签名 `close_room`。
 
@@ -453,15 +453,22 @@ Client 关闭进程或网络断开只表示当前连接离线，不自动吊销�
 export SECURECHAT_ATTACHMENT_MAX_BYTES=104857600
 ```
 
-接收文件保存到当前工作目录，并按 room instance 分层。目录名统一使用 `<原始房间名>_<roomInstanceTokenDigest前8位>`：
+接收文件保存到当前工作目录，并按本机身份和 room instance 分层：
 
 ```text
-logs/<room>_<digest8>/images
-logs/<room>_<digest8>/voice
-logs/<room>_<digest8>/files
-logs/<room>_<digest8>/texts
-logs/<room>_<digest8>/certs
-logs/<room>_<digest8>/relay
+logs/hosts/<systemUsername>/<room>_<digest8>/images
+logs/hosts/<systemUsername>/<room>_<digest8>/voice
+logs/hosts/<systemUsername>/<room>_<digest8>/files
+logs/hosts/<systemUsername>/<room>_<digest8>/texts
+logs/hosts/<systemUsername>/<room>_<digest8>/certs
+logs/hosts/<systemUsername>/<room>_<digest8>/relay
+
+logs/clients/<systemUsername>/<room>_<digest8>/images
+logs/clients/<systemUsername>/<room>_<digest8>/voice
+logs/clients/<systemUsername>/<room>_<digest8>/files
+logs/clients/<systemUsername>/<room>_<digest8>/texts
+logs/clients/<systemUsername>/<room>_<digest8>/certs
+logs/clients/<systemUsername>/<room>_<digest8>/relay
 ```
 
 接收端保存附件后会做基础隔离标记。Windows 写入 Mark-of-the-Web（MotW）Zone.Identifier；Linux/Unix 移除 owner/group/others 执行位。该保护是 best-effort，文件系统不支持对应能力时不会阻断聊天，但 SecureChat 自身不会自动打开任意 `file` 附件。
@@ -485,7 +492,7 @@ WinUI 和 CLI 使用同一套 C++ 本地消息历史模块。当前只保存已�
 本地文本历史路径为：
 
 ```text
-logs/texts/<room>_<roomInstanceTokenDigest前8位>/<systemUsername>.sqlite3
+logs/<hosts|clients>/<systemUsername>/<room>_<roomInstanceTokenDigest前8位>/texts/<systemUsername>.sqlite3
 ```
 
 本地文本历史 SQLite 的字段边界限定为发送者、actor id、显示类型、正文、原始 message JSON 和 `isOwn`。WinUI 重进房间后会读取该库刷新聊天区域，并直接使用 `isOwn` 决定消息在右侧还是左侧，因此不会因为 nickname 重复或 Host 固定 actor id 导致左右方向错误。

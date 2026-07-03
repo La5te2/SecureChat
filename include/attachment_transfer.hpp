@@ -52,8 +52,12 @@ struct ReceiveChunkResult {
 // 该类不感知 Host/Client 角色、转发逻辑或 UI 渲染。
 class ReceiveStore {
 public:
-    // 绑定当前 room instance，使接收附件落入 logs/<kind>/<room>_<roomInstanceTokenDigest前8>/。
-    void setRoomContext(const std::string& roomName, const std::string& roomToken);
+    // 绑定当前本机身份和 room instance，使接收附件落入对应身份的房间目录。
+    void setRoomContext(
+        const std::string& role,
+        const std::string& systemUsername,
+        const std::string& roomName,
+        const std::string& roomToken);
     // 暂存 *_meta JSON 中的元数据，并选择本地缓存路径。
     ReceiveSlot stage(
         const std::string& key,
@@ -83,6 +87,8 @@ public:
 
 private:
     mutable std::mutex mMutex;
+    std::string mRole;
+    std::string mSystemUsername;
     std::string mRoomName;
     std::string mRoomToken;
     std::unordered_map<std::string, ReceiveSlot> mSlots;
@@ -97,9 +103,13 @@ std::string fileNameFromPath(const std::string& path);
 // 从入站元数据中移除路径分隔符和 Windows 非法字符。
 std::string safeTransferName(const std::string& name, const std::string& fallback);
 
-// 返回某类附件对应的本地接收缓存目录。
-std::string receiveDirectory(Kind kind);
-std::string receiveDirectory(Kind kind, const std::string& roomName, const std::string& roomToken);
+// 返回某类附件在当前身份和 room instance 下的本地接收缓存目录。
+std::string receiveDirectory(
+    Kind kind,
+    const std::string& role,
+    const std::string& systemUsername,
+    const std::string& roomName,
+    const std::string& roomToken);
 
 // 添加时间戳，避免同名接收附件互相覆盖。
 std::string transferPath(const std::string& directory, const std::string& name, const std::string& fallback);

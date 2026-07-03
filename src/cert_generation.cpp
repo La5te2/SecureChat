@@ -20,6 +20,7 @@
 
 #include "cert_generation.hpp"
 #include "cert_utils.hpp"
+#include "local_paths.hpp"
 #include "relay_pool.hpp"
 
 #include <cstdlib>
@@ -1508,10 +1509,20 @@ void validateRoomNameForDirectory(const std::string& roomName) {
     }
 }
 
-std::filesystem::path roomDirFromDigest(const std::string& outputRoot, const std::string& roomName, const std::string& digest) {
+std::filesystem::path roomDirFromDigest(
+    const std::string& outputRoot,
+    const std::string& role,
+    const std::string& systemUsername,
+    const std::string& roomName,
+    const std::string& digest) {
     validateRoomNameForDirectory(roomName);
+    if (trimAscii(role).empty()) throw std::runtime_error("room role is required");
+    if (trimAscii(systemUsername).empty()) throw std::runtime_error("system username is required");
     const auto shortDigest = digest.size() >= 8 ? digest.substr(0, 8) : digest;
-    return pathFromUtf8(outputRoot) / (roomName + "_" + shortDigest);
+    return pathFromUtf8(outputRoot) /
+        chat::local_paths::roleDirectoryName(role) /
+        chat::local_paths::userDirectoryName(systemUsername) /
+        (roomName + "_" + shortDigest);
 }
 
 ServerTlsMaterial ensureLocalTlsMaterial() {
@@ -1665,7 +1676,12 @@ RoomEntranceCreateResult createRoomEntrance(const RoomEntranceCreateOptions& opt
         {"alg", "RSA-SHA256"},
         {"value", base64Encode(relaySignature.data(), relaySignature.size())}
     };
-    const auto roomDir = roomDirFromDigest(options.outputRoot.empty() ? "logs" : options.outputRoot, roomName, digest);
+    const auto roomDir = roomDirFromDigest(
+        options.outputRoot.empty() ? "logs" : options.outputRoot,
+        "host",
+        hostName,
+        roomName,
+        digest);
     const auto certDir = roomCertDir(roomDir);
     ensureDirectory(roomDir);
     ensureDirectory(certDir);
@@ -1778,11 +1794,18 @@ std::string inspectRoomEntrance(const std::string& entranceFile, const std::stri
 std::string roomDirForEntrance(
     const std::string& entranceFile,
     const std::string& roomPhrase,
+    const std::string& role,
+    const std::string& systemUsername,
     const std::string& outputRoot) {
     auto payload = validateEntrancePayload(decryptEntrancePayload(pathFromUtf8(entranceFile), trimAscii(roomPhrase)));
     const auto digest = payload.value("roomInstanceTokenDigest", "");
     if (digest.empty()) throw std::runtime_error("entrance payload missing roomInstanceTokenDigest");
-    return pathToUtf8(roomDirFromDigest(outputRoot.empty() ? "logs" : outputRoot, payload.value("roomName", ""), digest));
+    return pathToUtf8(roomDirFromDigest(
+        outputRoot.empty() ? "logs" : outputRoot,
+        role,
+        systemUsername,
+        payload.value("roomName", ""),
+        digest));
 }
 
 std::vector<LocalRoomDirInfo> listLocalRoomDirs(
@@ -1793,48 +1816,54 @@ std::vector<LocalRoomDirInfo> listLocalRoomDirs(
     const auto canonicalName = canonicalRoomName(roomNameValue);
     const auto username = trimAscii(usernameValue);
     const auto role = trimAscii(roleValue);
-    if (canonicalName.empty()) throw std::runtime_error("room name is required");
     if (username.empty()) throw std::runtime_error("user name is required");
     if (role.empty()) throw std::runtime_error("room role is required");
 
-    const auto root = pathFromUtf8(outputRoot.empty() ? "logs" : outputRoot);
+    const auto root = pathFromUtf8(outputRoot.empty() ? "logs" : outputRoot) /
+        chat::local_paths::roleDirectoryName(role);
     std::error_code ec;
     if (!std::filesystem::is_directory(root, ec)) {
-        throw std::runtime_error("no local room certificates found; import or create the room first");
+        throw std::runtime_error("no local room certificates found");
     }
 
     std::vector<LocalRoomDirInfo> rooms;
-    for (const auto& entry : std::filesystem::directory_iterator(root, ec)) {
+    for (const auto& userEntry : std::filesystem::directory_iterator(root, ec)) {
         if (ec) break;
-        if (!entry.is_directory(ec)) continue;
-        const auto runtimePath = roomStatePath(entry.path());
-        if (!fileExists(runtimePath)) continue;
-        try {
-            const auto runtime = readRuntimeFile(entry.path());
-            if (runtime.value("canonicalRoomName", "") != canonicalName) continue;
-            const auto storedBaseUsername = runtime.value("baseUsername", runtime.value("username", ""));
-            if (storedBaseUsername != username) continue;
-            if (runtime.value("role", "") != role) continue;
+        if (!userEntry.is_directory(ec)) continue;
 
-            std::error_code timeEc;
-            const auto modified = std::filesystem::last_write_time(runtimePath, timeEc);
-            long long modifiedUnixMs = 0;
-            if (!timeEc) {
-                const auto systemTime = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
-                    modified - decltype(modified)::clock::now() + std::chrono::system_clock::now());
-                modifiedUnixMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                    systemTime.time_since_epoch()).count();
+        std::error_code roomEc;
+        for (const auto& roomEntry : std::filesystem::directory_iterator(userEntry.path(), roomEc)) {
+            if (roomEc) break;
+            if (!roomEntry.is_directory(roomEc)) continue;
+            const auto runtimePath = roomStatePath(roomEntry.path());
+            if (!fileExists(runtimePath)) continue;
+            try {
+                const auto runtime = readRuntimeFile(roomEntry.path());
+                if (!canonicalName.empty() && runtime.value("canonicalRoomName", "") != canonicalName) continue;
+                const auto storedBaseUsername = runtime.value("baseUsername", runtime.value("username", ""));
+                if (storedBaseUsername != username) continue;
+                if (runtime.value("role", "") != role) continue;
+
+                std::error_code timeEc;
+                const auto modified = std::filesystem::last_write_time(runtimePath, timeEc);
+                long long modifiedUnixMs = 0;
+                if (!timeEc) {
+                    const auto systemTime = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
+                        modified - decltype(modified)::clock::now() + std::chrono::system_clock::now());
+                    modifiedUnixMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        systemTime.time_since_epoch()).count();
+                }
+
+                rooms.push_back({
+                    pathToUtf8(roomEntry.path()),
+                    runtime.value("roomName", roomNameValue),
+                    runtime.value("roomInstanceTokenDigest", ""),
+                    modifiedUnixMs});
             }
-
-            rooms.push_back({
-                pathToUtf8(entry.path()),
-                runtime.value("roomName", roomNameValue),
-                runtime.value("roomInstanceTokenDigest", ""),
-                modifiedUnixMs});
-        }
-        catch (...) {
-            // 损坏或无法解密的 room state 不参与自动选择。
-            continue;
+            catch (...) {
+                // 损坏或无法解密的 room state 不参与自动选择。
+                continue;
+            }
         }
     }
 
@@ -1842,7 +1871,7 @@ std::vector<LocalRoomDirInfo> listLocalRoomDirs(
         return left.modifiedTimeUnixMs > right.modifiedTimeUnixMs;
     });
     if (rooms.empty()) {
-        throw std::runtime_error("no matching local room directory found; import or create the room first");
+        throw std::runtime_error("no matching local room directory found");
     }
     return rooms;
 }
@@ -1853,7 +1882,16 @@ RoomEntranceImportResult importRoomEntrance(const RoomEntranceImportOptions& opt
     auto payload = validateEntrancePayload(decryptEntrancePayload(pathFromUtf8(options.entranceFile), trimAscii(options.roomPhrase)));
     const auto digest = payload.value("roomInstanceTokenDigest", "");
     if (digest.empty()) throw std::runtime_error("entrance payload missing roomInstanceTokenDigest");
-    const auto roomDir = roomDirFromDigest(options.outputRoot.empty() ? "logs" : options.outputRoot, payload.value("roomName", ""), digest);
+
+    auto memberKey = generateRsaKey(3072);
+    const auto memberPublicKeyFp = publicKeyFingerprint(memberKey.get());
+    const auto username = systemUsernameFromPublicFingerprint(baseUsername, memberPublicKeyFp);
+    const auto roomDir = roomDirFromDigest(
+        options.outputRoot.empty() ? "logs" : options.outputRoot,
+        "client",
+        username,
+        payload.value("roomName", ""),
+        digest);
     const auto certDir = roomCertDir(roomDir);
     ensureDirectory(roomDir);
     ensureDirectory(certDir);
@@ -1875,9 +1913,6 @@ RoomEntranceImportResult importRoomEntrance(const RoomEntranceImportOptions& opt
     writeTextFile(intermediatePath, payload.value("intermediateCaPem", ""));
     writeTextFile(hostCertPath, payload.value("hostCertPem", ""));
 
-    auto memberKey = generateRsaKey(3072);
-    const auto memberPublicKeyFp = publicKeyFingerprint(memberKey.get());
-    const auto username = systemUsernameFromPublicFingerprint(baseUsername, memberPublicKeyFp);
     const auto keyPath = certDir / (username + "-key.pem");
 
     const auto deviceName = localHostname();

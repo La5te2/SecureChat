@@ -475,7 +475,7 @@ int CHAT_CALL chat_host_start(
 }
 
 // WinUI 自动创建房间级证书材料。用户只输入房间名；
-// room-dir 和 entrance.scp 路径作为内部实现细节写入 logs/<room>_<digest>/certs/。
+// room-dir 和 entrance.scp 路径作为内部实现细节写入 logs/hosts/<systemUser>/...。
 int CHAT_CALL chat_host_start_auto(
     const char* room_name,
     const char* username,
@@ -600,19 +600,24 @@ int CHAT_CALL chat_join_start_auto(
             return 0;
         }
 
-        const auto roomDir = chat::certs::roomDirForEntrance(entrance, roomName, "logs");
-        const auto localRoomDir = std::filesystem::path(roomDir);
-        bool alreadyImported = false;
-        if (std::filesystem::exists(localRoomDir / "certs" / "room-state.scb")) {
-            try {
-                (void)chat::certs::loadRoomRuntimeMaterial(roomDir, user, false, false);
-                alreadyImported = true;
-            }
-            catch (const std::exception&) {
-                alreadyImported = false;
+        std::string roomDir;
+        const auto inspected = nlohmann::json::parse(chat::certs::inspectRoomEntrance(entrance, roomName));
+        const auto digest = inspected.value("roomInstanceTokenDigest", "");
+        try {
+            auto existingRooms = chat::certs::listLocalRoomDirs(roomName, user, "client", "logs");
+            for (const auto& candidate : existingRooms) {
+                if (candidate.roomInstanceTokenDigest == digest) {
+                    (void)chat::certs::loadRoomRuntimeMaterial(candidate.roomDir, user, false, false);
+                    roomDir = candidate.roomDir;
+                    break;
+                }
             }
         }
-        if (!alreadyImported) {
+        catch (const std::exception&) {
+            roomDir.clear();
+        }
+
+        if (roomDir.empty()) {
             chat::certs::RoomEntranceImportOptions options;
             options.entranceFile = entrance;
             options.roomPhrase = roomName;
@@ -620,6 +625,7 @@ int CHAT_CALL chat_join_start_auto(
             options.outputRoot = "logs";
             options.memberKeyPassword = safeString(key_pass);
             const auto imported = chat::certs::importRoomEntrance(options);
+            roomDir = imported.roomDir;
             emitEvent("status", "Entrance imported: " + imported.roomDir);
         }
         return chat_join_start(roomDir.c_str(), user.c_str(), nickname, key_pass);
