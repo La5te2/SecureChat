@@ -95,7 +95,7 @@ Host 可以通过普通输入框发送以下本地管理命令：
 /list
 /approve <request-id>
 /reject <request-id> [reason]
-/stop_session
+/closeroom
 ```
 
 `/silence` 和 `/unsilence` 会转换为 Host 到 Server 的 `silence_client` / `unsilence_client` 信令。Host 本地先用至少 8 位证书指纹前缀解析目标成员。Server 验证发送方确实是当前 room 的 Host 后，只在当前房间内记录目标 clientId 的发送限制。被禁言 Client 保持连接，可以继续参与后续 GKA epoch，但它发送 `encrypted_relay` 时 Server 返回 `member is silenced`，不会转发文本或附件。
@@ -108,7 +108,7 @@ Host 可以通过普通输入框发送以下本地管理命令：
 
 成员显示昵称通过 `nickname_update` 应用层消息同步。该消息放入加密中继 payload，由当前 room group key 保护，并绑定发送者 actor id 和成员证书验证结果。接收端只接受 actor id 与 relay sender 一致的昵称更新。Server 只负责转发密文 envelope，不能读取 nickname 明文，也不能把 nickname 作为成员身份或路由依据。
 
-`/stop_session` 会转换为 Host 到 Server 的 `close_room` 信令。该控制消息包含 Host 房间级证书签名，签名内容绑定 room instance token、动作类型、epoch 和 payload digest。Server 验证发送连接是当前 room 的 Host 后，广播 `room_closed` 并移除该房间；Client 本地验证 Host 签名后才接受房间关闭事件。Host 关闭 WinUI、点击 WinUI 的 `Exit / 离开房间`、Ctrl+C、`/exit`、进程退出或网络瞬断只表示 Host disconnected，Server 广播 `host_disconnected` 并保留房间状态。Host 用同一 room token 重新连接时可以重新接管房间；Host 会从 `room_members` 重新验证已有 Client identity，再发起后续 GKA。
+`/closeroom` 会转换为 Host 到 Server 的 `close_room` 信令。该控制消息包含 Host 房间级证书签名，签名内容绑定 room instance token、动作类型、epoch 和 payload digest。Server 验证发送连接是当前 room 的 Host 后，广播 `room_closed` 并移除该房间；Client 本地验证 Host 签名后才接受房间关闭事件。Host 关闭 WinUI、点击 WinUI 的 `Exit / 离开房间`、Ctrl+C、`/exit`、进程退出或网络瞬断只表示 Host disconnected，Server 广播 `host_disconnected` 并保留房间状态。Host 用同一 room token 重新连接时可以重新接管房间；Host 会从 `room_members` 重新验证已有 Client identity，再发起后续 GKA。
 
 ## 恶意 Server 行为边界
 

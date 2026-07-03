@@ -25,6 +25,7 @@ namespace {
 struct RelayProbeResult {
     std::string url;
     std::string relayInstanceId;
+    std::string error;
 };
 
 std::string trim(std::string value) {
@@ -41,6 +42,54 @@ bool startsWith(const std::string& value, const std::string& prefix) {
 bool isRelayUrl(const std::string& value) {
     // 房间级 pool 面向成员可直接访问的 TLS relay 入口。
     return startsWith(value, "wss://");
+}
+
+bool isLocalOrLanRelayUrl(const std::string& value) {
+    auto lower = value;
+    std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    if (!startsWith(lower, "wss://")) return false;
+    std::string host;
+    auto pos = std::string("wss://").size();
+    if (pos < lower.size() && lower[pos] == '[') {
+        const auto end = lower.find(']', pos + 1);
+        if (end == std::string::npos) return false;
+        host = lower.substr(pos + 1, end - pos - 1);
+        return host == "::1" || startsWith(host, "fc") || startsWith(host, "fd") || startsWith(host, "fe80");
+    }
+    const auto end = lower.find_first_of(":/?#", pos);
+    host = lower.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
+    if (host == "localhost") return true;
+
+    std::istringstream parts(host);
+    std::string item;
+    int ip[4] = {};
+    for (int i = 0; i < 4; ++i) {
+        if (!std::getline(parts, item, '.')) return false;
+        if (item.empty() || item.size() > 3) return false;
+        int valuePart = 0;
+        for (const auto ch : item) {
+            if (!std::isdigit(static_cast<unsigned char>(ch))) return false;
+            valuePart = valuePart * 10 + (ch - '0');
+        }
+        if (valuePart > 255) return false;
+        ip[i] = valuePart;
+    }
+    if (!parts.eof()) return false;
+    return ip[0] == 10 ||
+        ip[0] == 127 ||
+        (ip[0] == 169 && ip[1] == 254) ||
+        (ip[0] == 172 && ip[1] >= 16 && ip[1] <= 31) ||
+        (ip[0] == 192 && ip[1] == 168);
+}
+
+bool hasLocalTlsCaHint(const std::string& error) {
+    return error.find("SECURECHAT_LOCAL_TLS_CA") != std::string::npos ||
+        error.find("local/LAN WSS") != std::string::npos ||
+        error.find("TLS") != std::string::npos ||
+        error.find("certificate") != std::string::npos ||
+        error.find("Certificate") != std::string::npos;
 }
 
 std::string relayRuntimeStatus(std::string status) {
@@ -69,14 +118,15 @@ RelayProbeResult probeRelayIdentity(const std::string& url, int timeoutMs) {
         std::condition_variable ready;
         bool finished = false;
         std::string relayInstanceId;
+        std::string error;
     };
 
     rtc::WebSocket::Configuration config;
     try {
         config = chat::websocket_config::clientConfigForUrl(config, url);
     }
-    catch (...) {
-        return {};
+    catch (const std::exception& e) {
+        return {url, "", e.what()};
     }
     auto state = std::make_shared<ProbeState>();
     auto ws = std::make_shared<rtc::WebSocket>(config);
@@ -118,9 +168,11 @@ RelayProbeResult probeRelayIdentity(const std::string& url, int timeoutMs) {
             state->ready.notify_all();
         }
     });
-    ws->onError([state](std::string) {
+    ws->onError([state](std::string error) {
         std::lock_guard<std::mutex> lock(state->mutex);
         state->finished = true;
+        if (error.empty()) error = "WebSocket connection failed";
+        state->error = std::move(error);
         state->ready.notify_all();
     });
     ws->onClosed([state]() {
@@ -132,24 +184,29 @@ RelayProbeResult probeRelayIdentity(const std::string& url, int timeoutMs) {
     try {
         ws->open(url);
     }
-    catch (...) {
-        return {};
+    catch (const std::exception& e) {
+        return {url, "", e.what()};
     }
 
     std::string relayInstanceId;
+    std::string probeError;
     {
         std::unique_lock<std::mutex> lock(state->mutex);
         state->ready.wait_for(lock, std::chrono::milliseconds(timeoutMs), [&]() {
             return state->finished;
         });
         relayInstanceId = state->relayInstanceId;
+        probeError = state->error;
     }
     try {
         ws->close();
     }
     catch (...) {
     }
-    if (relayInstanceId.empty()) return {};
+    if (relayInstanceId.empty()) {
+        if (probeError.empty()) probeError = "relay probe did not receive relay identity";
+        return {url, "", probeError};
+    }
     return {url, relayInstanceId};
 }
 
@@ -176,13 +233,29 @@ std::vector<std::string> selectRoomRelays(const std::vector<std::string>& candid
 std::vector<RelayProbeResult> reachableRelayIdentities(const std::vector<std::string>& candidateUrls) {
     const auto timeoutMs = relayProbeTimeoutMs();
     std::vector<RelayProbeResult> reachable;
+    std::vector<RelayProbeResult> failed;
     for (const auto& url : candidateUrls) {
         auto probe = probeRelayIdentity(url, timeoutMs);
         if (!probe.url.empty() && !probe.relayInstanceId.empty()) {
             reachable.push_back(std::move(probe));
         }
+        else if (!probe.url.empty()) {
+            failed.push_back(std::move(probe));
+        }
     }
     if (reachable.empty()) {
+        for (const auto& failure : failed) {
+            if (hasLocalTlsCaHint(failure.error)) {
+                throw std::runtime_error(
+                    "local/LAN WSS relay requires a matching local TLS-CA");
+            }
+        }
+        for (const auto& failure : failed) {
+            if (isLocalOrLanRelayUrl(failure.url)) {
+                throw std::runtime_error(
+                    "local/LAN WSS relay probe failed");
+            }
+        }
         throw std::runtime_error("relay pool has no currently reachable relay");
     }
     return reachable;

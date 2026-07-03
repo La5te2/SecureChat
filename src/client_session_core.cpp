@@ -158,6 +158,63 @@ std::string relayLabel(const std::string& url) {
     return url.substr(start);
 }
 
+bool isLocalOrLanRelayUrl(const std::string& url) {
+    auto lower = url;
+    std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    if (lower.rfind("wss://", 0) != 0) return false;
+    auto pos = std::string("wss://").size();
+    if (pos < lower.size() && lower[pos] == '[') {
+        const auto end = lower.find(']', pos + 1);
+        if (end == std::string::npos) return false;
+        const auto host = lower.substr(pos + 1, end - pos - 1);
+        return host == "::1" || host.rfind("fc", 0) == 0 || host.rfind("fd", 0) == 0 || host.rfind("fe80", 0) == 0;
+    }
+    const auto end = lower.find_first_of(":/?#", pos);
+    const auto host = lower.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
+    if (host == "localhost") return true;
+    std::istringstream parts(host);
+    std::string item;
+    int ip[4] = {};
+    for (int i = 0; i < 4; ++i) {
+        if (!std::getline(parts, item, '.')) return false;
+        if (item.empty() || item.size() > 3) return false;
+        int value = 0;
+        for (const auto ch : item) {
+            if (!std::isdigit(static_cast<unsigned char>(ch))) return false;
+            value = value * 10 + (ch - '0');
+        }
+        if (value > 255) return false;
+        ip[i] = value;
+    }
+    if (!parts.eof()) return false;
+    return ip[0] == 10 ||
+        ip[0] == 127 ||
+        (ip[0] == 169 && ip[1] == 254) ||
+        (ip[0] == 172 && ip[1] >= 16 && ip[1] <= 31) ||
+        (ip[0] == 192 && ip[1] == 168);
+}
+
+bool looksLikeTlsTrustError(std::string error) {
+    std::transform(error.begin(), error.end(), error.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    return error.find("tls") != std::string::npos ||
+        error.find("ssl") != std::string::npos ||
+        error.find("cert") != std::string::npos ||
+        error.find("x509") != std::string::npos ||
+        error.find("verify") != std::string::npos ||
+        error.find("handshake") != std::string::npos;
+}
+
+std::string relayErrorMessage(const std::string& url, const std::string& error) {
+    if (isLocalOrLanRelayUrl(url) && looksLikeTlsTrustError(error)) {
+        return "local/LAN WSS relay requires a matching local TLS-CA";
+    }
+    return "Relay error: " + relayLabel(url) + ": " + error;
+}
+
 std::string earlyAttachmentKey(const std::string& senderKey, const std::string& transferId) {
     return senderKey + "\n" + transferId;
 }
@@ -364,6 +421,7 @@ void ClientSessionCore::setCallbacks(ChatCallbacks callbacks) {
 // 打开信令 WebSocket，并请求加入已配置房间。
 void ClientSessionCore::start() {
     mSignalingWorkerStopping.store(false);
+    mAllRelaysUnavailableReported.store(false);
     if (!mSignalingThread.joinable()) {
         mSignalingThread = std::thread([this]() {
             signalingWorkerLoop();
@@ -401,6 +459,7 @@ void ClientSessionCore::connectAdmissionRelay() {
         }
     }
     chatEmit(mCallbacks.onRelayStatus, "relay unavailable");
+    handleAllRelaysUnavailable("All relays are unavailable; join aborted");
 }
 
 void ClientSessionCore::connectRelay(std::size_t relayIndex) {
@@ -426,6 +485,16 @@ void ClientSessionCore::connectRelay(std::size_t relayIndex) {
         markRelayFailure(relayIndex, url, "offline");
         chatEmit(mCallbacks.onError, e.what());
         emitRelayStatus();
+        if (!mIdentity.enabled() && !mJoinedRoom.load() && !mStopped.load() && !mShutdownRequested.load()) {
+            connectAdmissionRelay();
+            return;
+        }
+        if (!mJoinedRoom.load() && !hasOpenRelay() && allRelaysFailed()) {
+            handleAllRelaysUnavailable("All relays are unavailable; join aborted");
+        }
+        else if (mJoinedRoom.load() && !hasOpenRelay() && allRelaysFailed()) {
+            handleAllRelaysUnavailable("All relays are unavailable; left current room");
+        }
         return;
     }
     auto ws = std::make_shared<rtc::WebSocket>(relayConfig);
@@ -495,23 +564,31 @@ void ClientSessionCore::connectRelay(std::size_t relayIndex) {
             connectAdmissionRelay();
             return;
         }
-        if (report && !hasOpenRelay() && !mSawErrorFrame.load() && !mStopped.load() && !mShutdownRequested.load()) {
+        if (report && !hasOpenRelay() && allRelaysFailed() && !mSawErrorFrame.load() && !mStopped.load() && !mShutdownRequested.load()) {
             // WebSocket close 可能先于对端试图发送的 error JSON 帧到达。
             // 报告当前准入流程，避免 WinUI 把所有静默关闭都误判为构建版本不匹配。
-            const auto message = mJoinedRoom.load()
-                ? "Signaling connection ended unexpectedly; the Server or Host may have stopped, or the network closed the socket"
-                : "Signaling closed before room join completed; check relay pool, room directory, Host status, PKI files, and rebuild all components if one executable was updated";
-            chatEmit(mCallbacks.onError, message);
+            if (!mJoinedRoom.load()) {
+                const auto message =
+                    "Signaling closed before room join completed; check relay pool, room directory, Host status, PKI files, and rebuild all components if one executable was updated";
+                chatEmit(mCallbacks.onError, message);
+                handleAllRelaysUnavailable("All relays are unavailable; join aborted");
+            }
         }
         if (report && !hasOpenRelay()) {
             chatEmit(mCallbacks.onRelayStatus, "relay unavailable");
+            if (!mJoinedRoom.load() && allRelaysFailed()) {
+                handleAllRelaysUnavailable("All relays are unavailable; join aborted");
+            }
+            else if (mJoinedRoom.load() && allRelaysFailed()) {
+                handleAllRelaysUnavailable("All relays are unavailable; left current room");
+            }
         }
     });
 
     ws->onError([this, url, relayIndex](std::string error) {
         const auto report = markRelayFailure(relayIndex, url, "offline");
         if (report) {
-            chatEmit(mCallbacks.onError, "Relay error: " + relayLabel(url) + ": " + error);
+            chatEmit(mCallbacks.onError, relayErrorMessage(url, error));
             emitRelayStatus();
         }
         if (report && !mIdentity.enabled() && !mJoinedRoom.load() && !mStopped.load() && !mShutdownRequested.load()) {
@@ -520,6 +597,12 @@ void ClientSessionCore::connectRelay(std::size_t relayIndex) {
         }
         if (report && !hasOpenRelay()) {
             chatEmit(mCallbacks.onRelayStatus, "relay unavailable");
+            if (!mJoinedRoom.load() && allRelaysFailed()) {
+                handleAllRelaysUnavailable("All relays are unavailable; join aborted");
+            }
+            else if (mJoinedRoom.load() && allRelaysFailed()) {
+                handleAllRelaysUnavailable("All relays are unavailable; left current room");
+            }
         }
     });
 
@@ -577,6 +660,7 @@ void ClientSessionCore::markRelayHealthy(std::size_t relayIndex, const std::stri
         mRelayNextRetryAt[relayIndex] = {};
         mRelayFailureReported[relayIndex] = false;
     }
+    mAllRelaysUnavailableReported.store(false);
     try {
         chat::relay_pool::markRelayStatus(mRoomDir, url, "healthy");
     }
@@ -613,6 +697,12 @@ bool ClientSessionCore::markRelayFailure(std::size_t relayIndex, const std::stri
         mCallbacks.onRelayStatus,
         "paused " + relayLabel(url) + " for " + std::to_string(delay.count()) + "s after " + std::to_string(failures) + " failure(s)");
     return true;
+}
+
+void ClientSessionCore::handleAllRelaysUnavailable(const std::string& reason) {
+    if (mStopped.load() || mShutdownRequested.load()) return;
+    if (mAllRelaysUnavailableReported.exchange(true)) return;
+    requestShutdown(reason);
 }
 
 void ClientSessionCore::requestStopNoJoin() {
@@ -654,6 +744,15 @@ bool ClientSessionCore::hasOpenRelay() const {
         if (i < mRelayOpen.size() && mRelayOpen[i] && mRelays[i] && !mRelays[i]->isClosed()) return true;
     }
     return false;
+}
+
+bool ClientSessionCore::allRelaysFailed() const {
+    std::lock_guard<std::mutex> lock(mRelayMutex);
+    if (mRelayUrls.empty()) return true;
+    for (std::size_t i = 0; i < mRelayUrls.size(); ++i) {
+        if (i >= mRelayFailureReported.size() || !mRelayFailureReported[i]) return false;
+    }
+    return true;
 }
 
 std::shared_ptr<rtc::WebSocket> ClientSessionCore::chooseRelayForSend(const Message& msg, const std::string& targetId) {

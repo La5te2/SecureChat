@@ -388,7 +388,7 @@ WinUI 面向日常使用场景。
 8. Host 界面会显示该 pending 成员的灰色卡片。左键允许加入，右键拒绝加入并封禁该申请指纹。
 9. 审批通过后，Host 签发成员证书响应，Client 安装证书并参与 GKA。发送栏留空 `To: Member / 私信对象` 表示群发；填写成员证书指纹前缀表示私发，前缀至少 8 位十六进制字符。
 10. 成员列表只显示成员名。点击已加入成员卡片复制证书指纹前 8 位，右键成员卡片切换附件自动预览允许状态。完整证书指纹保留在程序内部，Host 可以通过 `/list` 显式查看。
-11. 点击右侧 `Exit / 离开房间` 只离开当前房间并关闭本地连接。Host 需要关闭整个 room instance 时，在消息输入框或 CLI 中手动输入 `/stop_session`。
+11. 点击右侧 `Exit / 离开房间` 只离开当前房间并关闭本地连接。Host 需要关闭整个 room instance 时，在消息输入框或 CLI 中手动输入 `/closeroom`。
 
 成员名只用于图形界面展示，不用于私发目标匹配。私发目标使用证书指纹前缀，协议内部仍有连接路由 id，用于 Server relay、身份绑定和排障。
 
@@ -411,14 +411,14 @@ Host 管理命令在 Host 输入框或 CLI 标准输入中发送：
 /list
 /approve <requestId>
 /reject <requestId> [原因]
-/stop_session
+/closeroom
 ```
 
 `silence` 是当前房间内的发送限制。目标成员仍在线并继续参与后续 GKA epoch。
 
 `evict` 会驱逐目标成员，并把该成员已验证证书指纹加入当前房间内存封禁集。封禁不写入磁盘，房间结束后失效。
 
-`list` 会显示 Host、active Client 和 pending join 的 display name、system username、证书指纹和 pending requestId。`approve` 会把已验证的 pending join 提升为 active 成员。`reject` 会拒绝 pending 成员，拒绝响应带 Host 签名。`stop_session` 显式关闭当前 room instance。WinUI 不显示 requestId，点击 pending 成员卡片时会在内部使用 requestId。
+`list` 会显示 Host、active Client 和 pending join 的 display name、system username、证书指纹和 pending requestId。`approve` 会把已验证的 pending join 提升为 active 成员。`reject` 会拒绝 pending 成员，拒绝响应带 Host 签名。`closeroom` 显式关闭当前 room instance。WinUI 不显示 requestId，点击 pending 成员卡片时会在内部使用 requestId。
 
 私发命令：
 
@@ -439,7 +439,7 @@ Host 管理命令在 Host 输入框或 CLI 标准输入中发送：
 
 ## 房间生命周期
 
-当前已拆分 Host 断线和显式关闭。Host 关闭 WinUI、结束 Host 进程、按 Ctrl+C、点击 WinUI 的 `Exit / 离开房间`、输入 `/exit` 或发生网络瞬断时，只表示 Host disconnected，Server 保留房间 open 状态和 pending join 队列，Client 只看到 Host 暂离状态。Host 手动输入 `/stop_session` 时才发送带 Host 签名的 `close_room`，Server 广播 `room_closed` 并关闭该 room instance。
+当前已拆分 Host 断线和显式关闭。Host 关闭 WinUI、结束 Host 进程、按 Ctrl+C、点击 WinUI 的 `Exit / 离开房间`、输入 `/exit` 或发生网络瞬断时，只表示 Host disconnected，Server 保留房间 open 状态和 pending join 队列，Client 只看到 Host 暂离状态。Host 手动输入 `/closeroom` 时才发送带 Host 签名的 `close_room`，Server 广播 `room_closed` 并关闭该 room instance。
 
 Server 使用 SQLite 只保存 room instance 的 open/closed 状态和 pending join 原始请求。默认会在 `server/state/` 中选择时间最新的 `<timestamp>.sqlite3` 接续运行；没有可接续状态库时创建新的 timestamp 状态库。设置 `SECURECHAT_SERVER_STATE_FRESH=1` 会显式创建新的 timestamp 状态库；设置 `SECURECHAT_SERVER_STATE_DB` 会使用指定固定路径。Server SQLite 的字段边界限定为房间可用性状态和待审批入房请求。
 

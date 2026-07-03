@@ -153,7 +153,7 @@ rtc::WebSocket::Configuration clientConfigForUrl(
     auto caFiles = localCaFilesFromEnvironment();
     if (caFiles.empty()) {
         throw std::runtime_error(
-            "local/LAN WSS requires SECURECHAT_LOCAL_TLS_CA with an explicit CA file");
+            "local/LAN WSS relay requires a matching local TLS-CA");
     }
     config.caCertificatePemFile = localCaBundlePath(caFiles);
     return config;

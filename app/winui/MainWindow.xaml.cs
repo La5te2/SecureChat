@@ -2374,6 +2374,10 @@ public sealed partial class MainWindow : Window
             message.Equals("room closed", StringComparison.OrdinalIgnoreCase) ||
             message == "Signaling closed" ||
             message == "Signaling connection ended" ||
+            message == "All relays are unavailable; left current room" ||
+            message == "All relays are unavailable; join aborted" ||
+            message.StartsWith("All relays closed before room creation completed", StringComparison.OrdinalIgnoreCase) ||
+            message.StartsWith("Signaling closed before room join completed", StringComparison.OrdinalIgnoreCase) ||
             message == "Signaling failed" ||
             message == "Host identity changed" ||
             message == "Host identity verification failed" ||

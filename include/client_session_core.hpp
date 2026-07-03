@@ -93,6 +93,8 @@ private:
     void handleSignalingMessage(const SignalingFrame& frame);
     // 当前是否仍有至少一个 relay 可用于发送。
     bool hasOpenRelay() const;
+    // 当前 relay pool 是否已经全部进入失败状态。
+    bool allRelaysFailed() const;
     // 发送前尝试恢复已经关闭的 relay，使重启后的 relay 能重新进入可用集合。
     void reconnectClosedRelays();
     // 发出当前 relay pool 健康摘要给 CLI/WinUI。
@@ -103,6 +105,8 @@ private:
     void markRelayHealthy(std::size_t relayIndex, const std::string& url);
     // relay 失败后进入沉默期，避免坏 relay 持续刷屏。
     bool markRelayFailure(std::size_t relayIndex, const std::string& url, const std::string& status);
+    // 所有 relay 均不可用时结束本机会话，让 UI/CLI 回到可重新加入的状态。
+    void handleAllRelaysUnavailable(const std::string& reason);
     // 查找 WebSocket 指针对应的 relay URL。
     std::string relayUrlFor(const std::shared_ptr<rtc::WebSocket>& relay) const;
     // 从 room relay pool 中按房间群密钥派生的调度摘要选择 relay。
@@ -233,6 +237,7 @@ private:
     std::vector<int> mRelayFailureStreak;
     std::vector<bool> mRelayFailureReported;
     std::size_t mRelaySendCursor = 0;
+    std::atomic_bool mAllRelaysUnavailableReported = false;
     std::uint64_t mLastGkaContributionEpoch = 0;
     // 仅在 Server 接受 join_room 并分配 clientId 后为 true。
     // 此前关闭表示准入/连接失败，而不是聊天中断。

@@ -179,6 +179,63 @@ std::string relayLabel(const std::string& url) {
     return url.substr(start);
 }
 
+bool isLocalOrLanRelayUrl(const std::string& url) {
+    auto lower = url;
+    std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    if (lower.rfind("wss://", 0) != 0) return false;
+    auto pos = std::string("wss://").size();
+    if (pos < lower.size() && lower[pos] == '[') {
+        const auto end = lower.find(']', pos + 1);
+        if (end == std::string::npos) return false;
+        const auto host = lower.substr(pos + 1, end - pos - 1);
+        return host == "::1" || host.rfind("fc", 0) == 0 || host.rfind("fd", 0) == 0 || host.rfind("fe80", 0) == 0;
+    }
+    const auto end = lower.find_first_of(":/?#", pos);
+    const auto host = lower.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
+    if (host == "localhost") return true;
+    std::istringstream parts(host);
+    std::string item;
+    int ip[4] = {};
+    for (int i = 0; i < 4; ++i) {
+        if (!std::getline(parts, item, '.')) return false;
+        if (item.empty() || item.size() > 3) return false;
+        int value = 0;
+        for (const auto ch : item) {
+            if (!std::isdigit(static_cast<unsigned char>(ch))) return false;
+            value = value * 10 + (ch - '0');
+        }
+        if (value > 255) return false;
+        ip[i] = value;
+    }
+    if (!parts.eof()) return false;
+    return ip[0] == 10 ||
+        ip[0] == 127 ||
+        (ip[0] == 169 && ip[1] == 254) ||
+        (ip[0] == 172 && ip[1] >= 16 && ip[1] <= 31) ||
+        (ip[0] == 192 && ip[1] == 168);
+}
+
+bool looksLikeTlsTrustError(std::string error) {
+    std::transform(error.begin(), error.end(), error.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    return error.find("tls") != std::string::npos ||
+        error.find("ssl") != std::string::npos ||
+        error.find("cert") != std::string::npos ||
+        error.find("x509") != std::string::npos ||
+        error.find("verify") != std::string::npos ||
+        error.find("handshake") != std::string::npos;
+}
+
+std::string relayErrorMessage(const std::string& url, const std::string& error) {
+    if (isLocalOrLanRelayUrl(url) && looksLikeTlsTrustError(error)) {
+        return "local/LAN WSS relay requires a matching local TLS-CA";
+    }
+    return "Relay error: " + relayLabel(url) + ": " + error;
+}
+
 std::chrono::seconds relayRetryDelay(int failureStreak) {
     const auto shift = (std::min)(failureStreak, 4);
     return std::chrono::seconds((std::min)(RelayRetryMaxSeconds, RelayRetryBaseSeconds * (1 << shift)));
@@ -344,6 +401,7 @@ void HostSessionCore::setCallbacks(ChatCallbacks callbacks) {
 void HostSessionCore::start() {
     mStopped.store(false);
     mSignalingWorkerStopping.store(false);
+    mAllRelaysUnavailableReported.store(false);
     if (!mSignalingThread.joinable()) {
         mSignalingThread = std::thread([this]() {
             signalingWorkerLoop();
@@ -389,6 +447,12 @@ void HostSessionCore::connectRelay(std::size_t relayIndex) {
         markRelayFailure(relayIndex, url, "offline");
         chatEmit(mCallbacks.onError, e.what());
         emitRelayStatus();
+        if (!hasOpenRelay() && allRelaysFailed()) {
+            handleAllRelaysUnavailable(
+                mRoomCreated.load()
+                    ? "All relays are unavailable; left current room"
+                    : "All relays closed before room creation completed; check relay pool, room directory, PKI files, and rebuild all components if one executable was updated");
+        }
         return;
     }
     auto ws = std::make_shared<rtc::WebSocket>(relayConfig);
@@ -435,18 +499,25 @@ void HostSessionCore::connectRelay(std::size_t relayIndex) {
             chatEmit(mCallbacks.onStatus, "Relay closed: " + relayLabel(url));
             emitRelayStatus();
         }
-        if (!mStopped.load() && !hasOpenRelay() && !mRoomCreated.load()) {
-            chatEmit(
-                mCallbacks.onError,
-                "All relays closed before room creation completed; check relay pool, room directory, PKI files, and rebuild all components if one executable was updated");
+        if (!mStopped.load() && !hasOpenRelay() && allRelaysFailed()) {
+            handleAllRelaysUnavailable(
+                mRoomCreated.load()
+                    ? "All relays are unavailable; left current room"
+                    : "All relays closed before room creation completed; check relay pool, room directory, PKI files, and rebuild all components if one executable was updated");
         }
     });
 
     ws->onError([this, url, relayIndex](std::string error) {
         const auto report = markRelayFailure(relayIndex, url, "offline");
         if (report) {
-            chatEmit(mCallbacks.onError, "Relay error: " + relayLabel(url) + ": " + error);
+            chatEmit(mCallbacks.onError, relayErrorMessage(url, error));
             emitRelayStatus();
+        }
+        if (!mStopped.load() && !hasOpenRelay() && allRelaysFailed()) {
+            handleAllRelaysUnavailable(
+                mRoomCreated.load()
+                    ? "All relays are unavailable; left current room"
+                    : "All relays closed before room creation completed; check relay pool, room directory, PKI files, and rebuild all components if one executable was updated");
         }
     });
 
@@ -499,6 +570,7 @@ void HostSessionCore::markRelayHealthy(std::size_t relayIndex, const std::string
         mRelayNextRetryAt[relayIndex] = {};
         mRelayFailureReported[relayIndex] = false;
     }
+    mAllRelaysUnavailableReported.store(false);
     try {
         chat::relay_pool::markRelayStatus(mRoomDir, url, "healthy");
     }
@@ -537,6 +609,13 @@ bool HostSessionCore::markRelayFailure(std::size_t relayIndex, const std::string
         mCallbacks.onRelayStatus,
         "paused " + relayLabel(url) + " for " + std::to_string(delay.count()) + "s after " + std::to_string(failures) + " failure(s)");
     return true;
+}
+
+void HostSessionCore::handleAllRelaysUnavailable(const std::string& reason) {
+    if (mStopped.load()) return;
+    if (mAllRelaysUnavailableReported.exchange(true)) return;
+    chatEmit(mCallbacks.onError, reason);
+    requestStopNoJoin();
 }
 
 void HostSessionCore::requestStopNoJoin() {
@@ -604,6 +683,15 @@ bool HostSessionCore::hasOpenRelay() const {
             mRelayOpen[i] && mRelayRoomReady[i] && mRelays[i] && !mRelays[i]->isClosed()) return true;
     }
     return false;
+}
+
+bool HostSessionCore::allRelaysFailed() const {
+    std::lock_guard<std::mutex> lock(mRelayMutex);
+    if (mRelayUrls.empty()) return true;
+    for (std::size_t i = 0; i < mRelayUrls.size(); ++i) {
+        if (i >= mRelayFailureReported.size() || !mRelayFailureReported[i]) return false;
+    }
+    return true;
 }
 
 std::shared_ptr<rtc::WebSocket> HostSessionCore::chooseRelayForSend(const Message& msg, const std::string& targetId) {
@@ -841,7 +929,7 @@ bool HostSessionCore::handleHostCommand(const std::string& line) {
     std::istringstream input(trimCopy(line));
     std::string command;
     input >> command;
-    if (command == "/stop_session") {
+    if (command == "/closeroom") {
         closeRoom();
         return true;
     }
