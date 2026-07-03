@@ -135,6 +135,7 @@ bool isAttachmentBinaryType(const std::string& type) {
 bool isReliablePayloadType(const std::string& type) {
     attachment::Kind ignored = attachment::Kind::Text;
     return type == "text" ||
+        type == "nickname_update" ||
         type == chat::secure_relay::PairwisePrivateType ||
         attachmentKindForMeta(type, ignored) ||
         isAttachmentBinaryType(type);
@@ -160,6 +161,16 @@ std::string normalizeNickname(const std::string& nickname, const std::string& fa
         if (c < 0x20 || c == 0x7f) return fallbackName;
     }
     return trimmed;
+}
+
+bool validNicknameCommandValue(const std::string& nickname) {
+    const auto trimmed = trimCopy(nickname);
+    if (trimmed.empty() || trimmed.size() > 64) return false;
+    for (const auto ch : trimmed) {
+        const auto c = static_cast<unsigned char>(ch);
+        if (c < 0x20 || c == 0x7f) return false;
+    }
+    return true;
 }
 
 std::string relayLabel(const std::string& url) {
@@ -398,7 +409,6 @@ void HostSessionCore::connectRelay(std::size_t relayIndex) {
             {"type", "create_room"},
             {"roomId", mRoomToken},
             {"username", mUsername},
-            {"nickname", mDisplayName},
             {"publicKey", mMemberKeys.publicKey}
         };
         msg["identity"] = mIdentity.signJoinRoom(mRoomId, mUsername, mMemberKeys.publicKey);
@@ -740,6 +750,7 @@ void HostSessionCore::stopSignalingWorker() {
 
 // 解析一行 Host 输入，并发送聊天、命令或附件。
 void HostSessionCore::sendLine(const std::string& line) {
+    if (handleNicknameCommand(line)) return;
     if (handleAttachmentTrustCommand(line)) return;
     if (handleForumCommand(line)) return;
     if (handleHostCommand(line)) return;
@@ -936,6 +947,71 @@ bool HostSessionCore::handleAttachmentTrustCommand(const std::string& line) {
     const auto action = command == "/trust" ? "trust" : "untrust";
     chatEmit(mCallbacks.onStatus, "Attachment trust: " + std::string(action) +
         " / " + displayName + " / " + clientId + " / " + fingerprint);
+    return true;
+}
+
+bool HostSessionCore::handleNicknameCommand(const std::string& line) {
+    const auto trimmedLine = trimCopy(line);
+    if (trimmedLine != "/nickname" && trimmedLine.rfind("/nickname ", 0) != 0) {
+        return false;
+    }
+
+    auto nickname = trimCopy(trimmedLine.size() > std::string("/nickname").size()
+        ? trimmedLine.substr(std::string("/nickname").size())
+        : std::string());
+    if (nickname.empty()) {
+        nickname = mBaseUsername.empty() ? mUsername : mBaseUsername;
+    }
+    if (!validNicknameCommandValue(nickname)) {
+        chatEmit(mCallbacks.onError, "Usage: /nickname [name]");
+        return true;
+    }
+    if (!mRoomCreated.load()) {
+        chatEmit(mCallbacks.onError, "Cannot change nickname before joining the room");
+        return true;
+    }
+    if (!chat::secure_relay::hasUsableGroupKey(mGroupKey)) {
+        chatEmit(mCallbacks.onError, "Room group key is not ready");
+        return true;
+    }
+
+    const auto oldNickname = mDisplayName;
+    mDisplayName = nickname;
+    mPublishedNickname.clear();
+    mNicknamePublishedEpoch = 0;
+    if (!publishNickname()) {
+        mDisplayName = oldNickname;
+        chatEmit(mCallbacks.onError, "Nickname update failed: no relay is available");
+        return true;
+    }
+
+    chatEmit(mCallbacks.onStatus, "Nickname changed: " + nickname);
+    return true;
+}
+
+bool HostSessionCore::publishNickname() {
+    if (!mRoomCreated.load() || !chat::secure_relay::hasUsableGroupKey(mGroupKey)) {
+        return false;
+    }
+    const auto nickname = normalizeNickname(mDisplayName, mBaseUsername.empty() ? mUsername : mBaseUsername);
+    if (mNicknamePublishedEpoch == mGroupKeyEpoch && mPublishedNickname == nickname) {
+        return true;
+    }
+
+    Message msg;
+    msg.type = "nickname_update";
+    msg.from = nickname;
+    setActorMetadata(msg, chat::protocol::HostActorId, chat::protocol::HostActorKind, nickname);
+    if (!sendRelayMessage(msg, chat::protocol::HostActorId, nickname, chat::protocol::HostActorKind, "")) {
+        return false;
+    }
+
+    mDisplayName = nickname;
+    mPublishedNickname = nickname;
+    mNicknamePublishedEpoch = mGroupKeyEpoch;
+    chatEmit(
+        mCallbacks.onStatus,
+        "PKI member verified: " + nickname + " / " + chat::protocol::HostActorId + " / " + mIdentity.fingerprint());
     return true;
 }
 
@@ -2010,6 +2086,7 @@ void HostSessionCore::tryCommitGkaEpoch() {
     }
     chatEmit(mCallbacks.onStatus, "Room group key ready");
     announceVerifiedMembers();
+    publishNickname();
 }
 
 bool HostSessionCore::sendAttachmentRelay(
@@ -2130,9 +2207,17 @@ void HostSessionCore::handleSignalingMessage(const SignalingFrame& frame) {
                 const auto id = member.value("id", "");
                 const auto username = member.value("username", id);
                 const auto displayName = member.value("displayName", username);
+                auto shownName = displayName.empty() ? username : displayName;
+                if (!id.empty()) {
+                    std::lock_guard<std::mutex> lock(mClientsMutex);
+                    if (const auto knownName = mClientNames.find(id);
+                        knownName != mClientNames.end() && !knownName->second.empty()) {
+                        shownName = knownName->second;
+                    }
+                }
                 // 发出 name/id，使 UI Client 不暴露原始信令 JSON
                 // 也能保留内部 PKI 映射。
-                members << displayName << " / " << id;
+                members << shownName << " / " << id;
                 if (member.value("role", "") == "client") {
                     if (!id.empty()) onlineClientIds.insert(id);
                     clientIdentityCandidates.push_back(member);
@@ -2708,6 +2793,37 @@ void HostSessionCore::handleRelayMessage(const Message& msg) {
     // member_identity 是 Host 发起且只发给 Client 的控制消息；
     // 如果它回环到 Host，Host 会忽略。
     if (msg.type == "member_identity") {
+        return;
+    }
+
+    if (msg.type == "nickname_update") {
+        const auto relaySenderId = msg.payload.value("relaySenderId", "");
+        const auto actorId = msg.payload.value("actorId", "");
+        const auto actorKind = msg.payload.value("actorKind", "");
+        const auto displayName = msg.payload.value("displayName", "");
+        if (relaySenderId.empty() || actorId != relaySenderId ||
+            actorId == chat::protocol::HostActorId ||
+            actorKind != chat::protocol::ClientActorKind ||
+            !validNicknameCommandValue(displayName)) {
+            chatEmit(mCallbacks.onError, "Dropped invalid encrypted nickname update");
+            return;
+        }
+
+        std::string fingerprint;
+        {
+            std::lock_guard<std::mutex> lock(mClientsMutex);
+            if (mClientUsernames.find(actorId) == mClientUsernames.end() &&
+                mClientPublicKeys.find(actorId) == mClientPublicKeys.end()) {
+                return;
+            }
+            mClientNames[actorId] = displayName;
+            const auto fp = mClientIdentityFingerprints.find(actorId);
+            if (fp != mClientIdentityFingerprints.end()) fingerprint = fp->second;
+        }
+        if (!fingerprint.empty()) {
+            chatEmit(mCallbacks.onStatus, "PKI member verified: " + displayName + " / " + actorId + " / " + fingerprint);
+        }
+        chatEmit(mCallbacks.onStatus, "Nickname updated: " + displayName);
         return;
     }
 

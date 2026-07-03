@@ -113,13 +113,6 @@ bool validName(const std::string& value, std::size_t maxLength) {
     return true;
 }
 
-std::string displayNameOrUsername(const json& data, const std::string& username) {
-    // nickname/displayName 只用于房间成员列表展示。
-    // 空值、控制字符或超长昵称都回退到 PKI 绑定的 username。
-    const auto nickname = data.value("nickname", "");
-    return validName(nickname, 64) ? nickname : username;
-}
-
 bool hasOnlyFields(const json& data, std::initializer_list<const char*> allowed) {
     for (const auto& item : data.items()) {
         bool found = false;
@@ -229,22 +222,20 @@ void requireFieldsForType(const json& data, const std::string& type) {
         stringField(data, "nonce", 64, true);
     }
     else if (type == "create_room") {
-        if (!hasOnlyFields(data, {"type", "roomId", "username", "nickname", "publicKey", "identity"})) {
+        if (!hasOnlyFields(data, {"type", "roomId", "username", "publicKey", "identity"})) {
             throw std::runtime_error("create_room has unknown field");
         }
         stringField(data, "roomId", 64, true);
         stringField(data, "username", maxUsernameBytes, true);
-        stringField(data, "nickname", 64, false);
         stringField(data, "publicKey", maxPublicKeyBytes, true);
         identityField(data, true);
     }
     else if (type == "join_room" || type == "member_rejoin") {
-        if (!hasOnlyFields(data, {"type", "roomId", "username", "nickname", "publicKey", "memberFingerprint", "identity", "admissionPayload"})) {
+        if (!hasOnlyFields(data, {"type", "roomId", "username", "publicKey", "memberFingerprint", "identity", "admissionPayload"})) {
             throw std::runtime_error(type + " has unknown field");
         }
         stringField(data, "roomId", 64, true);
         stringField(data, "username", maxUsernameBytes, true);
-        stringField(data, "nickname", 64, false);
         stringField(data, "publicKey", maxPublicKeyBytes, true);
         stringField(data, "memberFingerprint", 128, false);
         identityField(data, false);
@@ -719,7 +710,7 @@ void SignalingServer::handleCreateRoom(rtc::WebSocket* key, const json& data) {
     // 并把积压的 pending join 交回 Host。
     const std::string roomId = data.value("roomId", "");
     const std::string username = data.value("username", "host");
-    const std::string displayName = displayNameOrUsername(data, username);
+    const std::string displayName = username;
     const std::string publicKey = data.value("publicKey", "");
     if (roomId.empty()) {
         sendToClient(key, {{"type", "error"}, {"message", "missing roomId"}});
@@ -826,7 +817,7 @@ void SignalingServer::handleJoinRoom(rtc::WebSocket* key, const json& data) {
     // Server 不直接把新连接放进 active member 集合；Host 必须显式 approve。
     const std::string roomId = data.value("roomId", "");
     const std::string username = data.value("username", "");
-    const std::string displayName = displayNameOrUsername(data, username);
+    const std::string displayName = username;
     const std::string publicKey = data.value("publicKey", "");
     const std::string memberFingerprint = data.value("memberFingerprint", "");
     std::shared_ptr<rtc::WebSocket> clientWs;

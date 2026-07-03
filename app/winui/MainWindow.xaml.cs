@@ -1012,6 +1012,11 @@ public sealed partial class MainWindow : Window
             message.StartsWith("Forum sync", StringComparison.OrdinalIgnoreCase) ||
             message.StartsWith("Forum records", StringComparison.OrdinalIgnoreCase) ||
             message.StartsWith("Forum post", StringComparison.OrdinalIgnoreCase) ||
+            message.StartsWith("Joined room", StringComparison.OrdinalIgnoreCase) ||
+            message.StartsWith("Rejoined room", StringComparison.OrdinalIgnoreCase) ||
+            message.StartsWith("Client joined:", StringComparison.OrdinalIgnoreCase) ||
+            message.StartsWith("Nickname changed:", StringComparison.OrdinalIgnoreCase) ||
+            message.StartsWith("Nickname updated:", StringComparison.OrdinalIgnoreCase) ||
             message.StartsWith("PKI identity ready:", StringComparison.OrdinalIgnoreCase) ||
             message.StartsWith("PKI member verified:", StringComparison.OrdinalIgnoreCase) ||
             message.StartsWith("GKA contribution verified:", StringComparison.OrdinalIgnoreCase) ||
@@ -2317,16 +2322,29 @@ public sealed partial class MainWindow : Window
         if (message.StartsWith("Joined room", StringComparison.OrdinalIgnoreCase) ||
             message.StartsWith("Rejoined room", StringComparison.OrdinalIgnoreCase))
         {
+            var rejoined = message.StartsWith("Rejoined room", StringComparison.OrdinalIgnoreCase);
+            var prefix = rejoined ? "Rejoined room " : "Joined room ";
+            var shownRoom = roomName.Trim();
+            if (shownRoom.Length == 0)
+            {
+                var rawRoom = message[prefix.Length..].Trim();
+                var asIndex = rawRoom.LastIndexOf(" as ", StringComparison.Ordinal);
+                shownRoom = (asIndex > 0 ? rawRoom[..asIndex] : rawRoom).Trim();
+            }
             if (string.IsNullOrWhiteSpace(activeRoomDir))
             {
-                activeRoomDir = LatestRoomDir(roomName, JoinUserBox.Text.Trim(), "client");
+                activeRoomDir = LatestRoomDir(shownRoom, JoinUserBox.Text.Trim(), "client");
             }
             SetSessionMode(SessionMode.Join);
             MarkLocalIdentityIfPossible();
             ReloadMessageHistory();
             NativeMethods.chat_forum_sync();
             RefreshForumPanel();
-            ShowInfo(message, InfoBarSeverity.Success);
+            ShowInfo(
+                rejoined
+                    ? UiText($"Welcome back to {shownRoom}", $"欢迎回到房间：{shownRoom}")
+                    : UiText($"Welcome to {shownRoom}", $"欢迎加入房间：{shownRoom}"),
+                InfoBarSeverity.Success);
             return;
         }
 

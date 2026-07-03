@@ -169,6 +169,10 @@ private:
     void rememberTextHistory(const Message& msg, bool isOwn);
     // 处理本机附件预览信任命令。该状态只影响当前 UI/CLI，不进入网络协议。
     bool handleAttachmentTrustCommand(const std::string& line);
+    // 更新本成员在房间内的运行时显示昵称。
+    bool handleNicknameCommand(const std::string& line);
+    // 把当前昵称作为加密应用层控制消息广播；Server 只能看到 encrypted_relay。
+    bool publishNickname();
     bool handleForumCommand(const std::string& line);
     // 将原始控制台/UI 输入转换为协议消息。
     Message parseInput(const std::string& line);
@@ -214,6 +218,8 @@ private:
     chat::pki_application::IdentityContext mIdentity;
     std::vector<unsigned char> mGroupKey;
     std::uint64_t mGroupKeyEpoch = 0;
+    std::string mPublishedNickname;
+    std::uint64_t mNicknamePublishedEpoch = 0;
     std::mutex mSignalingQueueMutex;
     std::condition_variable mSignalingQueueCv;
     std::deque<SignalingFrame> mSignalingQueue;

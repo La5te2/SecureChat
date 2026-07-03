@@ -80,6 +80,10 @@ private:
     bool handleForumCommand(const std::string& line);
     // 处理本机附件预览信任命令。该状态只影响当前 UI/CLI，不进入网络协议。
     bool handleAttachmentTrustCommand(const std::string& line);
+    // 更新本成员在房间内的运行时显示昵称。
+    bool handleNicknameCommand(const std::string& line);
+    // 把当前昵称作为加密应用层控制消息广播；Server 只能看到 encrypted_relay。
+    bool publishNickname();
     // 批准一个已验证的 pending join，使对应 relay 将其提升为 active Client。
     void approvePendingJoin(const std::string& token);
     // 拒绝一个 pending join，并把签名原因返回给申请者。
@@ -304,6 +308,8 @@ private:
     std::thread mGkaTimeoutThread;
     bool mGkaTimeoutStop = false;
     std::uint64_t mGroupKeyEpoch = 0;
+    std::string mPublishedNickname;
+    std::uint64_t mNicknamePublishedEpoch = 0;
     std::uint64_t mPendingGkaEpoch = 0;
     std::chrono::steady_clock::time_point mPendingGkaDeadline{};
     std::unordered_set<std::string> mPendingGkaMembers;
