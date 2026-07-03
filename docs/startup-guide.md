@@ -328,6 +328,15 @@ printf '%s\n' 'wss://chat.example.com:25566' > relay-pool.txt
 
 群发文本：直接输入文本。
 
+修改显示昵称：
+
+```text
+/nickname <昵称>
+/nickname
+```
+
+`/nickname <昵称>` 会在当前房间内更新自己的显示昵称；单独输入 `/nickname` 会清除运行时昵称并回退显示 base username。昵称只用于成员列表和消息展示，不用于私发目标、审批、禁言或驱逐匹配。昵称更新经过房间密钥加密，Server 不能读取昵称明文。
+
 私发文本：
 
 ```text

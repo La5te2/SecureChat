@@ -46,7 +46,7 @@ Host/Client 会验证证书链、证书有效期、Key Usage `digitalSignature`�
 
 成员私钥只在本机使用。WinUI 读取的是 room-dir 中的本机成员私钥文件，不会把私钥内容写入配置文件，也不会上传给 Server。
 
-成员身份分为三层。`baseUsername` 是用户在 CLI/WinUI 输入的原始用户名，可以和其他成员重复；`system username` 是房间级成员证书公钥指纹派生出的协议用户名，格式为 `baseUsername_` 加公钥指纹前 16 位十六进制字符，同一个 room instance 内不能重复；`nickname/displayName` 只用于界面显示，可以重复。Server 放行的 system username 长度预算为 128 字节。WinUI 成员列表显示 nickname 或 base username，不直接显示 system username。
+成员身份分为三层。`baseUsername` 是用户在 CLI/WinUI 输入的原始用户名，可以和其他成员重复；`system username` 是房间级成员证书公钥指纹派生出的协议用户名，格式为 `baseUsername_` 加公钥指纹前 16 位十六进制字符，同一个 room instance 内不能重复；`nickname/displayName` 只用于界面显示，可以重复。Server 放行的 system username 长度预算为 128 字节。WinUI 成员列表显示 nickname 或 base username，不直接显示 system username。Host/Client 可以用启动参数 `--nickname` 设置默认昵称，也可以在房间内用 `/nickname <新昵称>` 修改当前显示昵称；只输入 `/nickname` 会清除运行时昵称并回退显示 base username。运行时昵称更新作为加密中继 payload 发送，Server 只看到 opaque envelope。
 
 ### 贡献式 GKA
 
@@ -393,6 +393,14 @@ WinUI 面向日常使用场景。
 成员名只用于图形界面展示，不用于私发目标匹配。私发目标使用证书指纹前缀，协议内部仍有连接路由 id，用于 Server relay、身份绑定和排障。
 
 ## CLI 命令
+
+所有成员都可以使用的本地命令：
+
+```text
+/nickname [昵称]
+```
+
+`/nickname <昵称>` 会修改当前 room instance 内的显示昵称；`/nickname` 后面不带内容时清除运行时昵称，成员列表和消息显示回退到 base username。昵称更新通过 room group key 加密后转发，Server 不能读取昵称明文。nickname 只影响显示，不作为私发、审批、禁言或驱逐的匹配目标。
 
 Host 管理命令在 Host 输入框或 CLI 标准输入中发送：
 

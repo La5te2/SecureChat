@@ -1050,6 +1050,14 @@ PKI 身份认证现在强制绑定成员证书、临时 public key、GKA contrib
   - 单个 relay 的 `room_members` 只用于更新该 relay 上出现的成员，不再被当作全局成员在线列表。
   - 已完成两个本地回环 WSS relay（25566/25567）的 CLI 烟测，覆盖 Host 创建房间、Client pending join、Host approve、GKA ready 和双向文本收发。
 
+- [x] 支持运行时昵称更新。
+  - Host/Client 启动参数 `--nickname` 设置默认显示昵称。
+  - 所有 active 成员可以在房间内输入 `/nickname <昵称>` 修改自己的显示昵称。
+  - 单独输入 `/nickname` 清除运行时昵称，显示回退到 baseUsername。
+  - nickname 只用于成员列表和消息展示，不作为 PKI 身份、私发目标、审批、禁言或驱逐匹配字段。
+  - nickname update 使用 room group key 加密后通过 encrypted relay 同步，Server 只看到 opaque envelope。
+  - 新 epoch 或新成员入房后，Host/Client 会重新发布当前 nickname，使新成员能够看到已有成员的显示名。
+
 - [x] 实现房间级秘密 relay 调度。
   - relay 调度采用统一的确定性 selector：对当前可用集合 `M(t)` 中的每个 relay 计算 HMAC-SHA256 score，再按 score 从小到大排序。
   - 排序输入必须绑定每条 payload 的唯一材料，例如 messageId、routeNonce、transferId、chunkIndex 和 attempt；因此即使 `M(t)` 长期不变，不同 payload 也会得到不同的 relay 顺序。
