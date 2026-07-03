@@ -418,7 +418,17 @@ void ClientSessionCore::connectRelay(std::size_t relayIndex) {
     catch (...) {
     }
 
-    auto ws = std::make_shared<rtc::WebSocket>(mWsConfig);
+    rtc::WebSocket::Configuration relayConfig;
+    try {
+        relayConfig = chat::websocket_config::clientConfigForUrl(mWsConfig, url);
+    }
+    catch (const std::exception& e) {
+        markRelayFailure(relayIndex, url, "offline");
+        chatEmit(mCallbacks.onError, e.what());
+        emitRelayStatus();
+        return;
+    }
+    auto ws = std::make_shared<rtc::WebSocket>(relayConfig);
     {
         std::lock_guard<std::mutex> lock(mRelayMutex);
         if (mRelays.size() < mRelayUrls.size()) mRelays.resize(mRelayUrls.size());

@@ -72,7 +72,12 @@ RelayProbeResult probeRelayIdentity(const std::string& url, int timeoutMs) {
     };
 
     rtc::WebSocket::Configuration config;
-    chat::websocket_config::applyClientTlsFromEnvironment(config);
+    try {
+        config = chat::websocket_config::clientConfigForUrl(config, url);
+    }
+    catch (...) {
+        return {};
+    }
     auto state = std::make_shared<ProbeState>();
     auto ws = std::make_shared<rtc::WebSocket>(config);
     const auto nonce = chat::cert_utils::base64Encode(chat::cert_utils::randomBytes(16));

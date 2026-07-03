@@ -1482,10 +1482,16 @@ public sealed partial class MainWindow : Window
         var memberId = message[(open + 2)..close].Trim();
         if (username.Length > 0 && memberId.Length > 0 && pendingLocalIdentityFingerprint.Length > 0)
         {
-            MarkVerifiedMember(username, memberId, pendingLocalIdentityFingerprint);
+            MarkVerifiedMember(LocalDisplayName(username), memberId, pendingLocalIdentityFingerprint);
             return true;
         }
         return false;
+    }
+
+    private string LocalDisplayName(string fallback)
+    {
+        var nickname = MemberDefaultNicknameBox.Text.Trim();
+        return nickname.Length == 0 ? fallback : nickname;
     }
 
     private void MarkLocalIdentityIfPossible()
@@ -1494,7 +1500,7 @@ public sealed partial class MainWindow : Window
 
         if (sessionMode == SessionMode.Host)
         {
-            var displayName = HostUserBox.Text.Trim();
+            var displayName = LocalDisplayName(HostUserBox.Text.Trim());
             ownActorId = "host";
             MarkVerifiedMember(displayName.Length == 0 ? "host" : displayName, "host", pendingLocalIdentityFingerprint);
             return;
@@ -2300,7 +2306,7 @@ public sealed partial class MainWindow : Window
                 activeRoomDir = LatestRoomDir(shownRoom, HostUserBox.Text.Trim(), "host");
             }
             SetSessionMode(SessionMode.Host);
-            AddParticipant(HostUserBox.Text.Trim());
+            AddParticipant(LocalDisplayName(HostUserBox.Text.Trim()));
             MarkLocalIdentityIfPossible();
             ReloadMessageHistory();
             ShowInfo(
@@ -2314,7 +2320,7 @@ public sealed partial class MainWindow : Window
         if (message.StartsWith("Join request is waiting for Host approval", StringComparison.OrdinalIgnoreCase))
         {
             SetSessionMode(SessionMode.PendingJoin);
-            AddPendingParticipant(JoinUserBox.Text.Trim());
+            AddPendingParticipant(LocalDisplayName(JoinUserBox.Text.Trim()));
             ShowInfo(UiText("Waiting for Host approval", "等待群主允许加入"), InfoBarSeverity.Informational);
             return;
         }
@@ -2896,11 +2902,6 @@ public sealed partial class MainWindow : Window
         SaveAppConfigIfReady();
     }
 
-    private async void BrowseLocalServerTlsCa_Click(object sender, RoutedEventArgs e)
-    {
-        await PickPkiFileIntoAsync(LocalServerTlsCaBox);
-    }
-
     private async System.Threading.Tasks.Task<string?> PickEntranceFileAsync()
     {
         var picker = new FileOpenPicker();
@@ -2929,9 +2930,13 @@ public sealed partial class MainWindow : Window
 
     private bool ApplyServerTlsEnvironment()
     {
-        // SECURECHAT_LOCAL_TLS_CA 只影响本地/局域网 WSS 服务器证书验证。
-        // 该项是可选项：公网证书通常由系统信任 CA 签发，本地/局域网自签证书才需要填写。
-        return SetProcessEnvironmentFromBox("SECURECHAT_LOCAL_TLS_CA", LocalServerTlsCaBox);
+        // WinUI 不在设置面板展示本地 TLS CA。用户需要在 config.yml 的
+        // [local-TLS] 段写入一个或多个 CA 文件路径；native 侧会把这些
+        // CA 作为本地/局域网 WSS 的显式信任根。
+        var caFiles = ReadSectionLinesFromConfig(AppConfigPath(), "local-TLS")
+            .Where(File.Exists)
+            .ToList();
+        return SetProcessEnvironmentValue("SECURECHAT_LOCAL_TLS_CA", string.Join(';', caFiles));
     }
 
     private bool SetProcessEnvironmentFromBox(string name, TextBox textBox)
@@ -3374,9 +3379,6 @@ public sealed partial class MainWindow : Window
             RoomIdentityHeaderText.Text = UiText("Room Identity", "房间身份");
             MemberDefaultNicknameBox.Header = UiText("Member default nickname", "成员默认昵称");
             MemberKeyPassBox.Header = UiText("Member key passphrase", "成员私钥口令");
-            ServerTlsHeaderText.Text = UiText("Server TLS", "服务器 TLS");
-            LocalServerTlsCaBox.Header = UiText("Local Server TLS CA", "本地服务器 TLS 信任根");
-            BrowseLocalServerTlsCaButton.Content = UiText("Browse", "选择");
             RoomInstanceTitleText.Text = UiText("Select Room Instance", "选择房间实例");
             RoomInstanceConfirmButton.Content = UiText("Confirm", "确认");
             RoomInstanceCancelButton.Content = UiText("Cancel", "取消");
@@ -3510,7 +3512,6 @@ public sealed partial class MainWindow : Window
             AppendYaml(builder, "auto_preview_images", autoPreviewImages ? "true" : "false");
             AppendYaml(builder, "auto_load_audio", autoLoadAudio ? "true" : "false");
             AppendYaml(builder, "member_default_nickname", MemberDefaultNicknameBox.Text.Trim());
-            AppendYaml(builder, "local_server_tls_ca", LocalServerTlsCaBox.Text.Trim());
             AppendYaml(builder, "chat_background_path", chatBackgroundPath ?? "");
             AppendYaml(builder, "chat_background_opacity", NumberString(BackgroundOpacitySlider.Value));
             AppendYaml(builder, "chat_background_crop_x", ComboTag(BackgroundHorizontalComboBox));
@@ -3530,6 +3531,12 @@ public sealed partial class MainWindow : Window
             foreach (var url in poolUrls)
             {
                 builder.AppendLine(url);
+            }
+            builder.AppendLine();
+            builder.AppendLine("[local-TLS]");
+            foreach (var caFile in ReadSectionLinesFromConfig(AppConfigPath(), "local-TLS"))
+            {
+                builder.AppendLine(caFile);
             }
 
             File.WriteAllText(AppConfigPath(), builder.ToString(), Encoding.UTF8);
@@ -3561,7 +3568,6 @@ public sealed partial class MainWindow : Window
             AutoPreviewImagesToggleSwitch.IsOn = autoPreviewImages;
             AutoLoadAudioToggleSwitch.IsOn = autoLoadAudio;
             MemberDefaultNicknameBox.Text = Value(chatValues, "member_default_nickname", "");
-            LocalServerTlsCaBox.Text = Value(chatValues, "local_server_tls_ca", "");
             SetSlider(BackgroundOpacitySlider, Value(chatValues, "chat_background_opacity", "0.28"));
             SetComboByTag(BackgroundHorizontalComboBox, Value(chatValues, "chat_background_crop_x", "Center"));
             SetComboByTag(BackgroundVerticalComboBox, Value(chatValues, "chat_background_crop_y", "Center"));
@@ -3639,22 +3645,33 @@ public sealed partial class MainWindow : Window
         return config;
     }
 
-    private static List<string> ReadPoolUrlsFromConfig(string path)
+    private static List<string> ReadSectionLinesFromConfig(string path, string sectionName)
     {
-        var urls = new List<string>();
-        if (!File.Exists(path)) return urls;
+        var values = new List<string>();
+        if (!File.Exists(path)) return values;
 
-        var inPool = false;
+        var inSection = false;
         foreach (var raw in File.ReadAllLines(path))
         {
             var line = raw.Trim();
             if (line.Length == 0 || line.StartsWith("#", StringComparison.Ordinal)) continue;
             if (line.Length > 2 && line[0] == '[' && line[^1] == ']')
             {
-                inPool = string.Equals(line[1..^1].Trim(), "pool", StringComparison.OrdinalIgnoreCase);
+                inSection = string.Equals(line[1..^1].Trim(), sectionName, StringComparison.OrdinalIgnoreCase);
                 continue;
             }
-            if (!inPool) continue;
+            if (!inSection) continue;
+            values.Add(UnquoteYaml(line));
+        }
+
+        return values;
+    }
+
+    private static List<string> ReadPoolUrlsFromConfig(string path)
+    {
+        var urls = new List<string>();
+        foreach (var line in ReadSectionLinesFromConfig(path, "pool"))
+        {
             if (line.StartsWith("wss://", StringComparison.OrdinalIgnoreCase))
             {
                 urls.Add(line);

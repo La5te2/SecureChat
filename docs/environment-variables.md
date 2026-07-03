@@ -47,7 +47,7 @@ SECURECHAT_TLS_KEY_PASS
 | `SECURECHAT_TLS_CERT_FILE` | 空 | TLS 证书链 PEM 路径。手动运行 `server` 时可留空，C++ Server 会自动生成本地/局域网证书；`start_server.sh` 未设置时会填入 `certs/fullchain.pem`。 |
 | `SECURECHAT_TLS_KEY_FILE` | 空 | TLS 私钥 PEM 路径。手动运行 `server` 时可留空，C++ Server 会自动生成本地/局域网私钥；`start_server.sh` 未设置时会填入 `certs/privkey.pem`。 |
 | `SECURECHAT_TLS_KEY_PASS` | 空 | TLS 私钥密码；只有私钥加密时需要。 |
-| `SECURECHAT_LOCAL_TLS_CA` | 空 | Host/Client/WinUI 使用的本地服务器 CA PEM 路径；用于信任自动生成的本地或局域网 WSS 入口证书。 |
+| `SECURECHAT_LOCAL_TLS_CA` | 空 | Host/Client/`cert.exe` 使用的本地服务器 CA PEM 路径；多个路径用分号分隔。用于显式信任自动生成的本地或局域网 WSS 入口证书。WinUI 从 `config.yml` 的 `[local-TLS]` 段生成该变量。 |
 | `SECURECHAT_TLS_AUTO_DIR` | `certs` | 手动运行 `server` 且 TLS 路径环境变量为空时，C++ Server 自动生成本地/局域网 TLS 材料的目录。 |
 
 房间 relay pool 面向成员连接的入口使用 `wss://`。`ws://` 仅作为本机回环 backend 使用；当 `SECURECHAT_SIGNALING_TLS=0` 时，Server 要求 loopback 绑定，并由外层 TLS 入口或受保护隧道接入。

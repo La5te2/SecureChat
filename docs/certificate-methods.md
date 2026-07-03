@@ -40,7 +40,7 @@ CLI Host/Client 连接该证书时设置：
 SECURECHAT_LOCAL_TLS_CA=certs/local-root-ca.pem
 ```
 
-WinUI 连接该证书时，在设置面板的 `Local Server TLS CA / 本地服务器 TLS 信任根` 中选择 `local-root-ca.pem`。
+WinUI 连接该证书时，在运行目录 `config.yml` 的 `[local-TLS]` 段写入 `local-root-ca.pem` 路径。该段可以写多行，程序会在连接本地或局域网 WSS relay 时把这些 CA 作为候选信任根。
 
 ## 使用 Certbot 申请域名证书
 

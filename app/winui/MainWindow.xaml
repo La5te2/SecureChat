@@ -295,15 +295,6 @@
                         <TextBlock x:Name="RoomIdentityHeaderText" Text="Room Identity" FontWeight="SemiBold" />
                         <TextBox x:Name="MemberDefaultNicknameBox" Header="Member default nickname" TextChanged="PersistedSetting_Changed" />
                         <PasswordBox x:Name="MemberKeyPassBox" Header="Member key passphrase" />
-                        <TextBlock x:Name="ServerTlsHeaderText" Text="Server TLS" FontWeight="SemiBold" />
-                        <Grid ColumnSpacing="8">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="88" />
-                            </Grid.ColumnDefinitions>
-                            <TextBox x:Name="LocalServerTlsCaBox" Header="Local Server TLS CA" TextChanged="PersistedSetting_Changed" />
-                            <Button x:Name="BrowseLocalServerTlsCaButton" Grid.Column="1" Content="Browse" Click="BrowseLocalServerTlsCa_Click" HorizontalAlignment="Stretch" VerticalAlignment="Bottom" />
-                        </Grid>
                         <TextBlock x:Name="ChatBackgroundHeaderText" Text="Chat Background" FontWeight="SemiBold" />
                         <Grid ColumnSpacing="8">
                             <Grid.ColumnDefinitions>

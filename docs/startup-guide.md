@@ -39,7 +39,7 @@ certs/server-chain.pem
 certs/server-key.pem
 ```
 
-CLI Host/Client 连接自动生成的开发证书时，需要设置 `SECURECHAT_LOCAL_TLS_CA=certs/local-root-ca.pem`。WinUI 连接自动生成的开发证书时，在设置面板的 `Local Server TLS CA / 本地服务器 TLS 信任根` 中选择 `local-root-ca.pem`。
+CLI Host/Client 连接自动生成的开发证书时，需要设置 `SECURECHAT_LOCAL_TLS_CA=certs/local-root-ca.pem`。多个本地 relay 使用不同 CA 时，用分号分隔多个 PEM 路径。WinUI 连接自动生成的开发证书时，在运行目录 `config.yml` 的 `[local-TLS]` 段写入 CA 文件路径，每行一个。
 
 ## Windows：构建
 
@@ -133,7 +133,7 @@ WinUI 作为 Host/Client 前端运行，Server 由独立进程提供。使用 Wi
 app\winui\bin\x64\Release\net10.0-windows10.0.19041.0\win-x64\SecureChat.exe
 ```
 
-WinUI 的 Host/Join 主界面显示 Room、User 和房间操作按钮。Host 创建房间时从 `config.yml` 的 `[pool]` 段读取 relay pool，每行一个 `wss://host:port`。如果 Server 使用 Certbot 等系统信任 CA 签发的证书，WinUI 可以直接使用系统信任链。如果 Server 使用自动生成的开发证书，在设置面板的 `Local Server TLS CA / 本地服务器 TLS 信任根` 中选择 `certs/local-root-ca.pem`。
+WinUI 的 Host/Join 主界面显示 Room、User 和房间操作按钮。Host 创建房间时从 `config.yml` 的 `[pool]` 段读取 relay pool，每行一个 `wss://host:port`。如果 Server 使用 Certbot 等系统信任 CA 签发的证书，WinUI 可以直接使用系统信任链。如果 Server 使用自动生成的开发证书，在 `config.yml` 的 `[local-TLS]` 段写入 `certs/local-root-ca.pem`。
 
 Host 页填写 Room 和 User 后点击创建房间，WinUI 会自动生成 `logs/hosts/<systemUsername>/<原始房间名>_<digest前8位>/certs/entrance.scp`。同一个 Host 可以创建多个同名房间，每次创建都会生成新的 room instance 和新的本地 room-dir。Host 页或 Join 页点击“加入房间”时只需要填写 User，WinUI 会弹出该身份下所有本地房间实例；用户确认具体实例后才会连接。Join 页首次加入时填写同一个 Room 和当前 User，点击“导入房间”，并在弹出的文件选择器中选择 Host 分发的 `entrance.scp`。Client 导入后会在 `logs/clients/<systemUsername>/<原始房间名>_<digest前8位>/certs/entrance.scp` 保存准入副本。Client 进入 pending join 后，Host 可以左键灰色 pending 成员卡片允许加入，右键灰色 pending 成员卡片会拒绝该申请。WinUI 不显示 pending requestId。
 
@@ -249,7 +249,7 @@ unset SECURECHAT_TLS_CERT_FILE SECURECHAT_TLS_KEY_FILE
 
 自动生成本地证书时，Server 会把当前主机名、`localhost`、`127.0.0.1` 和探测到的局域网 IP 写入证书的 Subject Alternative Name。自动生成路径只用于本机和局域网运行，不生成公网域名证书；公网域名证书应使用 Certbot 等外部工具获取，并通过 `SECURECHAT_TLS_CERT_FILE` 和 `SECURECHAT_TLS_KEY_FILE` 显式传入。
 
-其他机器连接时使用证书覆盖的名称或 IP，并把 `certs/local-root-ca.pem` 通过可信渠道复制到客户端机器。CLI 设置 `SECURECHAT_LOCAL_TLS_CA`，WinUI 在设置面板选择该 CA 文件。
+其他机器连接时使用证书覆盖的名称或 IP，并把 `certs/local-root-ca.pem` 通过可信渠道复制到客户端机器。CLI 设置 `SECURECHAT_LOCAL_TLS_CA`，WinUI 在 `config.yml` 的 `[local-TLS]` 段写入该 CA 文件路径。
 
 ## Linux：Nginx TLS 反向代理
 

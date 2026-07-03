@@ -316,7 +316,7 @@ printf '%s\n' 'wss://chat.example.com:25566' > relay-pool.txt
 ./out/build/x64-linux-release/client --room-dir <client-room-dir> bob
 ```
 
-如果服务器证书由系统信任 CA 签发，Host/Client/WinUI 不需要额外配置服务器 CA。本地或局域网自签 CA 场景下，CLI 可通过 `SECURECHAT_LOCAL_TLS_CA` 指定 `certs/local-root-ca.pem`；WinUI 可在设置面板的 `Local Server TLS CA / 本地服务器 TLS 信任根` 中选择同一个文件。
+如果服务器证书由系统信任 CA 签发，Host/Client/WinUI 使用系统信任链。本地或局域网自签 CA 场景下，CLI 通过 `SECURECHAT_LOCAL_TLS_CA` 指定 `certs/local-root-ca.pem`；多个 CA 文件可用分号分隔。WinUI 从运行目录 `config.yml` 的 `[local-TLS]` 段读取一个或多个 CA 文件路径，并在连接本地或局域网 WSS relay 时自动组成候选信任根。没有显式 CA 时，本地和局域网 `wss://` relay 不会被当作可信入口。
 
 ### Nginx TLS 反向代理
 
@@ -379,7 +379,7 @@ sudo certbot certonly --nginx -d chat.example.com
 WinUI 面向日常使用场景。
 
 1. 打开 WinUI。
-2. 如果连接本地/局域网自动生成的 WSS 证书，在设置面板选择 `Local Server TLS CA / 本地服务器 TLS 信任根`。
+2. 如果连接本地/局域网自动生成的 WSS 证书，在运行目录 `config.yml` 的 `[local-TLS]` 段写入 `local-root-ca.pem` 路径，每行一个 CA 文件。
 3. Host 本机 `config.yml` 的 `[pool]` 段保存 relay 入口，每行一个 `wss://host:port`。Host 可在本地编辑该文件，WinUI 设置面板不显示该段。
 4. Host 区域输入 Room 和 User，点击 `Create Room / 创建房间`。WinUI 会自动生成 `logs/hosts/<systemUsername>/<原始房间名>_<digest前8位>/certs/entrance.scp`、房间级 Host 证书材料和 `relay/relay-pool.sqlite3`。
 5. Host 或 Join 区域点击 `Join Room / 加入房间` 时只需要填写 User。WinUI 会弹出该用户身份下所有本地 room instance；确认后才会连接。
@@ -515,7 +515,7 @@ logs/<hosts|clients>/<systemUsername>/<room>_<roomInstanceTokenDigest前8位>/te
 | `SECURECHAT_TLS_KEY_FILE` | Server TLS 私钥；手动运行 Server 时可留空以生成本地私钥 |
 | `SECURECHAT_TLS_KEY_PASS` | Server TLS 私钥密码 |
 | `SECURECHAT_SIGNALING_TLS` | Server 是否启用 TLS；默认启用，设为 `0` 时要求 loopback 绑定，用于本机回环 WS backend |
-| `SECURECHAT_LOCAL_TLS_CA` | Host/Client/WinUI 连接本地或局域网自签 WSS 时使用的服务器 CA |
+| `SECURECHAT_LOCAL_TLS_CA` | Host/Client/`cert.exe` 连接本地或局域网自签 WSS 时使用的服务器 CA；多个 PEM 路径用分号分隔。WinUI 从 `config.yml` 的 `[local-TLS]` 段生成该变量 |
 | `SECURECHAT_TLS_AUTO_DIR` | 手动运行 Server 时自动生成本地/局域网 TLS 材料的目录 |
 | `SECURECHAT_RELAY_PROBE_TIMEOUT_MS` | Host 创建 entrance 时探测候选 relay 的单个 WSS 连接超时，默认 600ms |
 | `SECURECHAT_BIND_ADDRESS` | Server 监听地址 |
