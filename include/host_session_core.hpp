@@ -179,8 +179,8 @@ private:
         const std::string& clientPublicKey,
         const json& groupState,
         std::uint64_t epoch);
-    void storeGroupStateForClient(
-        const std::string& clientId,
+    void storeGroupStateForMember(
+        const std::string& memberId,
         const std::string& fingerprint,
         const json& identity,
         const json& groupState,
@@ -204,6 +204,8 @@ private:
     bool rememberGkaContribution(const json& contribution, const std::string& expectedMemberId);
     // 当所有当前成员都提交已验证 contribution 后提交 \(K_G\)。
     void tryCommitGkaEpoch();
+    // Host 重连时像普通成员一样打开 Server 保存的密封 GKA 状态。
+    bool installStoredGroupState(const json& groupState, std::uint64_t epoch);
     // 以加密元数据加后续加密分片的形式发送一个本地附件。
     bool sendAttachmentRelay(const std::string& filePath, chat::attachment::Kind kind, const std::string& metaType, const std::string& binaryType, const std::string& mime, const std::string& targetId);
     // 处理一条已解密的 encrypted_relay 应用消息。

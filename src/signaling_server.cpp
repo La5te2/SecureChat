@@ -222,20 +222,23 @@ void requireFieldsForType(const json& data, const std::string& type) {
         stringField(data, "nonce", 64, true);
     }
     else if (type == "create_room") {
-        if (!hasOnlyFields(data, {"type", "roomId", "username", "publicKey", "identity"})) {
+        if (!hasOnlyFields(data, {"type", "roomId", "username", "displayName", "publicKey", "memberFingerprint", "identity"})) {
             throw std::runtime_error("create_room has unknown field");
         }
         stringField(data, "roomId", 64, true);
         stringField(data, "username", maxUsernameBytes, true);
+        stringField(data, "displayName", maxUsernameBytes, false);
         stringField(data, "publicKey", maxPublicKeyBytes, true);
+        stringField(data, "memberFingerprint", 128, true);
         identityField(data, true);
     }
     else if (type == "join_room" || type == "member_rejoin") {
-        if (!hasOnlyFields(data, {"type", "roomId", "username", "publicKey", "memberFingerprint", "identity", "admissionPayload"})) {
+        if (!hasOnlyFields(data, {"type", "roomId", "username", "displayName", "publicKey", "memberFingerprint", "identity", "admissionPayload"})) {
             throw std::runtime_error(type + " has unknown field");
         }
         stringField(data, "roomId", 64, true);
         stringField(data, "username", maxUsernameBytes, true);
+        stringField(data, "displayName", maxUsernameBytes, false);
         stringField(data, "publicKey", maxPublicKeyBytes, true);
         stringField(data, "memberFingerprint", 128, false);
         identityField(data, false);
@@ -398,6 +401,7 @@ void requireFieldsForType(const json& data, const std::string& type) {
                 "version",
                 "roomId",
                 "senderId",
+                "epoch",
                 "alg",
                 "kdf",
                 "nonce",
@@ -410,6 +414,10 @@ void requireFieldsForType(const json& data, const std::string& type) {
         }
         stringField(data, "roomId", 64, true);
         stringField(data, "senderId", 64, true);
+        if (!data.contains("epoch") || !data["epoch"].is_number_integer() ||
+            (!data["epoch"].is_number_unsigned() && data["epoch"].get<long long>() < 0)) {
+            throw std::runtime_error("encrypted_relay epoch must be a non-negative integer");
+        }
         stringField(data, "alg", 32, true);
         stringField(data, "kdf", 64, true);
         stringField(data, "nonce", 64, true);
@@ -710,19 +718,24 @@ void SignalingServer::handleCreateRoom(rtc::WebSocket* key, const json& data) {
     // 并把积压的 pending join 交回 Host。
     const std::string roomId = data.value("roomId", "");
     const std::string username = data.value("username", "host");
-    const std::string displayName = username;
+    const std::string displayName = data.value("displayName", username).empty()
+        ? username
+        : data.value("displayName", username);
     const std::string publicKey = data.value("publicKey", "");
+    const std::string hostFingerprint = data.value("memberFingerprint", "");
     if (roomId.empty()) {
         sendToClient(key, {{"type", "error"}, {"message", "missing roomId"}});
         return;
     }
-    if (!validName(roomId, 64) || !validName(username, maxUsernameBytes) || publicKey.empty()) {
+    if (!validName(roomId, 64) || !validName(username, maxUsernameBytes) ||
+        !validName(displayName, maxUsernameBytes) || publicKey.empty() || hostFingerprint.empty()) {
         sendToClient(key, {{"type", "error"}, {"message", "invalid room or username"}});
         return;
     }
 
     std::shared_ptr<rtc::WebSocket> ws;
     UserAccount account;
+    json storedGroupStateEnvelope;
     bool roomAlreadyExists = false;
     bool hostReattached = false;
     bool roomClosed = false;
@@ -752,6 +765,7 @@ void SignalingServer::handleCreateRoom(rtc::WebSocket* key, const json& data) {
                 client->identity = data["identity"];
                 mRegistry.restoreRoom(roomId, account);
                 mStateStore.markRoomOpen(roomId);
+                storedGroupStateEnvelope = mStateStore.loadGroupStateEnvelope(roomId, hostFingerprint);
                 hostReattached = true;
             }
         }
@@ -806,6 +820,15 @@ void SignalingServer::handleCreateRoom(rtc::WebSocket* key, const json& data) {
         {"displayName", displayName},
         {"publicKey", publicKey}
     });
+    if (hostReattached && storedGroupStateEnvelope.is_object() && !storedGroupStateEnvelope.empty()) {
+        safeSend(ws, {{"type", "stored_group_state"}, {"roomId", roomId}, {"envelope", storedGroupStateEnvelope}});
+        std::cout << "[signal] restored group state offered room " << roomId
+                  << " to host" << std::endl;
+    }
+    else if (hostReattached) {
+        std::cout << "[signal] no stored group state room " << roomId
+                  << " for host" << std::endl;
+    }
     broadcastRoomMembers(roomId);
     if (hostReattached) {
         flushPendingJoinsToHost(roomId);
@@ -817,7 +840,9 @@ void SignalingServer::handleJoinRoom(rtc::WebSocket* key, const json& data) {
     // Server 不直接把新连接放进 active member 集合；Host 必须显式 approve。
     const std::string roomId = data.value("roomId", "");
     const std::string username = data.value("username", "");
-    const std::string displayName = username;
+    const std::string displayName = data.value("displayName", username).empty()
+        ? username
+        : data.value("displayName", username);
     const std::string publicKey = data.value("publicKey", "");
     const std::string memberFingerprint = data.value("memberFingerprint", "");
     std::shared_ptr<rtc::WebSocket> clientWs;
@@ -833,7 +858,8 @@ void SignalingServer::handleJoinRoom(rtc::WebSocket* key, const json& data) {
     UserAccount account;
     std::string errorMessage;
 
-    if (!validName(roomId, 64) || !validName(username, maxUsernameBytes) || publicKey.empty()) {
+    if (!validName(roomId, 64) || !validName(username, maxUsernameBytes) ||
+        !validName(displayName, maxUsernameBytes) || publicKey.empty()) {
         sendToClient(key, {{"type", "error"}, {"message", "invalid room or username"}});
         return;
     }
@@ -1126,6 +1152,7 @@ void SignalingServer::handleApproveJoin(rtc::WebSocket* key, const json& data) {
     };
     if (data.contains("admissionSignResponse")) joined["admissionSignResponse"] = data["admissionSignResponse"];
     if (pending.contains("identity")) joined["identity"] = pending["identity"];
+    if (membershipEvent.is_object()) joined["membershipEvent"] = membershipEvent;
     if (hostIdentity.is_object()) joined["hostIdentity"] = hostIdentity;
     safeSend(clientWs, joined);
 
@@ -1609,6 +1636,7 @@ void SignalingServer::handleForumRecord(rtc::WebSocket* key, const json& data) {
     std::string roomId;
     std::string senderId;
     std::string errorMessage;
+    json membershipEvents = json::array();
     {
         std::lock_guard<std::mutex> lock(mMutex);
         auto sender = findClient(key);
@@ -1629,6 +1657,9 @@ void SignalingServer::handleForumRecord(rtc::WebSocket* key, const json& data) {
                     data.value("boardMessageId", ""),
                     data.value("recordHash", ""),
                     data.value("record", json::object()));
+                for (const auto& event : mStateStore.loadMembershipEvents(roomId)) {
+                    membershipEvents.push_back(event.payload);
+                }
                 if (room->host && room->host.get() != key) recipients.push_back(room->host);
                 for (const auto& [_, ws] : room->clients) {
                     if (ws && ws.get() != key) recipients.push_back(ws);
@@ -1645,6 +1676,7 @@ void SignalingServer::handleForumRecord(rtc::WebSocket* key, const json& data) {
     json out = {
         {"type", chat::forum_board::RecordsType},
         {"roomId", roomId},
+        {"membershipEvents", membershipEvents},
         {"records", json::array({data.value("record", json::object())})}
     };
     for (const auto& recipient : recipients) safeSend(recipient, out);

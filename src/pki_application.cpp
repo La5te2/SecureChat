@@ -522,6 +522,14 @@ std::string IdentityContext::fingerprint() const {
     return mData ? mData->localFingerprint : "";
 }
 
+json IdentityContext::publicIdentity() const {
+    if (!mData) throw std::runtime_error("PKI identity is not configured");
+    return {
+        {"version", 1},
+        {"certChainPem", mData->certChainPem}
+    };
+}
+
 json IdentityContext::signJoinRoom(
     const std::string& roomId,
     const std::string& username,

@@ -135,7 +135,6 @@ bool isAttachmentBinaryType(const std::string& type) {
 bool isReliablePayloadType(const std::string& type) {
     attachment::Kind ignored = attachment::Kind::Text;
     return type == "text" ||
-        type == "nickname_update" ||
         type == chat::secure_relay::PairwisePrivateType ||
         attachmentKindForMeta(type, ignored) ||
         isAttachmentBinaryType(type);
@@ -483,6 +482,8 @@ void HostSessionCore::connectRelay(std::size_t relayIndex) {
             {"type", "create_room"},
             {"roomId", mRoomToken},
             {"username", mUsername},
+            {"displayName", mDisplayName},
+            {"memberFingerprint", mIdentity.fingerprint()},
             {"publicKey", mMemberKeys.publicKey}
         };
         msg["identity"] = mIdentity.signJoinRoom(mRoomId, mUsername, mMemberKeys.publicKey);
@@ -1238,6 +1239,19 @@ void HostSessionCore::approvePendingJoin(const std::string& token) {
     const auto approvedFingerprint = signResponse.is_object()
         ? signResponse.value("memberFingerprint", pending.value("fingerprint", ""))
         : pending.value("fingerprint", "");
+    json approvedIdentity = pending.value("identity", json::object());
+    if ((!approvedIdentity.is_object() || approvedIdentity.empty()) && signResponse.is_object()) {
+        const auto memberChainPem = signResponse.value("memberChainPem", "");
+        if (!memberChainPem.empty()) {
+            // Forum 留言只需要收件人成员证书公钥来封装 post key。
+            // 首次 entrance 入房时 Client 尚未能提交自己的 join identity，
+            // Host 用刚签发的证书链构造最小收件人 identity。
+            approvedIdentity = {
+                {"version", 1},
+                {"certChainPem", memberChainPem}
+            };
+        }
+    }
     const auto payloadDigest = pendingJoinDigest(requestId, username, publicKey);
     json msg = {
         {"type", "approve_join"},
@@ -1265,12 +1279,13 @@ void HostSessionCore::approvePendingJoin(const std::string& token) {
             username,
             displayName,
             approvedFingerprint,
-            pending.value("identity", json::object()));
+            approvedIdentity);
     }
     catch (const std::exception& e) {
         chatEmit(mCallbacks.onError, std::string("Membership event signing failed: ") + e.what());
         return;
     }
+    rememberForumMembershipEvent(msg["membershipEvent"]);
     sendToAllRelays({
         {"type", "membership_event"},
         {"roomId", mRoomToken},
@@ -1454,6 +1469,7 @@ bool HostSessionCore::sendPreparedRelayMessage(ReliableOutbound outbound, bool e
         outbound.senderName,
         outbound.senderKind,
         outbound.targetId,
+        mGroupKeyEpoch,
         mGroupKey);
     const auto relayUrl = relayUrlFor(relay);
     const auto ok = relay->send(envelope.dump());
@@ -1779,8 +1795,8 @@ bool HostSessionCore::sendGroupStateToClient(
     return true;
 }
 
-void HostSessionCore::storeGroupStateForClient(
-    const std::string& clientId,
+void HostSessionCore::storeGroupStateForMember(
+    const std::string& memberId,
     const std::string& fingerprint,
     const json& identity,
     const json& groupState,
@@ -1802,7 +1818,7 @@ void HostSessionCore::storeGroupStateForClient(
         sendToAllRelays(msg);
     }
     catch (const std::exception& e) {
-        chatEmit(mCallbacks.onStatus, "Group state store warning for " + clientId + ": " + e.what());
+        chatEmit(mCallbacks.onStatus, "Group state store warning for " + memberId + ": " + e.what());
     }
 }
 
@@ -2176,8 +2192,15 @@ void HostSessionCore::tryCommitGkaEpoch() {
     }
     mGkaCv.notify_all();
 
+    storeGroupStateForMember(
+        chat::protocol::HostActorId,
+        mIdentity.fingerprint(),
+        mIdentity.publicIdentity(),
+        groupState,
+        epoch);
+
     for (const auto& client : clients) {
-        storeGroupStateForClient(client.clientId, client.fingerprint, client.identity, groupState, epoch);
+        storeGroupStateForMember(client.clientId, client.fingerprint, client.identity, groupState, epoch);
         if (client.connected) {
             sendGroupStateToClient(client.clientId, client.publicKey, groupState, epoch);
         }
@@ -2185,6 +2208,107 @@ void HostSessionCore::tryCommitGkaEpoch() {
     chatEmit(mCallbacks.onStatus, "Room group key ready");
     announceVerifiedMembers();
     publishNickname();
+}
+
+bool HostSessionCore::installStoredGroupState(const json& groupState, std::uint64_t epoch) {
+    if (groupState.value("version", 0) != 3 ||
+        groupState.value("roomId", "") != mRoomToken ||
+        groupState.value("epoch", 0ULL) != epoch ||
+        !groupState.contains("contributions") ||
+        !groupState["contributions"].is_array()) {
+        chatEmit(mCallbacks.onError, "Invalid stored GKA group state");
+        return false;
+    }
+
+    bool sawHost = false;
+    for (const auto& item : groupState["contributions"]) {
+        if (!item.is_object()) {
+            chatEmit(mCallbacks.onError, "Invalid stored GKA contribution object");
+            return false;
+        }
+        const auto memberId = item.value("memberId", "");
+        const auto username = item.value("username", memberId);
+        const auto publicKey = item.value("publicKey", "");
+        const auto contribution = item.value("contribution", "");
+        const auto advertisedFingerprint = item.value("fingerprint", "");
+        const auto identity = item.find("identity");
+        if (memberId.empty() || publicKey.empty() || contribution.empty() ||
+            identity == item.end() || !identity->is_object()) {
+            chatEmit(mCallbacks.onError, "Stored GKA contribution is missing required fields");
+            return false;
+        }
+
+        try {
+            const auto verified = mIdentity.verifyGkaContribution(
+                mRoomId,
+                epoch,
+                memberId,
+                username,
+                publicKey,
+                contribution,
+                *identity);
+            if (!advertisedFingerprint.empty() && advertisedFingerprint != verified.fingerprint) {
+                throw std::runtime_error("stored GKA contribution fingerprint mismatch");
+            }
+            if (memberId == chat::protocol::HostActorId) {
+                sawHost = true;
+                if (verified.fingerprint != mIdentity.fingerprint()) {
+                    throw std::runtime_error("stored GKA state does not belong to this Host identity");
+                }
+            }
+            else {
+                std::lock_guard<std::mutex> lock(mClientsMutex);
+                const auto existingFingerprint = mClientIdentityFingerprints.find(memberId);
+                if (existingFingerprint != mClientIdentityFingerprints.end() &&
+                    existingFingerprint->second != verified.fingerprint) {
+                    throw std::runtime_error("member fingerprint changed inside stored GKA state");
+                }
+                mClientIdentityFingerprints[memberId] = verified.fingerprint;
+                mClientIdentitySubjects[memberId] = verified.subject;
+                mClientSealIdentityObjects[memberId] = *identity;
+                if (mClientUsernames.find(memberId) == mClientUsernames.end()) {
+                    mClientUsernames[memberId] = username.empty() ? memberId : username;
+                }
+                if (mClientNames.find(memberId) == mClientNames.end()) {
+                    mClientNames[memberId] = username.empty() ? memberId : username;
+                }
+            }
+        }
+        catch (const std::exception& e) {
+            chatEmit(mCallbacks.onError, "Stored GKA contribution rejected: " + memberId + ": " + e.what());
+            return false;
+        }
+    }
+
+    if (!sawHost) {
+        chatEmit(mCallbacks.onError, "Stored GKA state is missing Host contribution");
+        return false;
+    }
+
+    auto groupKey = chat::secure_relay::deriveGroupKeyFromContributions(
+        mRoomToken,
+        epoch,
+        groupState["contributions"]);
+    if (!chat::secure_relay::hasUsableGroupKey(groupKey)) {
+        chatEmit(mCallbacks.onError, "Derived stored GKA group key has invalid size");
+        return false;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(mGkaMutex);
+        if (epoch <= mGroupKeyEpoch && chat::secure_relay::hasUsableGroupKey(mGroupKey)) {
+            chatEmit(mCallbacks.onStatus, "Stored group state is current or stale");
+            return true;
+        }
+        mGroupKeyEpoch = epoch;
+        mGroupKey = std::move(groupKey);
+        mCurrentGroupState = groupState;
+        mPendingGkaEpoch = 0;
+        mPendingGkaMembers.clear();
+        mPendingGkaContributions.clear();
+    }
+    mGkaCv.notify_all();
+    return true;
 }
 
 bool HostSessionCore::sendAttachmentRelay(
@@ -2288,7 +2412,19 @@ void HostSessionCore::handleSignalingMessage(const SignalingFrame& frame) {
             }
             if (!mRoomCreated.exchange(true)) {
                 chatEmit(mCallbacks.onStatus, std::string(reattached ? "Room reattached: " : "Room created: ") + mRoomId);
-                rotateGroupKey(reattached ? "host reattached" : "room created");
+                bool hasCurrentGroupState = false;
+                {
+                    std::lock_guard<std::mutex> lock(mGkaMutex);
+                    hasCurrentGroupState =
+                        chat::secure_relay::hasUsableGroupKey(mGroupKey) &&
+                        !mCurrentGroupState.empty();
+                }
+                if (!reattached) {
+                    rotateGroupKey("room created");
+                }
+                else if (!hasCurrentGroupState) {
+                    chatEmit(mCallbacks.onStatus, "Waiting for stored room group key");
+                }
             }
             else {
                 chatEmit(mCallbacks.onStatus, "Relay room ready: " + relayLabel(relayUrl));
@@ -2598,6 +2734,30 @@ void HostSessionCore::handleSignalingMessage(const SignalingFrame& frame) {
             if (stillConnectedOnRelay) return;
             markClientDisconnected(clientId);
         }
+        else if (type == "stored_group_state") {
+            const auto envelope = j.find("envelope");
+            if (envelope == j.end() || !envelope->is_object()) {
+                chatEmit(mCallbacks.onError, "Stored group state is missing");
+                return;
+            }
+            try {
+                const auto plaintext = mIdentity.openSealedText("group_state", *envelope);
+                const auto groupState = chat::protocol::parseJsonObjectWithBudget(
+                    plaintext,
+                    chat::protocol::MaxSignalingMessageBytes,
+                    "stored group state");
+                const auto epoch = groupState.value("epoch", 0ULL);
+                chatEmit(mCallbacks.onStatus, "Stored group state received");
+                if (!installStoredGroupState(groupState, epoch)) return;
+                chatEmit(mCallbacks.onStatus, "Room group key restored");
+                announceVerifiedMembers();
+                publishNickname();
+                requestForumSync();
+            }
+            catch (const std::exception& e) {
+                chatEmit(mCallbacks.onError, std::string("Stored group state rejected: ") + e.what());
+            }
+        }
         else if (type == chat::secure_relay::GkaContributionType) {
             const auto epoch = j.value("epoch", 0ULL);
             const auto senderId = j.value("senderId", "");
@@ -2630,8 +2790,25 @@ void HostSessionCore::handleSignalingMessage(const SignalingFrame& frame) {
                 chatEmit(mCallbacks.onError, "Room group key is not ready");
                 return;
             }
+            const auto envelopeEpoch = j.value("epoch", 0ULL);
+            if (envelopeEpoch != mGroupKeyEpoch) {
+                chatEmit(
+                    mCallbacks.onStatus,
+                    "Dropped encrypted relay for epoch " + std::to_string(envelopeEpoch) +
+                        "; current epoch is " + std::to_string(mGroupKeyEpoch));
+                return;
+            }
             if (!rememberRelayEnvelope(j)) return;
-            auto msg = chat::secure_relay::decryptMessageWithGroupKey(j, mRoomToken, mGroupKey);
+            Message msg;
+            try {
+                msg = chat::secure_relay::decryptMessageWithGroupKey(j, mRoomToken, mGroupKey);
+            }
+            catch (const std::exception& e) {
+                chatEmit(
+                    mCallbacks.onError,
+                    "Dropped encrypted relay that cannot be opened with current room group key: " + std::string(e.what()));
+                return;
+            }
             const auto relayTargetId = msg.payload.value("relayTargetId", "");
             if (!relayTargetId.empty() && relayTargetId != chat::protocol::HostActorId) {
                 // 私发中继在外层以广播方式发送。
@@ -2852,6 +3029,7 @@ void HostSessionCore::evictClient(const std::string& target) {
         return;
     }
 
+    rememberForumMembershipEvent(membershipEvent);
     sendToAllRelays({
         {"type", "membership_event"},
         {"roomId", mRoomToken},

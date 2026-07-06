@@ -30,6 +30,8 @@ public:
     // 用于日志/UI 的本地证书可读 subject 和 SHA-256 指纹。
     std::string subject() const;
     std::string fingerprint() const;
+    // 返回只含证书链的公开 identity，用于给本成员自己封装 Server 持久化状态。
+    json publicIdentity() const;
 
     // 签名 Client join 帧，把身份绑定到临时 X25519 密钥。
     json signJoinRoom(

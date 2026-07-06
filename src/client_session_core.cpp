@@ -114,7 +114,6 @@ bool isAttachmentBinaryType(const std::string& type) {
 bool isReliablePayloadType(const std::string& type) {
     attachment::Kind ignored = attachment::Kind::Text;
     return type == "text" ||
-        type == "nickname_update" ||
         type == chat::secure_relay::PairwisePrivateType ||
         attachmentKindForMeta(type, ignored) ||
         isAttachmentBinaryType(type);
@@ -520,6 +519,7 @@ void ClientSessionCore::connectRelay(std::size_t relayIndex) {
             {"type", mIdentity.enabled() ? "member_rejoin" : "join_room"},
             {"roomId", mRoomToken},
             {"username", mUsername},
+            {"displayName", mDisplayName},
             {"publicKey", mMemberKeys.publicKey}
         };
         if (mIdentity.enabled()) {
@@ -1610,6 +1610,7 @@ bool ClientSessionCore::sendPreparedRelayMessage(ReliableOutbound outbound, bool
         outbound.senderName,
         outbound.senderKind,
         outbound.targetId,
+        mGroupKeyEpoch,
         mGroupKey);
     const auto relayUrl = relayUrlFor(relay);
     const auto ok = relay->send(envelope.dump());
@@ -2196,6 +2197,12 @@ void ClientSessionCore::handleSignalingMessage(const SignalingFrame& frame) {
                     return;
                 }
             }
+            if (const auto membershipEvent = j.find("membershipEvent");
+                membershipEvent != j.end() && membershipEvent->is_object()) {
+                // approve_join 附带 Host 签名的成员资格事件。
+                // 立即记住它，避免等下一轮 forum sync 才能打开留言板记录。
+                rememberForumMembershipEvent(*membershipEvent);
+            }
             const bool alreadyJoined = mJoinedRoom.exchange(true);
             if (!alreadyJoined) {
                 chatEmit(mCallbacks.onLog, "own_actor_id " + mClientId);
@@ -2405,8 +2412,25 @@ void ClientSessionCore::handleSignalingMessage(const SignalingFrame& frame) {
                 chatEmit(mCallbacks.onError, "Encrypted relay received before room group key");
                 return;
             }
+            const auto envelopeEpoch = j.value("epoch", 0ULL);
+            if (envelopeEpoch != mGroupKeyEpoch) {
+                chatEmit(
+                    mCallbacks.onStatus,
+                    "Dropped encrypted relay for epoch " + std::to_string(envelopeEpoch) +
+                        "; current epoch is " + std::to_string(mGroupKeyEpoch));
+                return;
+            }
             if (!rememberRelayEnvelope(j)) return;
-            auto msg = chat::secure_relay::decryptMessageWithGroupKey(j, mRoomToken, mGroupKey);
+            Message msg;
+            try {
+                msg = chat::secure_relay::decryptMessageWithGroupKey(j, mRoomToken, mGroupKey);
+            }
+            catch (const std::exception& e) {
+                chatEmit(
+                    mCallbacks.onError,
+                    "Dropped encrypted relay that cannot be opened with current room group key: " + std::string(e.what()));
+                return;
+            }
             const auto relayTargetId = msg.payload.value("relayTargetId", "");
             if (!relayTargetId.empty() && relayTargetId != mClientId) {
                 // 投递错误的私发中继会在打开内层双方私发加密前被忽略。

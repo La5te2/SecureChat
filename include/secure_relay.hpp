@@ -68,6 +68,7 @@ json encryptMessageWithGroupKey(
     const std::string& senderName,
     const std::string& senderKind,
     const std::string& targetId,
+    std::uint64_t epoch,
     const std::vector<unsigned char>& groupKey);
 
 // 使用协商出的房间群密钥解密一个中继封装。

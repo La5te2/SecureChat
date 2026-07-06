@@ -18,6 +18,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
+using System.Threading.Tasks;
 using Windows.ApplicationModel.DataTransfer;
 using Windows.Media.Capture;
 using Windows.Media.MediaProperties;
@@ -93,17 +94,13 @@ public sealed partial class MainWindow : Window
     private string activeRoomDir = "";
     private string activeVoiceRecordingPath = "";
     private string relayStatusText = "-";
-    private System.Threading.Tasks.Task? voiceStartTask;
     private bool voiceRecording;
-    private bool voiceRecordingStopping;
-    private bool suppressVoiceClick;
-    private bool stopVoiceAfterStart;
-    private bool sendVoiceAfterStart;
-    private bool ignoreNextVoiceCaptureLost;
+    private bool voiceStarting;
+    private bool voiceStopping;
+    private DateTimeOffset voiceRecordingStartedAt = DateTimeOffset.MinValue;
     private string voiceTargetAtRecordStart = "";
     private MediaCapture? voiceMediaCapture;
     private StorageFile? voiceStorageFile;
-    private bool voiceRecordingUsesMci;
 
     private static readonly NativeMethods.ChatEventCallback NoOpCallback = (_, _, _) => { };
     // 附件预览状态只影响 WinUI 是否自动预览，不影响加解密和传输。
@@ -158,6 +155,8 @@ public sealed partial class MainWindow : Window
     private const long MaxPreviewImagePixels = 24_000_000;
     private const double MaxPreviewAudioSeconds = 600;
     private const double MinVoiceRecordingSeconds = 0.35;
+    private static readonly TimeSpan VoiceRecorderStartTimeout = TimeSpan.FromSeconds(8);
+    private static readonly TimeSpan VoiceRecorderStopGuard = TimeSpan.FromMilliseconds(700);
     private sealed record AttachmentPreviewInfo(
         string Kind,
         string Path,
@@ -175,7 +174,6 @@ public sealed partial class MainWindow : Window
         SetWindowIcon();
         SetInitialWindowSize();
         Closed += MainWindow_Closed;
-        RegisterVoiceHoldHandlers();
         infoBarTimer.Tick += async (_, _) =>
         {
             infoBarTimer.Stop();
@@ -198,28 +196,6 @@ public sealed partial class MainWindow : Window
         SetSessionMode(SessionMode.None);
         RefreshRoomPanel();
         AddLine("status", "Ready");
-    }
-
-    private void RegisterVoiceHoldHandlers()
-    {
-        // Button 会先处理鼠标左键的 Pointer 事件。使用 handledEventsToo
-        // 才能让“按住说话”收到左键按下和松开；右键/中键不会启动录音。
-        SendButton.AddHandler(
-            UIElement.PointerPressedEvent,
-            new PointerEventHandler(SendButton_PointerPressed),
-            true);
-        SendButton.AddHandler(
-            UIElement.PointerReleasedEvent,
-            new PointerEventHandler(SendButton_PointerReleased),
-            true);
-        SendButton.AddHandler(
-            UIElement.PointerCanceledEvent,
-            new PointerEventHandler(SendButton_PointerCanceled),
-            true);
-        SendButton.AddHandler(
-            UIElement.PointerCaptureLostEvent,
-            new PointerEventHandler(SendButton_PointerCanceled),
-            true);
     }
 
     private void OnNativeEvent(IntPtr kindPtr, IntPtr messagePtr, IntPtr userData)
@@ -278,23 +254,15 @@ public sealed partial class MainWindow : Window
 
     private void DisposeVoiceCaptureForExit()
     {
-        // 关闭窗口时释放 WinRT/WinMM 录音资源，避免麦克风句柄拖住退出。
+        // 关闭窗口时释放 WinRT 录音资源，避免麦克风句柄拖住退出。
         activeVoiceRecordingPath = "";
         voiceRecording = false;
-        voiceRecordingStopping = false;
-        voiceStartTask = null;
-        ignoreNextVoiceCaptureLost = false;
+        voiceStarting = false;
+        voiceStopping = false;
+        voiceRecordingStartedAt = DateTimeOffset.MinValue;
         voiceStorageFile = null;
-        voiceRecordingUsesMci = false;
         voiceMediaCapture?.Dispose();
         voiceMediaCapture = null;
-        try
-        {
-            CloseVoiceRecorder();
-        }
-        catch
-        {
-        }
     }
 
     private static void TerminateCurrentProcess()
@@ -319,12 +287,6 @@ public sealed partial class MainWindow : Window
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool TerminateProcess(IntPtr hProcess, uint exitCode);
-
-    [DllImport("winmm.dll", CharSet = CharSet.Unicode)]
-    private static extern int mciSendString(string command, StringBuilder? returnString, int returnLength, IntPtr hwndCallback);
-
-    [DllImport("winmm.dll", CharSet = CharSet.Unicode)]
-    private static extern bool mciGetErrorString(int errorCode, StringBuilder errorText, int errorTextSize);
 
     private bool TryReadSessionInputs(
         TextBox roomBox,
@@ -549,94 +511,60 @@ public sealed partial class MainWindow : Window
         e.Handled = true;
     }
 
-    private void Send_Click(object sender, RoutedEventArgs e)
+    private async void Send_Click(object sender, RoutedEventArgs e)
     {
         if (SelectedSendMode() == "Voice")
         {
-            if (suppressVoiceClick)
-            {
-                suppressVoiceClick = false;
-                return;
-            }
-            AddLine("status", UiText("Hold the button to record voice.", "按住按钮录制语音。"));
+            ShowInfo(
+                voiceRecording
+                    ? UiText("Voice recording ending.", "语音录制正在结束。")
+                    : UiText("Voice recorder starting.", "语音录制正在启动。"),
+                InfoBarSeverity.Informational);
+            await ToggleVoiceRecordingAsync();
             return;
         }
 
         SendSelectedMode();
     }
 
-    private async void SendButton_PointerPressed(object sender, PointerRoutedEventArgs e)
+    private async System.Threading.Tasks.Task ToggleVoiceRecordingAsync()
     {
-        if (SelectedSendMode() != "Voice" || !SendButton.IsEnabled) return;
-        if (IsSecondaryPointer(e)) return;
-
-        e.Handled = true;
-        SendButton.CapturePointer(e.Pointer);
-        suppressVoiceClick = true;
-        stopVoiceAfterStart = false;
-        sendVoiceAfterStart = false;
-        voiceStartTask = StartVoiceRecordingAsync();
-        await voiceStartTask;
-        if (stopVoiceAfterStart)
+        // 语音发送使用显式 toggle 状态机：第一次点击开始录音，第二次点击结束并发送。
+        // 这避免 PointerReleased/CaptureLost 在不同设备上的时序差异造成空 WAV。
+        if (voiceStopping)
         {
-            await StopVoiceRecordingAsync(sendVoiceAfterStart);
-        }
-    }
-
-    private async void SendButton_PointerReleased(object sender, PointerRoutedEventArgs e)
-    {
-        if (SelectedSendMode() != "Voice") return;
-
-        e.Handled = true;
-        suppressVoiceClick = true;
-        if (voiceStartTask is not null && !voiceStartTask.IsCompleted)
-        {
-            stopVoiceAfterStart = true;
-            sendVoiceAfterStart = true;
-            ignoreNextVoiceCaptureLost = true;
-            SendButton.ReleasePointerCapture(e.Pointer);
             return;
         }
-        await StopVoiceRecordingAsync(send: true);
-        ignoreNextVoiceCaptureLost = true;
-        SendButton.ReleasePointerCapture(e.Pointer);
-    }
 
-    private async void SendButton_PointerCanceled(object sender, PointerRoutedEventArgs e)
-    {
-        if (SelectedSendMode() != "Voice") return;
-
-        e.Handled = true;
-        if (ignoreNextVoiceCaptureLost)
+        if (voiceStarting)
         {
-            ignoreNextVoiceCaptureLost = false;
+            // WinRT 初始化录音设备可能需要短暂时间，启动完成前忽略重复点击。
+            AddLine("status", UiText("Voice recorder is starting.", "语音录制正在启动。"));
             return;
         }
-        suppressVoiceClick = true;
-        if (voiceStartTask is not null && !voiceStartTask.IsCompleted)
+
+        if (voiceRecording)
         {
-            stopVoiceAfterStart = true;
-            sendVoiceAfterStart = false;
-            ignoreNextVoiceCaptureLost = true;
-            SendButton.ReleasePointerCapture(e.Pointer);
+            if (DateTimeOffset.Now - voiceRecordingStartedAt < VoiceRecorderStopGuard)
+            {
+                AddLine("status", UiText("Voice recording started.", "语音录制开始。"));
+                return;
+            }
+            await StopVoiceRecordingAsync(send: true);
             return;
         }
-        await StopVoiceRecordingAsync(send: false);
-        ignoreNextVoiceCaptureLost = true;
-        SendButton.ReleasePointerCapture(e.Pointer);
+
+        await StartVoiceRecordingAsync();
     }
 
-    private static bool IsSecondaryPointer(PointerRoutedEventArgs e)
-    {
-        var point = e.GetCurrentPoint(null);
-        var properties = point.Properties;
-        return properties.IsRightButtonPressed || properties.IsMiddleButtonPressed;
-    }
-
-    private void SendModeBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    private async void SendModeBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (refreshingLanguage) return;
         UpdateSendButtonContent();
+        if (SelectedSendMode() != "Voice")
+        {
+            await StopVoiceRecordingAsync(send: false);
+        }
     }
 
     private void MessageBox_KeyDown(object sender, KeyRoutedEventArgs e)
@@ -666,7 +594,7 @@ public sealed partial class MainWindow : Window
         }
         if (mode == "Voice")
         {
-            AddLine("status", UiText("Hold the button to record voice.", "按住按钮录制语音。"));
+            AddLine("status", UiText("Click Start to record voice, then click End to send.", "点击开始录音，再点击结束发送。"));
             return;
         }
 
@@ -695,7 +623,12 @@ public sealed partial class MainWindow : Window
         if (ok != 0)
         {
             MessageBox.Text = "";
+            return;
         }
+
+        var message = UiText("Message send failed.", "消息发送失败。");
+        AddLine("error", message);
+        ShowInfo(message, InfoBarSeverity.Error);
     }
 
     private enum FileKind
@@ -749,126 +682,157 @@ public sealed partial class MainWindow : Window
         return await picker.PickSingleFileAsync();
     }
 
+    private void ReportVoiceRecorderStep(string english, string chinese)
+    {
+        var message = UiText(english, chinese);
+        AddLine("status", message);
+        ShowInfo(message, InfoBarSeverity.Informational);
+    }
+
     private async System.Threading.Tasks.Task StartVoiceRecordingAsync()
     {
-        if (voiceRecording || voiceRecordingStopping || voiceStartTask is { IsCompleted: false })
+        if (SelectedSendMode() != "Voice")
         {
             return;
         }
 
+        if (sessionMode is not (SessionMode.Host or SessionMode.Join) || string.IsNullOrWhiteSpace(activeRoomDir))
+        {
+            var message = UiText("Join a room before recording voice.", "进入房间后才能录制语音。");
+            AddLine("error", message);
+            ShowInfo(message, InfoBarSeverity.Warning);
+            return;
+        }
+
+        if (voiceRecording || voiceStarting || voiceStopping)
+        {
+            return;
+        }
+
+        voiceStarting = true;
+        UpdateSendButtonContent();
+        var currentStep = UiText("preparing voice recorder", "准备语音录制器");
         try
         {
-            Directory.CreateDirectory(VoiceRecordingDirectory());
+            ReportVoiceRecorderStep("Voice recorder starting.", "语音录制正在启动。");
             var file = UniqueVoiceRecordingPath();
+            Directory.CreateDirectory(Path.GetDirectoryName(file) ?? VoiceRecordingDirectory());
             activeVoiceRecordingPath = file;
             voiceTargetAtRecordStart = PrivateTargetBox.Text.Trim();
 
-            try
+            currentStep = UiText("creating voice file", "创建语音文件");
+            ReportVoiceRecorderStep("Creating voice file.", "正在创建语音文件。");
+            await System.Threading.Tasks.Task.Run(() =>
             {
-                voiceMediaCapture?.Dispose();
-                voiceMediaCapture = new MediaCapture();
-                await voiceMediaCapture.InitializeAsync(new MediaCaptureInitializationSettings
-                {
-                    StreamingCaptureMode = StreamingCaptureMode.Audio
-                });
+                using var stream = new FileStream(file, FileMode.Create, FileAccess.ReadWrite, FileShare.Read);
+            }).WaitAsync(VoiceRecorderStartTimeout);
 
-                var folder = await StorageFolder.GetFolderFromPathAsync(VoiceRecordingDirectory());
-                voiceStorageFile = await folder.CreateFileAsync(
-                    Path.GetFileName(file),
-                    CreationCollisionOption.ReplaceExisting);
-                await voiceMediaCapture.StartRecordToStorageFileAsync(
-                    MediaEncodingProfile.CreateWav(AudioEncodingQuality.Medium),
-                    voiceStorageFile);
-                voiceRecordingUsesMci = false;
-            }
-            catch (Exception mediaEx) when (mediaEx is UnauthorizedAccessException or InvalidOperationException or IOException or COMException)
-            {
-                voiceMediaCapture?.Dispose();
-                voiceMediaCapture = null;
-                voiceStorageFile = null;
+            currentStep = UiText("opening voice file", "打开语音文件");
+            ReportVoiceRecorderStep("Opening voice file.", "正在打开语音文件。");
+            voiceStorageFile = await StorageFile.GetFileFromPathAsync(file)
+                .AsTask()
+                .WaitAsync(VoiceRecorderStartTimeout);
 
-                CloseVoiceRecorder();
-                SendMciCommand($"open new type waveaudio alias {VoiceRecorderAlias}");
-                TryMciCommand($"set {VoiceRecorderAlias} time format ms");
-                TryMciCommand($"set {VoiceRecorderAlias} bitspersample 16");
-                TryMciCommand($"set {VoiceRecorderAlias} samplespersec 16000");
-                TryMciCommand($"set {VoiceRecorderAlias} channels 1");
-                SendMciCommand($"record {VoiceRecorderAlias}");
-                voiceRecordingUsesMci = true;
-            }
-
-            voiceRecording = true;
-            SendButton.Content = UiText("Release", "松开");
-        }
-        catch (Exception ex) when (ex is UnauthorizedAccessException or InvalidOperationException or IOException or COMException)
-        {
-            CloseVoiceRecorder();
             voiceMediaCapture?.Dispose();
-            voiceMediaCapture = null;
-            voiceStorageFile = null;
-            voiceRecordingUsesMci = false;
-            activeVoiceRecordingPath = "";
-            voiceRecording = false;
+            voiceMediaCapture = new MediaCapture();
+            currentStep = UiText("initializing microphone", "初始化麦克风");
+            ReportVoiceRecorderStep("Initializing microphone.", "正在初始化麦克风。");
+            await voiceMediaCapture.InitializeAsync(new MediaCaptureInitializationSettings
+            {
+                StreamingCaptureMode = StreamingCaptureMode.Audio
+            }).AsTask().WaitAsync(VoiceRecorderStartTimeout);
+
+            currentStep = UiText("starting microphone capture", "启动麦克风采集");
+            ReportVoiceRecorderStep("Starting microphone capture.", "正在启动麦克风采集。");
+            await voiceMediaCapture.StartRecordToStorageFileAsync(
+                MediaEncodingProfile.CreateWav(AudioEncodingQuality.Auto),
+                voiceStorageFile).AsTask().WaitAsync(VoiceRecorderStartTimeout);
+
+            voiceStarting = false;
+            voiceRecording = true;
+            voiceRecordingStartedAt = DateTimeOffset.Now;
+            UpdateSendButtonContent();
+            var startedMessage = UiText("Voice recording started.", "语音录制开始。");
+            AddLine("status", startedMessage);
+            ShowInfo(startedMessage, InfoBarSeverity.Success);
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or InvalidOperationException or IOException or COMException or TimeoutException)
+        {
+            CleanupVoiceRecordingState(deleteFile: true);
             if (!isClosing)
             {
+                var message = ex is TimeoutException
+                    ? UiText("Voice recording timed out while ", "语音录制启动超时：") + currentStep
+                    : UiText("Voice recording failed: ", "语音录制失败：") + ex.Message;
+                AddLine("error", message);
+                ShowInfo(message, InfoBarSeverity.Error);
+            }
+        }
+        finally
+        {
+            if (voiceStarting)
+            {
+                voiceStarting = false;
                 UpdateSendButtonContent();
-                AddLine("error", UiText("Voice recording failed: ", "语音录制失败：") + ex.Message);
             }
         }
     }
 
     private async System.Threading.Tasks.Task StopVoiceRecordingAsync(bool send)
     {
-        if ((!voiceRecording && string.IsNullOrWhiteSpace(activeVoiceRecordingPath)) || voiceRecordingStopping)
+        if (voiceStarting)
+        {
+            AddLine("status", UiText("Voice recorder is starting.", "语音录制正在启动。"));
+            return;
+        }
+
+        if (voiceStopping)
         {
             return;
         }
 
-        voiceRecordingStopping = true;
-        var path = activeVoiceRecordingPath;
+        if (!voiceRecording || voiceMediaCapture is null || voiceStorageFile is null)
+        {
+            if (send)
+            {
+                var message = UiText("Voice recording is empty.", "语音录制为空。");
+                AddLine("error", message);
+                ShowInfo(message, InfoBarSeverity.Warning);
+            }
+            return;
+        }
+
+        voiceStopping = true;
+        UpdateSendButtonContent();
+        var storageFile = voiceStorageFile;
+        var path = string.IsNullOrWhiteSpace(storageFile.Path)
+            ? activeVoiceRecordingPath
+            : storageFile.Path;
+        var target = voiceTargetAtRecordStart;
+        var capture = voiceMediaCapture;
         activeVoiceRecordingPath = "";
         voiceRecording = false;
+        voiceRecordingStartedAt = DateTimeOffset.MinValue;
+        voiceMediaCapture = null;
+        voiceStorageFile = null;
+        voiceTargetAtRecordStart = "";
 
         try
         {
-            if (voiceRecordingUsesMci)
-            {
-                try
-                {
-                    SendMciCommand($"stop {VoiceRecorderAlias}");
-                }
-                catch
-                {
-                    // 录音设备在极短点击或权限变化时可能已经停止；继续尝试关闭别名。
-                }
-                if (send)
-                {
-                    SendMciCommand($"save {VoiceRecorderAlias} \"{path}\"");
-                }
-                CloseVoiceRecorder();
-            }
-            else if (voiceMediaCapture is not null)
-            {
-                await voiceMediaCapture.StopRecordAsync();
-                voiceMediaCapture.Dispose();
-                voiceMediaCapture = null;
-                voiceStorageFile = null;
-            }
-            else
-            {
-                throw new InvalidOperationException("voice recorder is not active");
-            }
-
+            await capture.StopRecordAsync();
+            await WaitForVoiceFileReadyAsync(path);
             if (!send)
             {
                 DeleteFileIfExists(path);
                 return;
             }
 
-            if (!File.Exists(path) || new FileInfo(path).Length <= 0)
+            if (!File.Exists(path) || new FileInfo(path).Length <= 44)
             {
                 DeleteFileIfExists(path);
-                AddLine("error", UiText("Voice recording is empty.", "语音录制为空。"));
+                var message = UiText("Voice recording is empty.", "语音录制为空。");
+                AddLine("error", message);
+                ShowInfo(message, InfoBarSeverity.Warning);
                 return;
             }
 
@@ -876,45 +840,95 @@ public sealed partial class MainWindow : Window
             if (wav.DurationSeconds < MinVoiceRecordingSeconds)
             {
                 DeleteFileIfExists(path);
-                AddLine("error", UiText("Voice recording is too short.", "语音录制时间太短。"));
+                var message = UiText("Voice recording is too short.", "语音录制时间太短。");
+                AddLine("error", message);
+                ShowInfo(message, InfoBarSeverity.Warning);
                 return;
             }
 
-            var target = voiceTargetAtRecordStart;
             var ok = target.Length == 0
                 ? NativeMethods.chat_send_voice(path)
                 : NativeMethods.chat_send_voice_to(target, path);
             if (ok == 0)
             {
-                AddLine("error", UiText("Voice send failed.", "语音发送失败。"));
+                var message = UiText("Voice send failed.", "语音发送失败。");
+                AddLine("error", message);
+                ShowInfo(message, InfoBarSeverity.Error);
+            }
+            else
+            {
+                ShowInfo(UiText("Voice sent.", "语音已发送。"), InfoBarSeverity.Success);
             }
         }
         catch (Exception ex) when (ex is InvalidOperationException or IOException or InvalidDataException or COMException or UnauthorizedAccessException)
         {
-            CloseVoiceRecorder();
-            voiceMediaCapture?.Dispose();
-            voiceMediaCapture = null;
-            voiceStorageFile = null;
             DeleteFileIfExists(path);
             if (!isClosing)
             {
-                AddLine("error", UiText("Voice recording failed: ", "语音录制失败：") + ex.Message);
+                var message = UiText("Voice recording failed: ", "语音录制失败：") + ex.Message;
+                AddLine("error", message);
+                ShowInfo(message, InfoBarSeverity.Error);
             }
         }
         finally
         {
-            voiceRecordingStopping = false;
-            voiceTargetAtRecordStart = "";
-            stopVoiceAfterStart = false;
-            sendVoiceAfterStart = false;
-            ignoreNextVoiceCaptureLost = false;
-            voiceStartTask = null;
-            voiceStorageFile = null;
-            voiceRecordingUsesMci = false;
+            capture.Dispose();
+            voiceStopping = false;
             if (!isClosing)
             {
                 UpdateSendButtonContent();
             }
+        }
+    }
+
+    private static async System.Threading.Tasks.Task WaitForVoiceFileReadyAsync(string path)
+    {
+        // StopRecordAsync 返回后，某些设备仍会延迟 flush WAV data chunk。
+        // 这里等待文件从只有 header 的状态进入稳定状态，再交给发送和预览校验。
+        const long wavHeaderBytes = 44;
+        long previousLength = -1;
+        var stableChecks = 0;
+        for (var i = 0; i < 20; ++i)
+        {
+            if (File.Exists(path))
+            {
+                var length = new FileInfo(path).Length;
+                if (length > wavHeaderBytes && length == previousLength)
+                {
+                    ++stableChecks;
+                    if (stableChecks >= 2) return;
+                }
+                else
+                {
+                    stableChecks = 0;
+                }
+                previousLength = length;
+            }
+            await System.Threading.Tasks.Task.Delay(75);
+        }
+    }
+
+    private void CleanupVoiceRecordingState(bool deleteFile)
+    {
+        voiceRecording = false;
+        voiceStarting = false;
+        voiceStopping = false;
+        voiceRecordingStartedAt = DateTimeOffset.MinValue;
+        voiceTargetAtRecordStart = "";
+
+        voiceMediaCapture?.Dispose();
+        voiceMediaCapture = null;
+
+        if (deleteFile && !string.IsNullOrWhiteSpace(activeVoiceRecordingPath))
+        {
+            DeleteFileIfExists(activeVoiceRecordingPath);
+        }
+        activeVoiceRecordingPath = "";
+        voiceStorageFile = null;
+
+        if (!isClosing)
+        {
+            UpdateSendButtonContent();
         }
     }
 
@@ -924,7 +938,7 @@ public sealed partial class MainWindow : Window
         {
             throw new InvalidOperationException("room directory is not ready");
         }
-        return Path.Combine(activeRoomDir, "voice");
+        return Path.GetFullPath(Path.Combine(activeRoomDir, "voice"));
     }
 
     private string UniqueVoiceRecordingPath()
@@ -932,30 +946,6 @@ public sealed partial class MainWindow : Window
         return Path.Combine(
             VoiceRecordingDirectory(),
             $"voice_{DateTimeOffset.Now:yyyyMMdd_HHmmss_fff}_{Guid.NewGuid():N}.wav");
-    }
-
-    private const string VoiceRecorderAlias = "securechat_voice";
-
-    private static void SendMciCommand(string command)
-    {
-        var error = mciSendString(command, null, 0, IntPtr.Zero);
-        if (error == 0) return;
-
-        var text = new StringBuilder(256);
-        var message = mciGetErrorString(error, text, text.Capacity)
-            ? text.ToString()
-            : "unknown multimedia error";
-        throw new InvalidOperationException(message);
-    }
-
-    private static bool TryMciCommand(string command)
-    {
-        return mciSendString(command, null, 0, IntPtr.Zero) == 0;
-    }
-
-    private static void CloseVoiceRecorder()
-    {
-        _ = mciSendString($"close {VoiceRecorderAlias}", null, 0, IntPtr.Zero);
     }
 
     private static void DeleteFileIfExists(string path)
@@ -1126,6 +1116,17 @@ public sealed partial class MainWindow : Window
             TextWrapping = TextWrapping.Wrap
         });
 
+        var showInExplorerButton = new Button
+        {
+            Content = UiText("Show in Explorer", "在资源管理器中查看"),
+            HorizontalAlignment = HorizontalAlignment.Left
+        };
+        ToolTipService.SetToolTip(showInExplorerButton, UiText(
+            "Open Windows Explorer and select this local attachment file.",
+            "打开资源管理器并选中该本地附件文件。"));
+        showInExplorerButton.Click += (_, _) => ShowAttachmentInExplorer(info.Path);
+        stack.Children.Add(showInExplorerButton);
+
         if (info.Kind is "image" or "voice")
         {
             var previewSlot = new StackPanel { Spacing = 7 };
@@ -1158,6 +1159,30 @@ public sealed partial class MainWindow : Window
         }
 
         return stack;
+    }
+
+    private void ShowAttachmentInExplorer(string path)
+    {
+        // 只定位已经落到本地的附件缓存文件，不执行文件本身。
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+        {
+            ShowInfo(UiText("Attachment file is not available.", "附件文件不可用。"), InfoBarSeverity.Warning);
+            return;
+        }
+
+        try
+        {
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = "explorer.exe",
+                Arguments = $"/select,\"{Path.GetFullPath(path)}\"",
+                UseShellExecute = true
+            });
+        }
+        catch (Exception ex) when (ex is IOException or InvalidOperationException or System.ComponentModel.Win32Exception or UnauthorizedAccessException)
+        {
+            ShowInfo(UiText("Failed to open Explorer: ", "打开资源管理器失败：") + ex.Message, InfoBarSeverity.Error);
+        }
     }
 
     private bool TryCreateAttachmentPreview(AttachmentPreviewInfo info, out UIElement preview, out string error)
@@ -1304,14 +1329,14 @@ public sealed partial class MainWindow : Window
     private static IEnumerable<string> ParticipantTrustKeys(string participant)
     {
         var displayName = ParticipantDisplayName(participant);
-        if (!string.IsNullOrWhiteSpace(displayName)) yield return displayName.Trim();
-
         var stableKey = ParticipantTrustKey(participant);
-        if (!string.IsNullOrWhiteSpace(stableKey) &&
-            !string.Equals(stableKey, displayName, StringComparison.OrdinalIgnoreCase))
+        if (!string.IsNullOrWhiteSpace(stableKey))
         {
             yield return stableKey;
+            yield break;
         }
+
+        if (!string.IsNullOrWhiteSpace(displayName)) yield return displayName.Trim();
     }
 
     private static string ParticipantLabel(string displayName, string memberId)
@@ -1392,14 +1417,12 @@ public sealed partial class MainWindow : Window
         var shownName = normalizedName.Length == 0 ? normalizedId : normalizedName;
         var info = new VerifiedMemberInfo(shownName, normalizedFingerprint, subject.Trim());
         if (normalizedId.Length > 0) verifiedAttachmentMembers[normalizedId] = info;
-        if (normalizedName.Length > 0) verifiedAttachmentMembers[normalizedName] = info;
+        else if (normalizedName.Length > 0) verifiedAttachmentMembers[normalizedName] = info;
 
-        // Keep stable name plus id internally for PKI/fingerprint lookup, while
-        // RefreshParticipants displays only the member name.
-        pendingParticipants.Remove(normalizedName);
-        pendingParticipants.Remove(normalizedId);
+        // 成员通过 PKI 验证后，移除同一显示名、成员 id 或 requestId 绑定的 pending 卡片。
+        // 侧栏仍只展示 displayName，id 和 fingerprint 留给内部路由和复制操作使用。
+        RemovePendingParticipant(normalizedId);
         RemoveParticipant(normalizedId);
-        RemoveParticipant(normalizedName);
         var participant = ParticipantLabel(shownName, normalizedId);
         if (participant.Length > 0) participants.Add(participant);
         RefreshParticipants();
@@ -1617,17 +1640,12 @@ public sealed partial class MainWindow : Window
         var normalizedToken = token.Trim();
         if (string.Equals(normalizedParticipant, normalizedToken, StringComparison.OrdinalIgnoreCase)) return true;
 
-        var displayName = ParticipantDisplayName(normalizedParticipant);
-        var tokenDisplayName = ParticipantDisplayName(normalizedToken);
-        if (!string.IsNullOrWhiteSpace(displayName) &&
-            string.Equals(displayName, normalizedToken, StringComparison.OrdinalIgnoreCase)) return true;
-        if (!string.IsNullOrWhiteSpace(displayName) &&
-            !string.IsNullOrWhiteSpace(tokenDisplayName) &&
-            string.Equals(displayName, tokenDisplayName, StringComparison.OrdinalIgnoreCase)) return true;
+        var tokenStableKey = ParticipantTrustKey(normalizedToken);
 
         if (pendingJoinRequestIdByParticipant.TryGetValue(normalizedParticipant, out var requestId))
         {
             return string.Equals(requestId, normalizedToken, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(requestId, tokenStableKey, StringComparison.OrdinalIgnoreCase) ||
                 requestId.StartsWith(normalizedToken, StringComparison.OrdinalIgnoreCase);
         }
         return false;
@@ -1813,6 +1831,8 @@ public sealed partial class MainWindow : Window
         uint byteRate = 0;
         ushort bitsPerSample = 0;
         uint dataBytes = 0;
+        long formatChunkStart = 0;
+        uint formatChunkSize = 0;
 
         while (stream.Position + 8 <= stream.Length)
         {
@@ -1832,6 +1852,8 @@ public sealed partial class MainWindow : Window
                 _ = reader.ReadUInt16();
                 bitsPerSample = reader.ReadUInt16();
                 hasFormat = true;
+                formatChunkStart = chunkStart;
+                formatChunkSize = chunkSize;
             }
             else if (chunkId == "data")
             {
@@ -1845,9 +1867,72 @@ public sealed partial class MainWindow : Window
         }
 
         if (!hasFormat || !hasData) throw new InvalidDataException("WAV fmt/data chunk missing");
-        if (audioFormat != 1) throw new InvalidDataException("only PCM WAV preview is allowed");
+        if (!IsSupportedWavAudioFormat(audioFormat, reader, stream, formatChunkStart, formatChunkSize))
+        {
+            throw new InvalidDataException("unsupported WAV audio format");
+        }
         if (byteRate == 0) throw new InvalidDataException("invalid WAV byte rate");
         return new WavPreviewInfo(channels, sampleRate, bitsPerSample, dataBytes / (double)byteRate);
+    }
+
+    private static bool IsSupportedWavAudioFormat(
+        ushort audioFormat,
+        BinaryReader reader,
+        Stream stream,
+        long fmtChunkStart,
+        uint fmtChunkSize)
+    {
+        // WinRT MediaCapture 可能输出 PCM、IEEE float 或 WAVE_FORMAT_EXTENSIBLE。
+        // 仍然只接受带 RIFF/WAVE/fmt/data 结构的 WAV，不把任意音频格式直接交给预览控件。
+        const ushort waveFormatPcm = 0x0001;
+        const ushort waveFormatIeeeFloat = 0x0003;
+        const ushort waveFormatExtensible = 0xFFFE;
+
+        if (audioFormat is waveFormatPcm or waveFormatIeeeFloat)
+        {
+            return true;
+        }
+
+        if (audioFormat != waveFormatExtensible || fmtChunkSize < 40)
+        {
+            return false;
+        }
+
+        var savedPosition = stream.Position;
+        try
+        {
+            stream.Position = fmtChunkStart + 24;
+            var subFormat = reader.ReadBytes(16);
+            return IsWaveExtensibleSubFormat(subFormat, waveFormatPcm) ||
+                IsWaveExtensibleSubFormat(subFormat, waveFormatIeeeFloat);
+        }
+        finally
+        {
+            stream.Position = savedPosition;
+        }
+    }
+
+    private static bool IsWaveExtensibleSubFormat(byte[] subFormat, ushort tag)
+    {
+        if (subFormat.Length != 16) return false;
+        var expectedTagLo = (byte)(tag & 0xFF);
+        var expectedTagHi = (byte)(tag >> 8);
+        return subFormat[0] == expectedTagLo &&
+            subFormat[1] == expectedTagHi &&
+            subFormat[2] == 0x00 &&
+            subFormat[3] == 0x00 &&
+            subFormat[4] == 0x00 &&
+            subFormat[5] == 0x00 &&
+            subFormat[6] == 0x10 &&
+            subFormat[7] == 0x00 &&
+            subFormat[8] == 0x80 &&
+            subFormat[9] == 0x00 &&
+            subFormat[10] == 0x00 &&
+            subFormat[11] == 0xAA &&
+            subFormat[12] == 0x00 &&
+            subFormat[13] == 0x38 &&
+            subFormat[14] == 0x9B &&
+            subFormat[15] == 0x71;
     }
 
     private static string ReadFourCc(BinaryReader reader)
@@ -2242,6 +2327,7 @@ public sealed partial class MainWindow : Window
         SendModeBox.IsEnabled = isConnected;
         PrivateTargetBox.IsEnabled = isConnected;
         SendButton.IsEnabled = isConnected;
+        UpdateSendButtonContent();
         if (mode == SessionMode.None)
         {
             roomName = "-";
@@ -2287,6 +2373,15 @@ public sealed partial class MainWindow : Window
         if (kind != "status") return;
 
         RefreshRoomPanel();
+
+        if (message.StartsWith("Dropped encrypted relay for epoch ", StringComparison.OrdinalIgnoreCase) ||
+            message.StartsWith("Dropped encrypted relay that cannot be opened", StringComparison.OrdinalIgnoreCase) ||
+            message.StartsWith("Encrypted relay received before room group key", StringComparison.OrdinalIgnoreCase) ||
+            message.StartsWith("Room group key is not ready", StringComparison.OrdinalIgnoreCase))
+        {
+            ShowInfo(message, InfoBarSeverity.Warning);
+            return;
+        }
 
         if (IsTerminalSessionMessage(message))
         {
@@ -2341,6 +2436,7 @@ public sealed partial class MainWindow : Window
             {
                 activeRoomDir = LatestRoomDir(shownRoom, JoinUserBox.Text.Trim(), "client");
             }
+            ClearPendingParticipants();
             SetSessionMode(SessionMode.Join);
             MarkLocalIdentityIfPossible();
             ReloadMessageHistory();
@@ -2485,6 +2581,12 @@ public sealed partial class MainWindow : Window
         AddStatusName(message, "Player joined: ", removePending: true);
         RemoveStatusName(message, "Client left: ");
         RemoveStatusName(message, "Player left: ");
+        if (message.Equals("Host disconnected", StringComparison.OrdinalIgnoreCase))
+        {
+            RemoveParticipant("host");
+            PruneAttachmentMemberStates();
+            RefreshParticipants();
+        }
     }
 
     private void AddStatusName(string message, string prefix, bool removePending = false)
@@ -2530,6 +2632,18 @@ public sealed partial class MainWindow : Window
         RefreshParticipants();
     }
 
+    private void ClearPendingParticipants()
+    {
+        foreach (var pending in pendingParticipants.ToList())
+        {
+            participants.Remove(pending);
+        }
+        pendingParticipants.Clear();
+        pendingJoinNamesByRequestId.Clear();
+        pendingJoinRequestIdByParticipant.Clear();
+        RefreshParticipants();
+    }
+
     private void ClearAttachmentMemberStates()
     {
         blockedAttachmentMembers.Clear();
@@ -2563,6 +2677,7 @@ public sealed partial class MainWindow : Window
             var state = MemberStateForParticipant(name);
             var verifiedInfo = VerifiedInfoForParticipant(name);
             var isPending = state == AttachmentMemberState.Pending;
+            var pendingIsHostActionable = isPending && sessionMode == SessionMode.Host;
             var row = new Grid { ColumnSpacing = 8 };
             row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
 
@@ -2578,15 +2693,18 @@ public sealed partial class MainWindow : Window
                     IsTextSelectionEnabled = false
                 }
             };
-            ToolTipService.SetToolTip(identityBox, isPending
+            ToolTipService.SetToolTip(identityBox, pendingIsHostActionable
                 ? UiText("Click to approve; right-click to reject", "单击允许加入；右键拒绝加入")
+                : isPending
+                ? UiText("Waiting for Host approval", "等待群主允许加入")
                 : verifiedInfo is null
                 ? UiText("Right-click to block/unblock attachment preview", "右键阻止/解除阻止附件预览")
                 : UiText("Click copies fingerprint prefix; right-click blocks/unblocks previews", "单击复制指纹前缀；右键阻止/解除阻止预览"));
             identityBox.Tapped += (_, args) =>
             {
                 args.Handled = true;
-                if (isPending) ApprovePendingParticipant(name);
+                if (pendingIsHostActionable) ApprovePendingParticipant(name);
+                else if (isPending) return;
                 else CopyParticipantFingerprint(name);
             };
             row.Children.Add(identityBox);
@@ -2602,13 +2720,29 @@ public sealed partial class MainWindow : Window
             };
             participantCard.Tapped += (_, args) =>
             {
-                if (!isPending) return;
+                if (!pendingIsHostActionable) return;
                 args.Handled = true;
                 ApprovePendingParticipant(name);
             };
-            participantCard.RightTapped += (_, _) => ToggleBlockedParticipant(name);
-            ToolTipService.SetToolTip(participantCard, isPending
+            participantCard.RightTapped += (_, args) =>
+            {
+                if (pendingIsHostActionable)
+                {
+                    args.Handled = true;
+                    RejectPendingParticipant(name);
+                    return;
+                }
+                if (isPending)
+                {
+                    args.Handled = true;
+                    return;
+                }
+                ToggleBlockedParticipant(name);
+            };
+            ToolTipService.SetToolTip(participantCard, pendingIsHostActionable
                 ? UiText("Click to approve; right-click to reject", "单击允许加入；右键拒绝加入")
+                : isPending
+                ? UiText("Waiting for Host approval", "等待群主允许加入")
                 : state == AttachmentMemberState.Blocked
                 ? UiText("Right-click to allow attachment previews", "右键恢复附件预览")
                 : UiText("Right-click to block attachment previews", "右键阻止附件预览"));
@@ -3474,14 +3608,30 @@ public sealed partial class MainWindow : Window
     private void UpdateSendButtonContent()
     {
         if (SendButton is null) return;
-        if (voiceRecording)
+        var isConnected = sessionMode is SessionMode.Host or SessionMode.Join;
+        // 启动和结束录音期间禁用按钮，避免同一次鼠标交互被解释成 Start 后立刻 End。
+        SendButton.IsEnabled = isConnected && !voiceStarting && !voiceStopping;
+        if (SelectedSendMode() != "Voice")
         {
-            SendButton.Content = UiText("Release", "松开");
+            SendButton.Content = UiText("Send", "发送");
             return;
         }
-        SendButton.Content = SelectedSendMode() == "Voice"
-            ? UiText("Hold", "按住")
-            : UiText("Send", "发送");
+        if (voiceStarting)
+        {
+            SendButton.Content = UiText("Starting", "启动中");
+            return;
+        }
+        if (voiceStopping)
+        {
+            SendButton.Content = UiText("Ending", "结束中");
+            return;
+        }
+        if (voiceRecording)
+        {
+            SendButton.Content = UiText("End", "结束");
+            return;
+        }
+        SendButton.Content = UiText("Start", "开始");
     }
 
     private static void RestoreComboSelection(ComboBox? comboBox, string tag)

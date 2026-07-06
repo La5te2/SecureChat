@@ -447,6 +447,7 @@ json encryptMessageWithGroupKey(
     const std::string& senderName,
     const std::string& senderKind,
     const std::string& targetId,
+    std::uint64_t epoch,
     const std::vector<unsigned char>& groupKey) {
     // senderName、senderKind 和 targetId 不以明文发出。
     // Server 只看到 room token 和发送者连接 id；加密 Message 载荷携带应用身份和私发目标。
@@ -457,6 +458,7 @@ json encryptMessageWithGroupKey(
         {"version", 3},
         {"roomId", roomId},
         {"senderId", senderId},
+        {"epoch", epoch},
         {"alg", "AES-256-GCM"},
         {"kdf", "GKA-Contrib-v3-HKDF-SHA256"}
     });
